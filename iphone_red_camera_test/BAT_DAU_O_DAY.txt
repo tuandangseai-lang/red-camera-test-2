@@ -1,0 +1,12 @@
+BAT DAU O DAY - IPHONE 15 KHONG CAN MAY MAC
+==========================================
+
+Ban chi can lam 2 viec:
+
+1. Dua toan bo thu muc nay len GitHub va bam nut chay de lay file IPA.
+2. Tren Windows, dung Sideloadly cai file IPA vao iPhone 15.
+
+Hay mo file HUONG_DAN_WINDOWS.md de xem tung buoc bang tieng Viet.
+
+Khong dua mat khau Apple ID cho nguoi khac. Neu ngai dung tai khoan chinh,
+hay tao mot Apple ID phu chi de cai app thu nghiem.
