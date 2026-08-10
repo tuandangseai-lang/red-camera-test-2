@@ -1,0 +1,52 @@
+name: Tao file IPA cho iPhone 15
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cai XcodeGen
+        run: brew install xcodegen
+
+      - name: Tao project Xcode
+        working-directory: iphone_red_camera_test/ios/RedCameraTest
+        run: xcodegen generate
+
+      - name: Bien dich app
+        working-directory: iphone_red_camera_test/ios/RedCameraTest
+        run: |
+          xcodebuild \
+            -project RedCameraTest.xcodeproj \
+            -scheme RedCameraTest \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Dong goi IPA
+        run: |
+          APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/RedCameraTest.app"
+          test -d "$APP_PATH"
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          ditto -c -k --keepParent Payload "$GITHUB_WORKSPACE/RedCameraTest-unsigned.ipa"
+
+      - name: Tai IPA
+        uses: actions/upload-artifact@v7
+        with:
+          name: RedCameraTest-unsigned-ipa
+          path: RedCameraTest-unsigned.ipa
