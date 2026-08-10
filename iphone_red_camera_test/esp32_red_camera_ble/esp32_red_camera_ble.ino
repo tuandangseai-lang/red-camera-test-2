@@ -91,7 +91,8 @@ void setup() {
 
   BLECharacteristic *statusCharacteristic = service->createCharacteristic(
       STATUS_CHARACTERISTIC_UUID,
-      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE |
+          BLECharacteristic::PROPERTY_WRITE_NR);
   statusCharacteristic->setValue("WAITING");
   statusCharacteristic->setCallbacks(new PhoneStatusCallbacks());
 

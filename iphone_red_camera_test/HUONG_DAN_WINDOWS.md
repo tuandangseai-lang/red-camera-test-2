@@ -69,18 +69,19 @@ Nếu app chưa mở được:
 2. Bật chế độ này, khởi động lại iPhone và xác nhận bật.
 3. Vào **Cài đặt → Cài đặt chung → VPN & Quản lý thiết bị**.
 4. Chọn Apple ID dùng để ký app → bấm **Tin cậy**.
-5. Mở app **Red Camera Test**.
+5. Mở app **Rocket Tracker**.
 6. Cho phép Camera, Microphone, Bluetooth và quyền thêm video vào Ảnh.
 
 ## Phần C — Thử với ESP32
 
 1. Nạp file `esp32_red_camera_ble/esp32_red_camera_ble.ino` cho ESP32 trên Windows.
 2. Cấp nguồn ESP32.
-3. Mở app **Red Camera Test** trên iPhone 15; không ghép đôi ESP32 trong Cài đặt Bluetooth.
+3. Mở app **Rocket Tracker** trên iPhone 15; không ghép đôi ESP32 trong Cài đặt Bluetooth.
 4. App tự tìm thiết bị `RocketTracker-Test`.
-5. Khi màn hình báo đang chờ màu đỏ, đưa một tấm đỏ tươi chiếm khoảng 5–10% khung hình.
-6. App bắt đầu quay; sau 5 giây sẽ zoom 1× → 2× → 1×.
-7. Bấm **Dừng và lưu video**.
+5. Quét chính chiếc tên lửa sẽ phóng theo ba lượt: **gần 5 giây → xa 5 giây → xung quanh 8 giây**. Tên lửa có thể là bất kỳ màu nào.
+6. Trước khi phóng, căn tên lửa vào khung và bấm **Khóa, bám và bắt đầu quay**; hoặc nhấn nút `GPIO 25` để ESP32 gửi `ARM`.
+7. App khóa mục tiêu và bắt đầu quay; sau 5 giây sẽ zoom 1× → 2× → 1×.
+8. Bấm **Dừng và lưu video**. Serial Monitor sẽ thấy dữ liệu tâm mục tiêu dạng `T,xxx,yyy,cc`.
 
 ## App hết hạn sau 7 ngày thì sao?
 

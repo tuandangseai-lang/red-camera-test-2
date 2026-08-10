@@ -16,8 +16,21 @@ targets:
       - path: RedCameraTest
     info:
       path: RedCameraTest/Info.plist
+      properties:
+        CFBundleDisplayName: Rocket Tracker
+        LSRequiresIPhoneOS: true
+        NSBluetoothAlwaysUsageDescription: Connect to the ESP32 tracker over Bluetooth.
+        NSCameraUsageDescription: Learn, track, and record your water rocket.
+        NSMicrophoneUsageDescription: Record audio together with the test video.
+        NSPhotoLibraryAddUsageDescription: Save recorded test videos to Photos.
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities:
+          - arm64
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: vn.rockettracker.RedCameraTest
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"

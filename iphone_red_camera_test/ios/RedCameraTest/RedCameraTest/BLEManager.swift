@@ -27,7 +27,7 @@ final class BLEManager: NSObject, ObservableObject {
               let data = message.data(using: .utf8) else { return }
 
         let writeType: CBCharacteristicWriteType =
-            characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
+            characteristic.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
         peripheral.writeValue(data, for: characteristic, type: writeType)
     }
 
@@ -148,7 +148,7 @@ extension BLEManager: CBPeripheralDelegate {
               let message = String(data: data, encoding: .utf8) else { return }
 
         if message.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "ARM" {
-            connectionText = "ESP32 đã bật nhận diện màu đỏ"
+            connectionText = "ESP32 đã ra lệnh khóa và bám tên lửa"
             onArm?()
         }
     }

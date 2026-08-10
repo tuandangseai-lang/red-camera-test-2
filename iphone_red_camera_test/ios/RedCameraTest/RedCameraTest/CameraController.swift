@@ -1,36 +1,112 @@
 import AVFoundation
+import CoreImage
+import ImageIO
 import Photos
+import QuartzCore
 import SwiftUI
+import Vision
+
+enum RocketLearningStage: Equatable {
+    case idle
+    case scanningNear
+    case waitingFar
+    case scanningFar
+    case waitingAround
+    case scanningAround
+    case ready
+    case verifying
+    case tracking
+    case lost
+
+    var isScanning: Bool {
+        switch self {
+        case .scanningNear, .scanningFar, .scanningAround:
+            return true
+        default:
+            return false
+        }
+    }
+
+    var showsGuide: Bool {
+        switch self {
+        case .tracking:
+            return false
+        default:
+            return true
+        }
+    }
+}
 
 final class CameraController: NSObject, ObservableObject {
     let session = AVCaptureSession()
 
     @Published private(set) var statusText = "Đang chuẩn bị camera..."
-    @Published private(set) var redPercent = 0.0
     @Published private(set) var zoomText = "1.0×"
     @Published private(set) var isReady = false
-    @Published private(set) var isArmed = false
     @Published private(set) var isRecording = false
-    @Published private(set) var canRetry = false
+    @Published private(set) var stage: RocketLearningStage = .idle
+    @Published private(set) var learnedSamples = 0
+    @Published private(set) var scanProgress = 0.0
+    @Published private(set) var targetRect: CGRect?
+    @Published private(set) var trackingConfidence = 0.0
+    @Published private(set) var matchText = "Chưa có mẫu"
+    @Published private(set) var frameAspectRatio: CGFloat = 9.0 / 16.0
+    @Published var scanBoxScale = 0.42
 
     var onEvent: ((String) -> Void)?
+
+    var scanRect: CGRect {
+        let width = CGFloat(max(0.12, min(scanBoxScale, 0.62)))
+        let height = min(0.86, max(0.24, width * 1.65))
+        return CGRect(
+            x: (1.0 - width) / 2.0,
+            y: (1.0 - height) / 2.0,
+            width: width,
+            height: height
+        )
+    }
+
+    private enum ScanKind: Equatable {
+        case near
+        case far
+        case around
+    }
+
+    private enum ProcessingMode {
+        case idle
+        case scanning(ScanKind)
+        case verifying
+        case tracking
+        case lost
+    }
 
     private let sessionQueue = DispatchQueue(label: "vn.rockettracker.camera.session")
     private let videoQueue = DispatchQueue(label: "vn.rockettracker.camera.frames")
     private let movieOutput = AVCaptureMovieFileOutput()
     private let videoDataOutput = AVCaptureVideoDataOutput()
+    private let ciContext = CIContext(options: [.cacheIntermediates: false])
 
     private var videoDevice: AVCaptureDevice?
     private var didRequestStart = false
     private var configured = false
     private var pendingArm = false
-    private var armedForDetection = false
-    private var recordingActive = false
-    private var alreadyTriggered = false
-    private var analyzedFrameNumber = 0
-    private var consecutiveRedFrames = 0
-    private var outputURL: URL?
 
+    // Các biến dưới đây chỉ được đọc/ghi trên videoQueue.
+    private var processingMode: ProcessingMode = .idle
+    private var processingRect = CGRect(x: 0.29, y: 0.15, width: 0.42, height: 0.70)
+    private var featureSamples: [VNFeaturePrintObservation] = []
+    private var stageStartingSampleCount = 0
+    private var scanStartedAt = 0.0
+    private var scanDuration = 5.0
+    private var frameCounter = 0
+    private var featureFrameCounter = 0
+    private var trackingFrameCounter = 0
+    private var lowConfidenceFrames = 0
+    private var trackingObservation: VNDetectedObjectObservation?
+    private var sequenceHandler = VNSequenceRequestHandler()
+    private var shouldRecordAfterVerification = true
+
+    private var scanFinishWorkItem: DispatchWorkItem?
     private var zoomInWorkItem: DispatchWorkItem?
     private var zoomOutWorkItem: DispatchWorkItem?
     private var zoomFinishedWorkItem: DispatchWorkItem?
@@ -59,6 +135,7 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    // ESP32 gửi ARM sẽ dùng mẫu đã học để khóa và bắt đầu quay.
     func arm() {
         guard !isRecording else { return }
         guard isReady else {
@@ -66,36 +143,187 @@ final class CameraController: NSObject, ObservableObject {
             statusText = "Đã nhận ARM; đang chờ camera sẵn sàng..."
             return
         }
+        guard stage == .ready || stage == .lost else {
+            statusText = "Hãy hoàn thành Quét gần, Quét xa và Quét xung quanh trước"
+            return
+        }
+        startTrackingAndRecording()
+    }
 
-        pendingArm = false
+    func startNearScan() {
+        guard isReady, !isRecording else { return }
+        startScan(kind: .near, duration: 5.0, resetProfile: true)
+    }
+
+    func startFarScan() {
+        guard stage == .waitingFar, !isRecording else { return }
+        startScan(kind: .far, duration: 5.0, resetProfile: false)
+    }
+
+    func startAroundScan() {
+        guard (stage == .waitingAround || stage == .ready), !isRecording else { return }
+        startScan(kind: .around, duration: 8.0, resetProfile: false)
+    }
+
+    func resetProfile() {
+        guard !isRecording else { return }
+        scanFinishWorkItem?.cancel()
+        videoQueue.async { [weak self] in
+            guard let self else { return }
+            self.processingMode = .idle
+            self.featureSamples.removeAll()
+            self.trackingObservation = nil
+            self.sequenceHandler = VNSequenceRequestHandler()
+        }
+        stage = .idle
+        learnedSamples = 0
+        scanProgress = 0
+        targetRect = nil
+        trackingConfidence = 0
+        matchText = "Chưa có mẫu"
+        statusText = "Đặt tên lửa vào khung, chỉnh kích thước rồi bấm Quét gần"
+        onEvent?("PROFILE_RESET")
+    }
+
+    func startTrackingAndRecording() {
+        guard isReady, !isRecording, (stage == .ready || stage == .lost) else { return }
+        let rect = scanRect
+        let recordAfterLock = !isRecording
+        stage = .verifying
+        targetRect = rect
+        trackingConfidence = 0
+        matchText = "Đang so với mẫu đã học..."
+        statusText = "Giữ tên lửa trong khung để xác minh và khóa mục tiêu"
 
         videoQueue.async { [weak self] in
             guard let self else { return }
-            self.armedForDetection = true
-            self.alreadyTriggered = false
-            self.consecutiveRedFrames = 0
-            self.analyzedFrameNumber = 0
+            self.processingRect = rect
+            self.shouldRecordAfterVerification = recordAfterLock
+            self.processingMode = .verifying
         }
-
-        isArmed = true
-        canRetry = false
-        redPercent = 0
-        statusText = "Đang chờ thấy vật màu đỏ..."
-        onEvent?("ARMED")
     }
 
-    func retryTest() {
-        guard !isRecording else { return }
-        arm()
+    func reacquireTarget() {
+        guard stage == .lost else { return }
+        let rect = scanRect
+        stage = .verifying
+        targetRect = rect
+        matchText = "Đang bắt lại mục tiêu..."
+        statusText = "Đưa tên lửa vào khung để bắt lại"
+        videoQueue.async { [weak self] in
+            guard let self else { return }
+            self.processingRect = rect
+            self.shouldRecordAfterVerification = false
+            self.processingMode = .verifying
+        }
     }
 
     func stopRecording() {
         cancelZoomSequence()
+        videoQueue.async { [weak self] in
+            self?.processingMode = .idle
+            self?.trackingObservation = nil
+        }
+        targetRect = nil
         sessionQueue.async { [weak self] in
             guard let self else { return }
             if self.movieOutput.isRecording {
                 self.movieOutput.stopRecording()
             }
+        }
+    }
+
+    private func startScan(kind: ScanKind, duration: Double, resetProfile: Bool) {
+        scanFinishWorkItem?.cancel()
+        let rect = scanRect
+
+        switch kind {
+        case .near:
+            stage = .scanningNear
+            statusText = "Quét gần: giữ tên lửa đầy khung và xoay nhẹ"
+        case .far:
+            stage = .scanningFar
+            statusText = "Quét xa: lùi ra, thu nhỏ khung cho vừa tên lửa"
+        case .around:
+            stage = .scanningAround
+            statusText = "Quét xung quanh: đổi góc hoặc xoay tên lửa chậm"
+        }
+
+        scanProgress = 0
+        targetRect = rect
+        matchText = "Đang lấy mẫu hình ảnh..."
+
+        videoQueue.async { [weak self] in
+            guard let self else { return }
+            if resetProfile {
+                self.featureSamples.removeAll()
+                self.sequenceHandler = VNSequenceRequestHandler()
+                self.trackingObservation = nil
+            }
+            self.processingRect = rect
+            self.stageStartingSampleCount = self.featureSamples.count
+            self.scanStartedAt = CACurrentMediaTime()
+            self.scanDuration = duration
+            self.featureFrameCounter = 0
+            self.processingMode = .scanning(kind)
+        }
+
+        let finish = DispatchWorkItem { [weak self] in
+            self?.finishScan(kind: kind)
+        }
+        scanFinishWorkItem = finish
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: finish)
+        onEvent?("SCAN_\(scanName(kind))_STARTED")
+    }
+
+    private func finishScan(kind: ScanKind) {
+        videoQueue.async { [weak self] in
+            guard let self else { return }
+            let newSampleCount = self.featureSamples.count - self.stageStartingSampleCount
+            let totalSampleCount = self.featureSamples.count
+            self.processingMode = .idle
+            DispatchQueue.main.async {
+                self.scanProgress = 1
+                self.learnedSamples = totalSampleCount
+
+                guard newSampleCount >= 3 else {
+                    self.matchText = "Chưa lấy đủ mẫu"
+                    switch kind {
+                    case .near:
+                        self.stage = .idle
+                        self.statusText = "Không thấy đủ hình trong khung; hãy Quét gần lại"
+                    case .far:
+                        self.stage = .waitingFar
+                        self.statusText = "Chưa đủ mẫu xa; hãy chỉnh khung nhỏ hơn và thử lại"
+                    case .around:
+                        self.stage = .waitingAround
+                        self.statusText = "Chưa đủ góc nhìn; hãy quét xung quanh lại"
+                    }
+                    return
+                }
+
+                self.matchText = "Đã lưu \(totalSampleCount) mẫu"
+                switch kind {
+                case .near:
+                    self.stage = .waitingFar
+                    self.statusText = "Xong quét gần. Lùi ra xa, chỉnh khung rồi bấm Quét xa"
+                case .far:
+                    self.stage = .waitingAround
+                    self.statusText = "Xong quét xa. Đổi nhiều góc rồi bấm Quét xung quanh"
+                case .around:
+                    self.stage = .ready
+                    self.statusText = "Đã học xong. Đưa tên lửa vào khung rồi bấm Khóa và bám"
+                }
+                self.onEvent?("SCAN_\(self.scanName(kind))_DONE")
+            }
+        }
+    }
+
+    private func scanName(_ kind: ScanKind) -> String {
+        switch kind {
+        case .near: return "NEAR"
+        case .far: return "FAR"
+        case .around: return "AROUND"
         }
     }
 
@@ -157,30 +385,204 @@ final class CameraController: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.isReady = true
+            self.statusText = "Đặt tên lửa vào khung, chỉnh kích thước rồi bấm Quét gần"
             if self.pendingArm {
-                self.arm()
-            } else {
-                self.statusText = "Camera sẵn sàng; đang chờ lệnh ARM từ ESP32"
+                self.pendingArm = false
+                self.statusText = "Đã nhận ARM nhưng cần quét tên lửa trước"
             }
+        }
+    }
+
+    private func featurePrint(
+        from pixelBuffer: CVPixelBuffer,
+        normalizedTopLeftRect: CGRect
+    ) -> VNFeaturePrintObservation? {
+        let imageWidth = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let imageHeight = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+        guard imageWidth > 0, imageHeight > 0 else { return nil }
+
+        let normalized = normalizedTopLeftRect.intersection(
+            CGRect(x: 0, y: 0, width: 1, height: 1)
+        )
+        guard normalized.width > 0.02, normalized.height > 0.02 else { return nil }
+
+        // CIImage dùng gốc tọa độ ở góc dưới trái.
+        let cropRect = CGRect(
+            x: normalized.minX * imageWidth,
+            y: (1.0 - normalized.maxY) * imageHeight,
+            width: normalized.width * imageWidth,
+            height: normalized.height * imageHeight
+        ).integral
+
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let cgImage = ciContext.createCGImage(image.cropped(to: cropRect), from: cropRect) else {
+            return nil
+        }
+
+        let request = VNGenerateImageFeaturePrintRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:])
+        do {
+            try handler.perform([request])
+            return request.results?.first
+        } catch {
+            return nil
+        }
+    }
+
+    private func minimumDistance(to candidate: VNFeaturePrintObservation) -> Float? {
+        var best: Float?
+        for sample in featureSamples {
+            var distance: Float = 0
+            do {
+                try candidate.computeDistance(&distance, to: sample)
+                if best == nil || distance < best! { best = distance }
+            } catch { }
+        }
+        return best
+    }
+
+    private func verifyAndLock(pixelBuffer: CVPixelBuffer) {
+        guard !featureSamples.isEmpty,
+              let candidate = featurePrint(from: pixelBuffer, normalizedTopLeftRect: processingRect),
+              let distance = minimumDistance(to: candidate) else {
+            publishVerificationFailure(message: "Chưa đọc được hình trong khung")
+            return
+        }
+
+        // Khoảng cách feature print càng nhỏ thì ảnh càng giống mẫu đã quét.
+        let threshold: Float = 35.0
+        let score = max(0.0, min(1.0, 1.0 - Double(distance / threshold)))
+        guard distance <= threshold else {
+            publishVerificationFailure(
+                message: String(format: "Vật trong khung chưa giống mẫu (%.1f)", distance)
+            )
+            return
+        }
+
+        let visionRect = CGRect(
+            x: processingRect.minX,
+            y: 1.0 - processingRect.maxY,
+            width: processingRect.width,
+            height: processingRect.height
+        )
+        trackingObservation = VNDetectedObjectObservation(boundingBox: visionRect)
+        sequenceHandler = VNSequenceRequestHandler()
+        trackingFrameCounter = 0
+        lowConfidenceFrames = 0
+        processingMode = .tracking
+
+        let shouldStartRecording = shouldRecordAfterVerification
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.stage = .tracking
+            self.targetRect = self.processingRect
+            self.trackingConfidence = score
+            self.matchText = String(format: "Khớp mẫu %.0f%%", score * 100)
+            self.statusText = "Đã khóa đúng tên lửa — đang bám mục tiêu"
+            self.onEvent?("TARGET_LOCKED")
+            if shouldStartRecording {
+                self.beginRecording()
+            }
+        }
+    }
+
+    private func publishVerificationFailure(message: String) {
+        processingMode = .idle
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.stage = self.isRecording ? .lost : .ready
+            self.matchText = message
+            self.statusText = "Chưa khóa được. Căn tên lửa vừa khung rồi thử lại"
+        }
+    }
+
+    private func track(pixelBuffer: CVPixelBuffer) {
+        guard let observation = trackingObservation else {
+            markTargetLost()
+            return
+        }
+
+        let request = VNTrackObjectRequest(detectedObjectObservation: observation)
+        request.trackingLevel = .fast
+
+        do {
+            try sequenceHandler.perform([request], on: pixelBuffer, orientation: .up)
+            guard let result = request.results?.first as? VNDetectedObjectObservation else {
+                markTargetLost()
+                return
+            }
+
+            trackingObservation = result
+            trackingFrameCounter += 1
+
+            if result.confidence < 0.12 {
+                lowConfidenceFrames += 1
+            } else {
+                lowConfidenceFrames = 0
+            }
+            if lowConfidenceFrames >= 4 {
+                markTargetLost()
+                return
+            }
+
+            let topLeftRect = CGRect(
+                x: result.boundingBox.minX,
+                y: 1.0 - result.boundingBox.maxY,
+                width: result.boundingBox.width,
+                height: result.boundingBox.height
+            )
+
+            var appearanceText: String?
+            if trackingFrameCounter % 15 == 0,
+               let candidate = featurePrint(from: pixelBuffer, normalizedTopLeftRect: topLeftRect),
+               let distance = minimumDistance(to: candidate) {
+                appearanceText = String(format: "Đang bám • sai khác %.1f", distance)
+            }
+
+            // Gửi tâm mục tiêu về ESP32 khoảng 6 lần/giây để điều khiển hai servo.
+            // Tọa độ 0...999: x tăng từ trái sang phải, y tăng từ trên xuống dưới.
+            let telemetry: String? = trackingFrameCounter % 5 == 0
+                ? String(
+                    format: "T,%03d,%03d,%02d",
+                    Int(max(0, min(999, topLeftRect.midX * 999))),
+                    Int(max(0, min(999, topLeftRect.midY * 999))),
+                    Int(max(0, min(99, Double(result.confidence) * 99)))
+                )
+                : nil
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.targetRect = topLeftRect
+                self.trackingConfidence = Double(result.confidence)
+                if let appearanceText { self.matchText = appearanceText }
+                if let telemetry { self.onEvent?(telemetry) }
+            }
+        } catch {
+            markTargetLost()
+        }
+    }
+
+    private func markTargetLost() {
+        processingMode = .lost
+        trackingObservation = nil
+        sequenceHandler = VNSequenceRequestHandler()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.stage = .lost
+            self.targetRect = nil
+            self.trackingConfidence = 0
+            self.matchText = "Đã mất mục tiêu"
+            self.statusText = "Đưa tên lửa vào khung rồi bấm Bắt lại"
+            self.onEvent?("TARGET_LOST")
         }
     }
 
     private func beginRecording() {
         guard isReady, !isRecording else { return }
 
-        isArmed = false
-        canRetry = false
-        statusText = "Đã thấy màu đỏ — đang bắt đầu quay..."
-        onEvent?("RED_DETECTED")
-
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rocket-test-\(UUID().uuidString).mov")
-        outputURL = url
-
-        videoQueue.async { [weak self] in
-            self?.recordingActive = true
-            self?.armedForDetection = false
-        }
+            .appendingPathComponent("rocket-track-\(UUID().uuidString).mov")
+        statusText = "Đã khóa tên lửa — đang bắt đầu quay..."
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -197,14 +599,12 @@ final class CameraController: NSObject, ObservableObject {
             self.onEvent?("ZOOM_IN")
             self.rampZoom(to: 2.0, rate: 0.4)
         }
-
         let zoomOut = DispatchWorkItem { [weak self] in
             guard let self, self.isRecording else { return }
             self.zoomText = "2× → 1×"
             self.onEvent?("ZOOM_OUT")
             self.rampZoom(to: 1.0, rate: 0.4)
         }
-
         let zoomFinished = DispatchWorkItem { [weak self] in
             guard let self, self.isRecording else { return }
             self.zoomText = "1.0×"
@@ -214,8 +614,6 @@ final class CameraController: NSObject, ObservableObject {
         zoomInWorkItem = zoomIn
         zoomOutWorkItem = zoomOut
         zoomFinishedWorkItem = zoomFinished
-
-        // 0...5 s: 1×; 5...7,5 s: lên 2×; 7,5...10 s: trở về 1×.
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: zoomIn)
         DispatchQueue.main.asyncAfter(deadline: .now() + 7.5, execute: zoomOut)
         DispatchQueue.main.asyncAfter(deadline: .now() + 10.0, execute: zoomFinished)
@@ -267,9 +665,8 @@ final class CameraController: NSObject, ObservableObject {
             try? FileManager.default.removeItem(at: url)
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.canRetry = true
                 if saved {
-                    self.statusText = "Đã lưu video vào ứng dụng Ảnh"
+                    self.statusText = "Đã lưu video. Có thể khóa và quay lượt tiếp theo"
                     self.onEvent?("VIDEO_SAVED")
                 } else {
                     self.statusText = "Quay xong nhưng chưa lưu được: \(error?.localizedDescription ?? "thiếu quyền Ảnh")"
@@ -277,46 +674,6 @@ final class CameraController: NSObject, ObservableObject {
                 }
             }
         }
-    }
-
-    private func redPixelRatio(in pixelBuffer: CVPixelBuffer) -> Double {
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
-
-        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return 0 }
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        let pixels = baseAddress.assumingMemoryBound(to: UInt8.self)
-
-        // Bỏ viền ngoài 10%, lấy mẫu cách 6 pixel để giảm tải cho iPhone.
-        let xStart = width / 10
-        let xEnd = width - xStart
-        let yStart = height / 10
-        let yEnd = height - yStart
-        let sampleStep = 6
-        var redCount = 0
-        var sampleCount = 0
-
-        for y in stride(from: yStart, to: yEnd, by: sampleStep) {
-            let row = pixels.advanced(by: y * bytesPerRow)
-            for x in stride(from: xStart, to: xEnd, by: sampleStep) {
-                let offset = x * 4
-                let blue = Int(row[offset])
-                let green = Int(row[offset + 1])
-                let red = Int(row[offset + 2])
-                sampleCount += 1
-
-                let stronglyRed = red >= 150
-                    && red >= Int(Double(green) * 1.50)
-                    && red >= Int(Double(blue) * 1.35)
-                    && red - max(green, blue) >= 45
-                if stronglyRed { redCount += 1 }
-            }
-        }
-
-        guard sampleCount > 0 else { return 0 }
-        return Double(redCount) / Double(sampleCount)
     }
 }
 
@@ -326,30 +683,48 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        guard armedForDetection, !recordingActive, !alreadyTriggered else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        frameCounter += 1
 
-        analyzedFrameNumber += 1
-        guard analyzedFrameNumber % 3 == 0,
-              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-
-        let ratio = redPixelRatio(in: pixelBuffer)
-        DispatchQueue.main.async { [weak self] in
-            self?.redPercent = ratio * 100
-        }
-
-        if ratio >= 0.025 {
-            consecutiveRedFrames += 1
-        } else {
-            consecutiveRedFrames = 0
-        }
-
-        // 4 khung phân tích liên tiếp giúp tránh lóe đỏ gây quay nhầm.
-        if consecutiveRedFrames >= 4 {
-            alreadyTriggered = true
-            armedForDetection = false
+        if frameCounter % 30 == 1 {
+            let width = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+            let height = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+            let aspect = min(width, height) / max(width, height)
             DispatchQueue.main.async { [weak self] in
-                self?.beginRecording()
+                self?.frameAspectRatio = aspect
             }
+        }
+
+        switch processingMode {
+        case .idle, .lost:
+            return
+
+        case .scanning:
+            featureFrameCounter += 1
+            if featureFrameCounter % 5 == 0,
+               featureSamples.count < 120,
+               let feature = featurePrint(from: pixelBuffer, normalizedTopLeftRect: processingRect) {
+                featureSamples.append(feature)
+                let count = featureSamples.count
+                DispatchQueue.main.async { [weak self] in
+                    self?.learnedSamples = count
+                    self?.matchText = "Đã lấy \(count) mẫu"
+                }
+            }
+
+            if frameCounter % 3 == 0 {
+                let progress = min(1.0, (CACurrentMediaTime() - scanStartedAt) / scanDuration)
+                DispatchQueue.main.async { [weak self] in
+                    self?.scanProgress = progress
+                }
+            }
+
+        case .verifying:
+            processingMode = .idle
+            verifyAndLock(pixelBuffer: pixelBuffer)
+
+        case .tracking:
+            track(pixelBuffer: pixelBuffer)
         }
     }
 }
@@ -363,7 +738,7 @@ extension CameraController: AVCaptureFileOutputRecordingDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.isRecording = true
-            self.statusText = "Đang quay — 5 giây nữa bắt đầu zoom"
+            self.statusText = "Đang quay và bám — 5 giây nữa bắt đầu zoom"
             self.zoomText = "1.0×"
             self.onEvent?("RECORDING_STARTED")
             self.scheduleZoomSequence()
@@ -377,7 +752,8 @@ extension CameraController: AVCaptureFileOutputRecordingDelegate {
         error: Error?
     ) {
         videoQueue.async { [weak self] in
-            self?.recordingActive = false
+            self?.processingMode = .idle
+            self?.trackingObservation = nil
         }
 
         DispatchQueue.main.async { [weak self] in
@@ -386,11 +762,12 @@ extension CameraController: AVCaptureFileOutputRecordingDelegate {
             self.resetZoom()
             self.isRecording = false
             self.zoomText = "1.0×"
+            self.targetRect = nil
+            self.stage = .ready
             self.statusText = "Đã dừng, đang lưu video..."
             self.onEvent?("RECORDING_STOPPED")
 
             if let error {
-                self.canRetry = true
                 self.statusText = "Lỗi quay video: \(error.localizedDescription)"
                 try? FileManager.default.removeItem(at: outputFileURL)
             } else {

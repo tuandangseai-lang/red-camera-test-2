@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Red Camera Test</string>
+	<string>Rocket Tracker</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -25,7 +25,7 @@
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Kết nối ESP32 để bật chế độ nhận diện và nhận trạng thái quay.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Dùng camera để nhận diện vật màu đỏ và quay tên lửa nước.</string>
+	<string>Dùng camera để học, bám và quay tên lửa nước của bạn.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Thu âm thanh cùng video thử nghiệm.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
