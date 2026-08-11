@@ -38,7 +38,7 @@ struct ContentView: View {
                 if camera.stage.showsGuide {
                     let rect = mappedRect(camera.scanRect, in: geometry.size)
                     let guideColor: Color = camera.stage.isScanning
-                        ? (camera.scanIsSufficient ? .green : .yellow)
+                        ? scanStatusColor
                         : (camera.stage == .ready ? .green : .yellow)
                     RoundedRectangle(cornerRadius: 10)
                         .stroke(
@@ -87,7 +87,7 @@ struct ContentView: View {
 
     private var scanProgressRing: some View {
         let progress = max(0, min(camera.scanProgress, 1))
-        let color: Color = camera.scanIsSufficient ? .green : .yellow
+        let color = scanStatusColor
 
         return ZStack {
             Circle()
@@ -107,13 +107,23 @@ struct ContentView: View {
                     Text("\(Int(progress * 100))%")
                         .font(.headline.monospacedDigit())
                 }
-                Text(camera.scanIsSufficient ? "ĐÃ ĐỦ" : "CHƯA ĐỦ")
+                Text(
+                    camera.scanIsSufficient
+                        ? "ĐÃ ĐỦ"
+                        : (camera.scanNeedsNewAngle ? "GÓC TRÙNG" : "CHƯA ĐỦ")
+                )
                     .font(.system(size: 9, weight: .bold))
             }
             .foregroundStyle(color)
         }
         .frame(width: 76, height: 76)
         .shadow(color: color.opacity(0.45), radius: 8)
+    }
+
+    private var scanStatusColor: Color {
+        if camera.scanIsSufficient { return .green }
+        if camera.scanNeedsNewAngle { return .orange }
+        return .yellow
     }
 
     private func scanRingX(for rect: CGRect, viewWidth: CGFloat) -> CGFloat {
@@ -192,11 +202,15 @@ struct ContentView: View {
         VStack(spacing: 8) {
             if camera.stage.isScanning {
                 HStack(spacing: 8) {
-                    Image(systemName: camera.scanIsSufficient ? "checkmark.circle.fill" : "viewfinder.circle")
-                        .foregroundStyle(camera.scanIsSufficient ? .green : .yellow)
-                    Text(camera.scanIsSufficient
-                         ? "Đã đủ mẫu — giữ ổn định"
-                         : "Giữ tên lửa trong khung và xoay chậm")
+                    Image(
+                        systemName: camera.scanIsSufficient
+                            ? "checkmark.circle.fill"
+                            : (camera.scanNeedsNewAngle
+                               ? "arrow.triangle.2.circlepath.circle.fill"
+                               : "viewfinder.circle")
+                    )
+                    .foregroundStyle(scanStatusColor)
+                    Text(camera.scanGuidanceText)
                         .font(.footnote.weight(.semibold))
                         .lineLimit(1)
                     Spacer(minLength: 4)

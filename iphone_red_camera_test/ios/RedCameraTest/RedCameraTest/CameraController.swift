@@ -51,6 +51,8 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var scanSampleCount = 0
     @Published private(set) var scanSampleTarget = 0
     @Published private(set) var scanIsSufficient = false
+    @Published private(set) var scanNeedsNewAngle = false
+    @Published private(set) var scanGuidanceText = "Đưa tên lửa vào khung"
     @Published private(set) var targetRect: CGRect?
     @Published private(set) var trackingConfidence = 0.0
     @Published private(set) var matchText = "Chưa có mẫu"
@@ -107,7 +109,8 @@ final class CameraController: NSObject, ObservableObject {
     private var processingRect = CGRect(x: 0.29, y: 0.15, width: 0.42, height: 0.70)
     private var featureSamples: [VNFeaturePrintObservation] = []
     private var stageStartingSampleCount = 0
-    private var activeScanTarget = 18
+    private var activeScanTarget = 8
+    private var lastNoveltyCheckAt = 0.0
     private var frameCounter = 0
     private var featureFrameCounter = 0
     private var trackingFrameCounter = 0
@@ -191,6 +194,8 @@ final class CameraController: NSObject, ObservableObject {
         scanSampleCount = 0
         scanSampleTarget = 0
         scanIsSufficient = false
+        scanNeedsNewAngle = false
+        scanGuidanceText = "Đưa tên lửa vào khung"
         targetRect = nil
         trackingConfidence = 0
         matchText = "Chưa có mẫu"
@@ -267,8 +272,10 @@ final class CameraController: NSObject, ObservableObject {
         scanSampleCount = 0
         scanSampleTarget = requiredSamples
         scanIsSufficient = false
+        scanNeedsNewAngle = false
+        scanGuidanceText = "Giữ tên lửa trong khung và xoay chậm"
         targetRect = rect
-        matchText = "CHƯA ĐỦ • 0/\(requiredSamples) mẫu"
+        matchText = "CHƯA ĐỦ • 0/\(requiredSamples) góc mới"
 
         videoQueue.async { [weak self] in
             guard let self else { return }
@@ -283,6 +290,7 @@ final class CameraController: NSObject, ObservableObject {
             self.stageStartingSampleCount = self.featureSamples.count
             self.activeScanTarget = requiredSamples
             self.featureFrameCounter = 0
+            self.lastNoveltyCheckAt = 0
             self.processingMode = .scanning(kind)
         }
 
@@ -306,10 +314,11 @@ final class CameraController: NSObject, ObservableObject {
                 self.scanSampleTarget = requiredSamples
                 self.scanProgress = min(1, Double(newSampleCount) / Double(requiredSamples))
                 self.scanIsSufficient = newSampleCount >= requiredSamples
+                self.scanNeedsNewAngle = false
                 self.learnedSamples = totalSampleCount
 
                 guard newSampleCount >= requiredSamples else {
-                    self.matchText = "CHƯA ĐỦ • \(newSampleCount)/\(requiredSamples) mẫu"
+                    self.matchText = "CHƯA ĐỦ • \(newSampleCount)/\(requiredSamples) góc mới"
                     switch kind {
                     case .near:
                         self.stage = .idle
@@ -357,9 +366,16 @@ final class CameraController: NSObject, ObservableObject {
 
     private func sampleTarget(for kind: ScanKind) -> Int {
         switch kind {
-        case .near: return 18
-        case .far: return 18
-        case .around: return 24
+        case .near: return 8
+        case .far: return 8
+        case .around: return 12
+        }
+    }
+
+    private func noveltyThreshold(for kind: ScanKind) -> Float {
+        switch kind {
+        case .near, .far: return 2.0
+        case .around: return 3.0
         }
     }
 
@@ -602,8 +618,15 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func minimumDistance(to candidate: VNFeaturePrintObservation) -> Float? {
+        minimumDistance(to: candidate, among: featureSamples[...])
+    }
+
+    private func minimumDistance(
+        to candidate: VNFeaturePrintObservation,
+        among samples: ArraySlice<VNFeaturePrintObservation>
+    ) -> Float? {
         var best: Float?
-        for sample in featureSamples {
+        for sample in samples {
             var distance: Float = 0
             do {
                 try candidate.computeDistance(&distance, to: sample)
@@ -898,27 +921,57 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         case .idle, .lost:
             return
 
-        case .scanning:
+        case .scanning(let kind):
             featureFrameCounter += 1
             let currentStageSamples = featureSamples.count - stageStartingSampleCount
+            let now = CACurrentMediaTime()
             if featureFrameCounter % 6 == 0,
                currentStageSamples < activeScanTarget,
-               let feature = featurePrint(from: pixelBuffer, normalizedTopLeftRect: processingRect) {
-                featureSamples.append(feature)
-                let totalCount = featureSamples.count
-                let stageCount = totalCount - stageStartingSampleCount
-                let progress = min(1, Double(stageCount) / Double(activeScanTarget))
-                let sufficient = stageCount >= activeScanTarget
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.learnedSamples = totalCount
-                    self.scanSampleCount = stageCount
-                    self.scanSampleTarget = self.activeScanTarget
-                    self.scanProgress = progress
-                    self.scanIsSufficient = sufficient
-                    self.matchText = sufficient
-                        ? "ĐÃ ĐỦ • giữ ổn định đến khi hoàn tất"
-                        : "CHƯA ĐỦ • \(stageCount)/\(self.activeScanTarget) mẫu"
+               now - lastNoveltyCheckAt >= 0.28 {
+                lastNoveltyCheckAt = now
+                if let feature = featurePrint(
+                    from: pixelBuffer,
+                    normalizedTopLeftRect: processingRect
+                ) {
+                    let stageSamples = featureSamples[
+                        stageStartingSampleCount..<featureSamples.count
+                    ]
+                    let noveltyDistance = minimumDistance(to: feature, among: stageSamples)
+                    let isNewView = stageSamples.isEmpty
+                        || (noveltyDistance ?? 0) >= noveltyThreshold(for: kind)
+
+                    if isNewView {
+                        featureSamples.append(feature)
+                        let totalCount = featureSamples.count
+                        let stageCount = totalCount - stageStartingSampleCount
+                        let target = activeScanTarget
+                        let progress = min(1, Double(stageCount) / Double(target))
+                        let sufficient = stageCount >= target
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self else { return }
+                            self.learnedSamples = totalCount
+                            self.scanSampleCount = stageCount
+                            self.scanSampleTarget = target
+                            self.scanProgress = progress
+                            self.scanIsSufficient = sufficient
+                            self.scanNeedsNewAngle = false
+                            self.scanGuidanceText = sufficient
+                                ? "Đã đủ góc nhìn — giữ ổn định"
+                                : "Đã nhận góc mới — tiếp tục xoay"
+                            self.matchText = sufficient
+                                ? "ĐÃ ĐỦ • \(stageCount) góc khác nhau"
+                                : "CHƯA ĐỦ • \(stageCount)/\(target) góc mới"
+                        }
+                    } else {
+                        let stageCount = featureSamples.count - stageStartingSampleCount
+                        let target = activeScanTarget
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self else { return }
+                            self.scanNeedsNewAngle = true
+                            self.scanGuidanceText = "Góc đang trùng — hãy xoay hoặc đổi vị trí"
+                            self.matchText = "GÓC TRÙNG • \(stageCount)/\(target) góc mới"
+                        }
+                    }
                 }
             }
 

@@ -22,10 +22,12 @@ Bản 1.1 (build 3) kiểm tra phiên bản trước khi dùng `displayVideoZoom
 
 ## Vòng báo quét đủ (bản 1.2)
 
-- Quét gần cần 18 mẫu hợp lệ, quét xa cần 18 mẫu và quét xung quanh cần 24 mẫu.
+- Quét gần cần 8 góc khác nhau, quét xa cần 8 góc và quét xung quanh cần 12 góc.
 - Vòng vàng hiển thị phần trăm và chữ **CHƯA ĐỦ** trong lúc lấy mẫu.
 - Khi đạt yêu cầu, vòng chuyển xanh, hiện dấu kiểm và chữ **ĐÃ ĐỦ**.
 - Giao diện trên/dưới đã được rút gọn để dành phần lớn màn hình cho hình camera.
+
+Bản 1.4 không còn cộng mẫu chỉ vì thời gian trôi qua. Mỗi ảnh mới được so bằng `VNFeaturePrintObservation` với những ảnh vừa lưu; nếu quá giống nhau, vòng đứng yên, chuyển cam và hiện **GÓC TRÙNG**. Người dùng phải xoay tên lửa hoặc đổi góc nhìn thì tiến độ mới tiếp tục.
 
 ## Zoom mượt và chất lượng hình (bản 1.3)
 
