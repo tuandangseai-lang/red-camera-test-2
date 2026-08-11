@@ -62,7 +62,9 @@ jobs:
       - name: Bien dich app iPhone (chua ky)
         working-directory: iphone_red_camera_test/ios/RedCameraTest
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          BUILD_LOG="$RUNNER_TEMP/xcodebuild.log"
+          set +e
           xcodebuild \
             -project RedCameraTest.xcodeproj \
             -scheme RedCameraTest \
@@ -73,7 +75,25 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build
+            build 2>&1 | tee "$BUILD_LOG"
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "## Loi bien dich Swift/Xcode" >> "$GITHUB_STEP_SUMMARY"
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            grep -E '(^|[[:space:]])(fatal )?error:|:[0-9]+:[0-9]+: error:' "$BUILD_LOG" \
+              | tail -80 \
+              | tee -a "$GITHUB_STEP_SUMMARY" \
+              | while IFS= read -r line; do
+                  line=${line//'%'/'%25'}
+                  line=${line//$'\r'/'%0D'}
+                  line=${line//$'\n'/'%0A'}
+                  echo "::error title=Xcode build::$line"
+                done
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            exit "$BUILD_STATUS"
+          fi
 
       - name: Dong goi thanh IPA
         run: |
