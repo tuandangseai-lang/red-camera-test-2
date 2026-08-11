@@ -134,7 +134,7 @@ struct ContentView: View {
 
     private func subjectSpotlight(maskImage: UIImage, in size: CGSize) -> some View {
         ZStack {
-            Color.black.opacity(0.72)
+            Color.black.opacity(0.56)
             Image(uiImage: maskImage)
                 .resizable()
                 .scaledToFill()
@@ -144,16 +144,6 @@ struct ContentView: View {
                 .blendMode(.destinationOut)
         }
         .compositingGroup()
-        .overlay {
-            Image(uiImage: maskImage)
-                .resizable()
-                .scaledToFill()
-                .frame(width: size.width, height: size.height)
-                .clipped()
-                .luminanceToAlpha()
-                .colorMultiply(.cyan)
-                .opacity(0.14)
-        }
         .allowsHitTesting(false)
     }
 
@@ -164,19 +154,18 @@ struct ContentView: View {
         Canvas { context, _ in
             let mapped = points.map { mappedPoint($0, in: size) }
             guard mapped.count >= 3 else { return }
-            context.addFilter(.shadow(color: .cyan.opacity(0.85), radius: 5))
+            context.addFilter(.shadow(color: .mint.opacity(0.55), radius: 4))
             let outline = smoothClosedPath(mapped)
             context.stroke(
                 outline,
-                with: .color(.cyan.opacity(0.95)),
-                style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round)
+                with: .color(.mint.opacity(0.42)),
+                style: StrokeStyle(lineWidth: 5.0, lineCap: .round, lineJoin: .round)
             )
-            for (index, point) in mapped.enumerated() where index.isMultiple(of: 3) {
-                context.fill(
-                    Path(ellipseIn: CGRect(x: point.x - 2.5, y: point.y - 2.5, width: 5, height: 5)),
-                    with: .color(.white.opacity(0.92))
-                )
-            }
+            context.stroke(
+                outline,
+                with: .color(.white.opacity(0.88)),
+                style: StrokeStyle(lineWidth: 1.35, lineCap: .round, lineJoin: .round)
+            )
         }
         .allowsHitTesting(false)
     }

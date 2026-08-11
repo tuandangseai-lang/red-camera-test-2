@@ -162,7 +162,7 @@ final class CameraController: NSObject, ObservableObject {
     /// and launch hardware can look rocket-like for one frame.  Once a target
     /// is locked, a weaker detector result is accepted only near the predicted
     /// trajectory and is still cross-checked by the Vision tracker.
-    private let aiAcquisitionConfidence = 0.36
+    private let aiAcquisitionConfidence = 0.42
     private let aiContinuationConfidence = 0.12
 
     private var videoDevice: AVCaptureDevice?
@@ -233,8 +233,8 @@ final class CameraController: NSObject, ObservableObject {
     // chụp lại quá nhiều ảnh của một lớp mà detector đã được huấn luyện sẵn.
     private let manualPhotoTarget = 5
     // Lưới đủ mịn để viền không bị vuông nhưng vẫn nhẹ cho iPhone 15.
-    private let selectionGridColumns = 48
-    private let selectionGridRows = 84
+    private let selectionGridColumns = 96
+    private let selectionGridRows = 168
 
     private var zoomInWorkItem: DispatchWorkItem?
     private var zoomFinishedWorkItem: DispatchWorkItem?
@@ -833,10 +833,18 @@ final class CameraController: NSObject, ObservableObject {
             guard let minimumColumn = columns.min(), let maximumColumn = columns.max(),
                   let minimumRow = rows.min(), let maximumRow = rows.max() else { continue }
 
-            let minColumn = max(0, minimumColumn - 5)
-            let maxColumn = min(selectionGridColumns - 1, maximumColumn + 5)
-            let minRow = max(0, minimumRow - 5)
-            let maxRow = min(selectionGridRows - 1, maximumRow + 7)
+            let horizontalPadding = max(5, selectionGridColumns / 12)
+            let verticalPadding = max(7, selectionGridRows / 12)
+            let minColumn = max(0, minimumColumn - horizontalPadding)
+            let maxColumn = min(
+                selectionGridColumns - 1,
+                maximumColumn + horizontalPadding
+            )
+            let minRow = max(0, minimumRow - verticalPadding)
+            let maxRow = min(
+                selectionGridRows - 1,
+                maximumRow + verticalPadding
+            )
             for row in minRow...maxRow {
                 for column in minColumn...maxColumn {
                     excluded.insert(row * selectionGridColumns + column)
@@ -990,7 +998,7 @@ final class CameraController: NSObject, ObservableObject {
             x: locations.map(\.x).reduce(0, +) / CGFloat(locations.count),
             y: locations.map(\.y).reduce(0, +) / CGFloat(locations.count)
         )
-        let bucketCount = 28
+        let bucketCount = 56
         var boundary: [Int: (point: CGPoint, radius: CGFloat)] = [:]
         for point in locations {
             let dx = point.x - center.x
@@ -1291,15 +1299,25 @@ final class CameraController: NSObject, ObservableObject {
             ))
             // Làm mềm viền sau khi phóng lớn để không còn các ô vuông ghép thô.
             // Morphology lấp khe nhỏ, Gaussian tạo đường bo tự nhiên quanh vật.
-            let fullResolutionMask = enlargedMask
+            let selectionGate = enlargedMask
                 .clampedToExtent()
                 .applyingFilter(
                     "CIMorphologyMaximum",
-                    parameters: [kCIInputRadiusKey: 1.4]
+                    parameters: [kCIInputRadiusKey: 2.2]
                 )
                 .applyingFilter(
                     "CIGaussianBlur",
-                    parameters: [kCIInputRadiusKey: 2.2]
+                    parameters: [kCIInputRadiusKey: 7.0]
+                )
+                .cropped(to: maskImage.extent)
+            let fullResolutionMask = maskImage
+                .applyingFilter(
+                    "CIMultiplyCompositing",
+                    parameters: [kCIInputBackgroundImageKey: selectionGate]
+                )
+                .applyingFilter(
+                    "CIGaussianBlur",
+                    parameters: [kCIInputRadiusKey: 1.1]
                 )
                 .cropped(to: maskImage.extent)
             guard let cgMask = ciContext.createCGImage(
@@ -2030,21 +2048,23 @@ final class CameraController: NSObject, ObservableObject {
         guard let best = distances.first else { return nil }
         let requiredVotes: Int
         if distances.count >= 9 {
-            requiredVotes = 3
+            requiredVotes = 4
         } else if distances.count >= 5 {
+            requiredVotes = 3
+        } else if distances.count >= 3 {
             requiredVotes = 2
         } else {
             requiredVotes = 1
         }
-        let voteThreshold: Float = 48
+        let voteThreshold: Float = 44
         let votes = distances.filter { $0 <= voteThreshold }.count
         let selected = distances.prefix(min(requiredVotes, distances.count))
         let robustScore = selected.reduce(0, +) / Float(selected.count)
         // Không cho một ảnh trắng duy nhất quyết định. Mẫu phải nhận đủ phiếu
         // từ nhiều góc độc lập, đồng thời góc gần nhất cũng phải thật sự giống.
-        let accepted = best <= 36
+        let accepted = best <= 34
             && votes >= requiredVotes
-            && robustScore <= 42
+            && robustScore <= 40
         return MultiViewMatch(
             score: robustScore,
             bestDistance: best,
@@ -2474,8 +2494,27 @@ final class CameraController: NSObject, ObservableObject {
                     max(candidate.rect.width, candidate.rect.height) * 0.65
                 )
                 guard overlap >= 0.035 || centerDistance <= allowedDistance else { continue }
+                let candidateArea = max(
+                    0.00001,
+                    candidate.rect.width * candidate.rect.height
+                )
+                let detectionArea = max(
+                    0.00001,
+                    detection.rect.width * detection.rect.height
+                )
+                let areaRatio = max(candidateArea, detectionArea)
+                    / min(candidateArea, detectionArea)
+                let candidateAspect = candidate.rect.width
+                    / max(0.0001, candidate.rect.height)
+                let detectionAspect = detection.rect.width
+                    / max(0.0001, detection.rect.height)
+                let aspectRatio = max(candidateAspect, detectionAspect)
+                    / max(0.0001, min(candidateAspect, detectionAspect))
+                guard areaRatio <= 4.0, aspectRatio <= 3.0 else { continue }
                 let score = match.score
                     + Float(centerDistance * 34)
+                    + Float(min(areaRatio - 1, 3) * 1.8)
+                    + Float(min(aspectRatio - 1, 2) * 1.6)
                     - Float(detection.confidence * 8)
                 if score < bestScore {
                     bestScore = score
@@ -2484,13 +2523,8 @@ final class CameraController: NSObject, ObservableObject {
             }
         }
 
-        // Ảnh mẫu cá nhân là lớp xác nhận chính lúc khóa ban đầu. Chỉ sau khoảng hai
-        // giây mới cho detector rất chắc chắn tự khóa để app không bị kẹt vì chai trong.
-        if best == nil,
-           featureFrameCounter >= 60,
-           let veryStrong = detections.first(where: { $0.confidence >= 0.62 }) {
-            return veryStrong
-        }
+        // Không có đường tắt chỉ dựa vào độ tin cậy của detector: lúc khóa ban đầu,
+        // mục tiêu luôn phải được đa số ảnh mẫu cá nhân xác nhận.
         return best
     }
 
@@ -2655,7 +2689,21 @@ final class CameraController: NSObject, ObservableObject {
             return true
         }
 
-        let confirmationCount = isRecoveringLostTarget ? 2 : 3
+        let detectionArea = detection.rect.width * detection.rect.height
+        if isRecoveringLostTarget,
+           detectionArea >= 0.0035,
+           bestIdentityAlignedDetection(
+               among: [detection],
+               in: pixelBuffer
+           ) == nil {
+            pendingAIDetectionCount = max(0, pendingAIDetectionCount - 1)
+            publishSearchProgress(
+                message: "AI thấy vật gần quỹ đạo nhưng chưa khớp đa số ảnh mẫu"
+            )
+            return true
+        }
+
+        let confirmationCount = isRecoveringLostTarget ? 3 : 4
         guard confirmsAIDetection(
             detection.rect,
             requiredCount: confirmationCount
@@ -2816,13 +2864,24 @@ final class CameraController: NSObject, ObservableObject {
                             detection.rect.midY - expectedRect.midY
                         )
                         let closeEnough = centerDistance <= max(
-                            0.09,
-                            max(expectedRect.width, expectedRect.height) * 1.45
-                        ) || intersectionOverUnion(detection.rect, expectedRect) > 0.10
+                            0.055,
+                            max(expectedRect.width, expectedRect.height) * 1.05
+                        ) || intersectionOverUnion(detection.rect, expectedRect) > 0.18
+
+                        let detectionArea = detection.rect.width * detection.rect.height
+                        let identitySupported = closeEnough
+                            || detectionArea < 0.0035
+                            || bestIdentityAlignedDetection(
+                                among: [detection],
+                                in: pixelBuffer
+                            ) != nil
 
                         // Kết quả gần quỹ đạo được dùng ngay. Kết quả ở xa phải
                         // lặp lại hai lần, tránh đổi sang vật giống tên lửa.
-                        if closeEnough || confirmsAIDetection(detection.rect, requiredCount: 2) {
+                        if closeEnough || (
+                            identitySupported
+                                && confirmsAIDetection(detection.rect, requiredCount: 3)
+                        ) {
                             targetBounds = closeEnough
                                 ? detection.rect
                                 : (pendingAIDetectionRect ?? detection.rect)
