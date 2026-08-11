@@ -1,4 +1,4 @@
-name: Tao IPA Rocket Tracker v11 - YOLO Kalman hybrid
+name: Tao IPA Rocket Tracker v12 - trained YOLO hybrid
 
 on:
   workflow_dispatch:
@@ -21,6 +21,34 @@ jobs:
     steps:
       - name: Lay ma nguon
         uses: actions/checkout@v6
+
+      - name: Chuan bi Python cho model AI
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Xuat model da huan luyen sang Core ML
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet "ultralytics==8.4.117" "coremltools>=8.0,<10"
+          python - <<'PY'
+          from pathlib import Path
+          import shutil
+          from ultralytics import YOLO
+
+          root = Path.cwd()
+          weights = root / "iphone_red_camera_test" / "ai_training" / "weights" / "water_rocket_yolo11n_v3.pt"
+          target = root / "iphone_red_camera_test" / "ios" / "RedCameraTest" / "RedCameraTest" / "WaterRocketDetector.mlpackage"
+          if not weights.is_file():
+              raise SystemExit(f"Missing trained weights: {weights}")
+          exported = Path(YOLO(str(weights)).export(format="coreml", imgsz=640, nms=True))
+          if target.exists():
+              shutil.rmtree(target)
+          shutil.move(str(exported), str(target))
+          print(f"Core ML package: {target}")
+          PY
+          test -d "iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/WaterRocketDetector.mlpackage"
 
       - name: Cai XcodeGen
         run: brew install xcodegen
@@ -50,6 +78,8 @@ jobs:
           grep -q "WaterRocketDetector" "RedCameraTest/WaterRocketDetector.swift"
           grep -q "RocketMotionFilter" "RedCameraTest/RocketMotionFilter.swift"
           grep -q "verifyWithAIDetector" "RedCameraTest/CameraController.swift"
+          grep -q "aiAcquisitionConfidence = 0.36" "RedCameraTest/CameraController.swift"
+          test -d "RedCameraTest/WaterRocketDetector.mlpackage"
           grep -q "VNGenerateForegroundInstanceMaskRequest" "RedCameraTest/CameraController.swift"
           grep -q "connectedCrystalCells" "RedCameraTest/CameraController.swift"
           grep -q "crystalMesh" "RedCameraTest/ContentView.swift"
@@ -101,6 +131,7 @@ jobs:
           APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/RedCameraTest.app"
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
+          test -d "$APP_PATH/WaterRocketDetector.mlmodelc"
           /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP_PATH/Info.plist"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"

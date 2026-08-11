@@ -158,6 +158,12 @@ final class CameraController: NSObject, ObservableObject {
     private let voiceNotifier = VoiceNotifier()
     private let profileStore = ScanProfileStore()
     private let aiDetector = WaterRocketDetector()
+    /// A full-screen candidate must be strong because sky highlights, people,
+    /// and launch hardware can look rocket-like for one frame.  Once a target
+    /// is locked, a weaker detector result is accepted only near the predicted
+    /// trajectory and is still cross-checked by the Vision tracker.
+    private let aiAcquisitionConfidence = 0.36
+    private let aiContinuationConfidence = 0.12
 
     private var videoDevice: AVCaptureDevice?
     private var ultraWideDeviceZoomFactor: CGFloat = 1.0
@@ -2332,8 +2338,23 @@ final class CameraController: NSObject, ObservableObject {
         in pixelBuffer: CVPixelBuffer,
         near expectedRect: CGRect?
     ) -> WaterRocketDetection? {
-        let detections = aiDetector.detect(in: pixelBuffer)
-        guard let expectedRect else { return detections.first }
+        let minimumConfidence = expectedRect == nil
+            ? aiAcquisitionConfidence
+            : aiContinuationConfidence
+        let detections = aiDetector.detect(
+            in: pixelBuffer,
+            minimumConfidence: minimumConfidence
+        )
+        guard let expectedRect else {
+            // Most false positives from the held-out launch videos enter from a
+            // single image edge.  A real scan target may be larger than the old
+            // guide circle, but its centre must still be on-screen.
+            return detections.first(where: { detection in
+                let centre = CGPoint(x: detection.rect.midX, y: detection.rect.midY)
+                return (0.055...0.945).contains(centre.x)
+                    && (0.045...0.955).contains(centre.y)
+            })
+        }
 
         var best: WaterRocketDetection?
         var bestScore = CGFloat.greatestFiniteMagnitude
