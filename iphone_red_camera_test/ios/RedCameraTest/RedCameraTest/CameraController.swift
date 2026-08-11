@@ -2041,32 +2041,42 @@ final class CameraController: NSObject, ObservableObject {
                 return
             }
 
-            let trackedRects = results.map { topLeftRect(from: $0) }
+            let trackedRects = results.map { self.topLeftRect(from: $0) }
             let rawUnion = trackedRects.dropFirst().reduce(trackedRects[0]) {
                 $0.union($1)
             }
-            let topLeftRect = rawUnion
-                .insetBy(
-                    dx: -max(0.012, rawUnion.width * 0.22),
-                    dy: -max(0.012, rawUnion.height * 0.22)
-                )
+            let expandedX = max(CGFloat(0.012), rawUnion.width * CGFloat(0.22))
+            let expandedY = max(CGFloat(0.012), rawUnion.height * CGFloat(0.22))
+            let expandedBounds = rawUnion.insetBy(dx: -expandedX, dy: -expandedY)
+            let targetBounds = expandedBounds
                 .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
 
             let measuredPoints = trackedRects.map {
                 CGPoint(x: $0.midX, y: $0.midY)
             }
+            var measuredX: CGFloat = 0
+            var measuredY: CGFloat = 0
+            for point in measuredPoints {
+                measuredX += point.x
+                measuredY += point.y
+            }
+            let measuredCount = CGFloat(measuredPoints.count)
             let measuredCenter = CGPoint(
-                x: measuredPoints.map(\.x).reduce(0, +) / CGFloat(measuredPoints.count),
-                y: measuredPoints.map(\.y).reduce(0, +) / CGFloat(measuredPoints.count)
+                x: measuredX / measuredCount,
+                y: measuredY / measuredCount
             )
             if let previousTrackingCenter {
                 let measuredVelocity = CGVector(
                     dx: measuredCenter.x - previousTrackingCenter.x,
                     dy: measuredCenter.y - previousTrackingCenter.y
                 )
+                let smoothedDX = smoothedTrackingVelocity.dx * CGFloat(0.70)
+                    + measuredVelocity.dx * CGFloat(0.30)
+                let smoothedDY = smoothedTrackingVelocity.dy * CGFloat(0.70)
+                    + measuredVelocity.dy * CGFloat(0.30)
                 smoothedTrackingVelocity = CGVector(
-                    dx: smoothedTrackingVelocity.dx * 0.70 + measuredVelocity.dx * 0.30,
-                    dy: smoothedTrackingVelocity.dy * 0.70 + measuredVelocity.dy * 0.30
+                    dx: smoothedDX,
+                    dy: smoothedDY
                 )
             }
             previousTrackingCenter = measuredCenter
@@ -2079,7 +2089,7 @@ final class CameraController: NSObject, ObservableObject {
             )
             let publishedPoints = results.count == 3
                 ? measuredPoints
-                : representativeTrackingPoints(in: topLeftRect)
+                : representativeTrackingPoints(in: targetBounds)
             let averageConfidence = results
                 .map { Double($0.confidence) }
                 .reduce(0, +) / Double(results.count)
@@ -2087,7 +2097,7 @@ final class CameraController: NSObject, ObservableObject {
 
             var appearanceText: String?
             if trackingFrameCounter % 45 == 0,
-               let candidate = featurePrint(from: pixelBuffer, normalizedTopLeftRect: topLeftRect),
+               let candidate = featurePrint(from: pixelBuffer, normalizedTopLeftRect: targetBounds),
                let distance = minimumDistance(to: candidate) {
                 appearanceText = String(
                     format: "Bám 3 điểm • %@ • khớp %.1f",
@@ -2098,8 +2108,8 @@ final class CameraController: NSObject, ObservableObject {
 
             trackingAnchorObservations = results.count == 3
                 ? results
-                : makeTrackingAnchors(in: topLeftRect)
-            trackingObservation = observation(fromTopLeftRect: topLeftRect)
+                : makeTrackingAnchors(in: targetBounds)
+            trackingObservation = observation(fromTopLeftRect: targetBounds)
 
             // Ở 60 fps, gửi tâm mục tiêu về ESP32 khoảng 20 lần/giây.
             // Dùng điểm dự đoán thay vì tâm hiện tại để bù trễ cho tên lửa bay nhanh.
@@ -2114,7 +2124,7 @@ final class CameraController: NSObject, ObservableObject {
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.targetRect = topLeftRect
+                self.targetRect = targetBounds
                 self.trackingPoints = publishedPoints
                 self.predictedTargetPoint = predictedPoint
                 self.trackingConfidence = averageConfidence
