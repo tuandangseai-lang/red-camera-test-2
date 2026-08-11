@@ -31,7 +31,10 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --quiet --upgrade pip
-          python -m pip install --quiet "ultralytics==8.4.117" "coremltools>=8.0,<10"
+          # Core ML Tools still relies on NumPy 1.x scalar conversion in a few
+          # MIL ops.  Pin it before importing Ultralytics instead of allowing
+          # the exporter to change NumPy mid-process and require a restart.
+          python -m pip install --quiet "numpy==1.26.4" "ultralytics==8.4.117" "coremltools>=8.0,<10"
           python - <<'PY'
           from pathlib import Path
           import shutil
