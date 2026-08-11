@@ -5,6 +5,8 @@ import UIKit
 struct ContentView: View {
     @StateObject private var camera = CameraController()
     @StateObject private var ble = BLEManager()
+    @State private var profileToRename: SavedScanProfile?
+    @State private var renameDraft = ""
 
     var body: some View {
         ZStack {
@@ -41,6 +43,26 @@ struct ContentView: View {
             }
             camera.start()
         }
+        .alert(
+            "Đổi tên mẫu",
+            isPresented: Binding(
+                get: { profileToRename != nil },
+                set: { if !$0 { profileToRename = nil } }
+            )
+        ) {
+            TextField("Tên mới", text: $renameDraft)
+            Button("Lưu") {
+                if let profileToRename {
+                    camera.renameProfile(profileToRename, to: renameDraft)
+                }
+                profileToRename = nil
+            }
+            Button("Hủy", role: .cancel) {
+                profileToRename = nil
+            }
+        } message: {
+            Text("Tối đa 28 ký tự")
+        }
     }
 
     private var trackingOverlay: some View {
@@ -52,20 +74,20 @@ struct ContentView: View {
                 }
 
                 if camera.stage.showsGuide {
-                    let guideRect = camera.selectedSubjectRect ?? camera.scanRect
-                    let rect = mappedRect(guideRect, in: geometry.size)
+                    let rect = mappedRect(camera.scanRect, in: geometry.size)
                     let guideColor: Color = camera.stage.isScanning
                         ? scanStatusColor
                         : (camera.stage == .ready ? .green : .yellow)
-                    RoundedRectangle(cornerRadius: 10)
+                    let diameter = min(rect.width, rect.height)
+                    Circle()
                         .stroke(
                             guideColor,
                             style: StrokeStyle(
                                 lineWidth: camera.stage.isScanning ? 4 : 3,
-                                dash: camera.stage.isScanning ? [] : [10, 6]
+                                dash: camera.hasSelectedSubject ? [] : [10, 6]
                             )
                         )
-                        .frame(width: rect.width, height: rect.height)
+                        .frame(width: diameter, height: diameter)
                         .position(x: rect.midX, y: rect.midY)
 
                     Text(guideLabel)
@@ -341,7 +363,10 @@ struct ContentView: View {
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(2)
 
-            if camera.stage == .verifying || camera.stage == .tracking || camera.stage == .lost {
+            if camera.stage.isScanning
+                || camera.stage == .verifying
+                || camera.stage == .tracking
+                || camera.stage == .lost {
                 Text(camera.matchText)
                     .font(.caption)
                     .foregroundStyle(.cyan)
@@ -490,6 +515,18 @@ struct ContentView: View {
 
             if let activeID = camera.activeProfileID,
                let active = camera.savedProfiles.first(where: { $0.id == activeID }) {
+                Button {
+                    renameDraft = active.name
+                    profileToRename = active
+                } label: {
+                    Image(systemName: "pencil")
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(.cyan)
+                .accessibilityLabel("Đổi tên mẫu")
+
                 Button(role: .destructive) {
                     camera.deleteProfile(active)
                 } label: {
@@ -524,7 +561,7 @@ struct ContentView: View {
 
             Image(systemName: "viewfinder")
                 .foregroundStyle(.yellow)
-            Slider(value: $camera.scanBoxScale, in: 0.12...0.62)
+            Slider(value: $camera.scanBoxScale, in: 0.48...0.92)
                 .tint(.yellow)
             Button {
                 camera.voiceAnnouncementsEnabled.toggle()
@@ -569,9 +606,14 @@ struct ContentView: View {
             }
 
         case .verifying:
-            ProgressView("Đang xác minh mục tiêu...")
-                .tint(.white)
-                .foregroundStyle(.white)
+            VStack(spacing: 10) {
+                ProgressView("Đang tìm trên toàn màn hình...")
+                    .tint(.white)
+                    .foregroundStyle(.white)
+                secondaryButton("Dừng tìm", systemImage: "xmark.circle") {
+                    camera.cancelTargetSearch()
+                }
+            }
 
         case .tracking:
             if camera.isRecording {

@@ -8,6 +8,7 @@ struct SavedScanProfile: Codable, Equatable, Identifiable {
     let referenceImages: [Data]
     let surfacePointCount: Int
     let voxelOccupancy: [Bool]?
+    let classificationLabel: String?
 
     var shortName: String {
         name
@@ -59,6 +60,25 @@ final class ScanProfileStore {
     @discardableResult
     func delete(id: UUID) -> [SavedScanProfile] {
         let profiles = load().filter { $0.id != id }
+        persist(profiles)
+        return profiles
+    }
+
+    @discardableResult
+    func rename(id: UUID, to name: String) -> [SavedScanProfile] {
+        let profiles = load().map { profile in
+            guard profile.id == id else { return profile }
+            return SavedScanProfile(
+                id: profile.id,
+                name: name,
+                createdAt: profile.createdAt,
+                subjectKind: profile.subjectKind,
+                referenceImages: profile.referenceImages,
+                surfacePointCount: profile.surfacePointCount,
+                voxelOccupancy: profile.voxelOccupancy,
+                classificationLabel: profile.classificationLabel
+            )
+        }
         persist(profiles)
         return profiles
     }

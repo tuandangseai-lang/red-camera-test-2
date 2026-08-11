@@ -65,7 +65,7 @@ enum RocketLearningStage: Equatable {
 
     var showsGuide: Bool {
         switch self {
-        case .tracking:
+        case .ready, .verifying, .tracking, .lost:
             return false
         default:
             return true
@@ -101,6 +101,8 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var hasSelectedSubject = false
     @Published private(set) var selectedSubjectMaskImage: UIImage?
     @Published private(set) var selectedSubjectRect: CGRect?
+    @Published private(set) var detectedSubjectLabel = "Chưa phân loại"
+    @Published private(set) var detectedSubjectConfidence = 0.0
     @Published private(set) var isARScanning = false
     @Published private(set) var targetRect: CGRect?
     @Published private(set) var trackingConfidence = 0.0
@@ -108,7 +110,7 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var frameAspectRatio: CGFloat = 9.0 / 16.0
     @Published private(set) var savedProfiles: [SavedScanProfile] = []
     @Published private(set) var activeProfileID: UUID?
-    @Published var scanBoxScale = 0.42
+    @Published var scanBoxScale = 0.76
     @Published var scanSubjectKind: ScanSubjectKind = .object
     @Published var voiceAnnouncementsEnabled = true
 
@@ -118,8 +120,10 @@ final class CameraController: NSObject, ObservableObject {
     var onEvent: ((String) -> Void)?
 
     var scanRect: CGRect {
-        let width = CGFloat(max(0.12, min(scanBoxScale, 0.62)))
-        let height = min(0.86, max(0.24, width * 1.65))
+        let width = CGFloat(max(0.48, min(scanBoxScale, 0.92)))
+        // Preview dọc có tỉ lệ rộng/cao xấp xỉ 9:16. Nhân theo tỉ lệ này
+        // giúp khung chuẩn hóa hiển thị thành một vòng tròn thật trên màn hình.
+        let height = min(0.70, max(0.27, width * 9.0 / 16.0))
         return CGRect(
             x: (1.0 - width) / 2.0,
             y: (1.0 - height) / 2.0,
@@ -306,6 +310,8 @@ final class CameraController: NSObject, ObservableObject {
         hasSelectedSubject = false
         selectedSubjectMaskImage = nil
         selectedSubjectRect = nil
+        detectedSubjectLabel = "Chưa phân loại"
+        detectedSubjectConfidence = 0
         targetRect = nil
         trackingConfidence = 0
         matchText = "Chưa có mẫu"
@@ -349,6 +355,8 @@ final class CameraController: NSObject, ObservableObject {
         hasSelectedSubject = false
         selectedSubjectMaskImage = nil
         selectedSubjectRect = nil
+        detectedSubjectLabel = "Chưa phân loại"
+        detectedSubjectConfidence = 0
         targetRect = nil
         statusText = "Đã dừng quét 3D gần đúng"
         onEvent?("SCAN_CANCELLED")
@@ -417,6 +425,8 @@ final class CameraController: NSObject, ObservableObject {
                 self.activeProfileID = profile.id
                 self.learnedSamples = observations.count
                 self.surfacePointCount = profile.surfacePointCount
+                self.detectedSubjectLabel = profile.classificationLabel ?? profile.subjectKind.title
+                self.detectedSubjectConfidence = 1
                 self.crystalFacets3D = storedFacets
                 self.scanHasConfirmedTarget = true
                 self.targetConfirmationProgress = 1
@@ -442,19 +452,29 @@ final class CameraController: NSObject, ObservableObject {
         statusText = "Đã xóa \(profile.name)"
     }
 
+    func renameProfile(_ profile: SavedScanProfile, to proposedName: String) {
+        let trimmed = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = String(trimmed.prefix(28))
+        guard !name.isEmpty else { return }
+        savedProfiles = profileStore.rename(id: profile.id, to: name)
+        statusText = "Đã đổi tên mẫu thành \(name)"
+        onEvent?("PROFILE_RENAMED")
+    }
+
     func startTrackingAndRecording() {
         guard isReady, !isRecording, (stage == .ready || stage == .lost) else { return }
-        let rect = selectedSubjectRect ?? scanRect
+        let fullFrame = CGRect(x: 0, y: 0, width: 1, height: 1)
         let recordAfterLock = !isRecording
         stage = .verifying
-        targetRect = rect
+        targetRect = nil
         trackingConfidence = 0
-        matchText = "Đang so với mẫu đã học..."
-        statusText = "Giữ tên lửa trong khung để xác minh và khóa mục tiêu"
+        matchText = "Đang tìm \(detectedSubjectLabel) trên toàn màn hình..."
+        statusText = "Không cần đưa vật vào vòng tròn • app đang tự tìm mục tiêu"
 
         videoQueue.async { [weak self] in
             guard let self else { return }
-            self.processingRect = rect
+            self.processingRect = fullFrame
+            self.featureFrameCounter = 0
             self.shouldRecordAfterVerification = recordAfterLock
             self.processingMode = .verifying
         }
@@ -462,17 +482,28 @@ final class CameraController: NSObject, ObservableObject {
 
     func reacquireTarget() {
         guard stage == .lost else { return }
-        let rect = selectedSubjectRect ?? scanRect
+        let fullFrame = CGRect(x: 0, y: 0, width: 1, height: 1)
         stage = .verifying
-        targetRect = rect
-        matchText = "Đang bắt lại mục tiêu..."
-        statusText = "Đưa tên lửa vào khung để bắt lại"
+        targetRect = nil
+        matchText = "Đang tìm lại \(detectedSubjectLabel) trên toàn màn hình..."
+        statusText = "Có thể đặt vật ở bất kỳ vị trí nào trong khung camera"
         videoQueue.async { [weak self] in
             guard let self else { return }
-            self.processingRect = rect
+            self.processingRect = fullFrame
+            self.featureFrameCounter = 0
             self.shouldRecordAfterVerification = false
             self.processingMode = .verifying
         }
+    }
+
+    func cancelTargetSearch() {
+        guard stage == .verifying else { return }
+        videoQueue.async { [weak self] in
+            self?.processingMode = .idle
+        }
+        stage = isRecording ? .lost : .ready
+        matchText = isRecording ? "Đã dừng tìm lại mục tiêu" : "Mẫu đã sẵn sàng"
+        statusText = isRecording ? "Mất mục tiêu • có thể bấm Bắt lại" : "Có thể bấm Khóa, bám & quay"
     }
 
     func stopRecording() {
@@ -523,6 +554,8 @@ final class CameraController: NSObject, ObservableObject {
         hasSelectedSubject = false
         selectedSubjectMaskImage = nil
         selectedSubjectRect = nil
+        detectedSubjectLabel = "Chưa phân loại"
+        detectedSubjectConfidence = 0
         targetRect = rect
         matchText = "CHƯA CHỌN VẬT • cần 6 ảnh"
 
@@ -579,12 +612,13 @@ final class CameraController: NSObject, ObservableObject {
                 formatter.dateFormat = "dd/MM HH:mm"
                 let profile = SavedScanProfile(
                     id: UUID(),
-                    name: "\(self.scanSubjectKind.title) \(formatter.string(from: Date()))",
+                    name: "\(self.detectedSubjectLabel.capitalized) \(formatter.string(from: Date()))",
                     createdAt: Date(),
                     subjectKind: self.scanSubjectKind,
                     referenceImages: self.scanReferenceImages,
                     surfacePointCount: self.scanReferenceImages.count,
-                    voxelOccupancy: nil
+                    voxelOccupancy: nil,
+                    classificationLabel: self.detectedSubjectLabel
                 )
                 updatedProfiles = self.profileStore.save(profile)
                 savedProfile = profile
@@ -636,6 +670,8 @@ final class CameraController: NSObject, ObservableObject {
         let cells: Set<Int>
         let boundingRect: CGRect
         let image: UIImage
+        let referenceJPEG: Data
+        let removedHand: Bool
     }
 
     private func instanceLabel(
@@ -678,6 +714,118 @@ final class CameraController: NSObject, ObservableObject {
             }
         }
         return 0
+    }
+
+    private func handExclusionCells(from pixelBuffer: CVPixelBuffer) -> Set<Int> {
+        guard scanSubjectKind == .object else { return [] }
+        let request = VNDetectHumanHandPoseRequest()
+        request.maximumHandCount = 2
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
+        do {
+            try handler.perform([request])
+        } catch {
+            return []
+        }
+
+        var excluded = Set<Int>()
+        for observation in request.results ?? [] {
+            guard let points = try? observation.recognizedPoints(.all) else { continue }
+            let visible = points.values.filter { $0.confidence >= 0.22 }
+            guard visible.count >= 4 else { continue }
+            let columns = visible.map {
+                Int($0.location.x * CGFloat(selectionGridColumns))
+            }
+            let rows = visible.map {
+                Int((1.0 - $0.location.y) * CGFloat(selectionGridRows))
+            }
+            guard let minimumColumn = columns.min(), let maximumColumn = columns.max(),
+                  let minimumRow = rows.min(), let maximumRow = rows.max() else { continue }
+
+            let minColumn = max(0, minimumColumn - 3)
+            let maxColumn = min(selectionGridColumns - 1, maximumColumn + 3)
+            let minRow = max(0, minimumRow - 3)
+            let maxRow = min(selectionGridRows - 1, maximumRow + 4)
+            for row in minRow...maxRow {
+                for column in minColumn...maxColumn {
+                    excluded.insert(row * selectionGridColumns + column)
+                }
+            }
+        }
+        return excluded
+    }
+
+    private func friendlyClassificationName(_ identifier: String) -> String {
+        let lowercased = identifier.lowercased()
+        let translations: [(needle: String, name: String)] = [
+            ("water bottle", "chai nước"),
+            ("bottle", "chai"),
+            ("rocket", "tên lửa"),
+            ("missile", "tên lửa"),
+            ("person", "người"),
+            ("dog", "chó"),
+            ("cat", "mèo"),
+            ("bird", "chim"),
+            ("ball", "quả bóng"),
+            ("car", "xe ô tô"),
+            ("motorcycle", "xe máy"),
+            ("bicycle", "xe đạp"),
+            ("computer", "máy tính"),
+            ("phone", "điện thoại"),
+            ("camera", "máy ảnh")
+        ]
+        return translations.first(where: { lowercased.contains($0.needle) })?.name
+            ?? identifier.replacingOccurrences(of: "_", with: " ")
+    }
+
+    private func classifySubject(
+        in pixelBuffer: CVPixelBuffer,
+        rect: CGRect,
+        referenceJPEG: Data
+    ) -> (kind: ScanSubjectKind, label: String, confidence: Double) {
+        let visionRect = CGRect(
+            x: rect.minX,
+            y: 1.0 - rect.maxY,
+            width: rect.width,
+            height: rect.height
+        )
+        let personRequest = VNDetectHumanRectanglesRequest()
+        personRequest.regionOfInterest = visionRect
+        personRequest.upperBodyOnly = false
+        let animalRequest = VNRecognizeAnimalsRequest()
+        animalRequest.regionOfInterest = visionRect
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
+        try? handler.perform([personRequest, animalRequest])
+
+        if let person = personRequest.results?.max(by: { $0.confidence < $1.confidence }),
+           person.confidence >= 0.48 {
+            return (.person, "người", Double(person.confidence))
+        }
+        if let animal = animalRequest.results?.max(by: { $0.confidence < $1.confidence }),
+           let label = animal.labels.first,
+           animal.confidence >= 0.30 {
+            return (
+                .animal,
+                friendlyClassificationName(label.identifier),
+                Double(animal.confidence)
+            )
+        }
+
+        guard let image = UIImage(data: referenceJPEG)?.cgImage else {
+            return (.object, "vật thể", 0)
+        }
+        let classifyRequest = VNClassifyImageRequest()
+        let classifyHandler = VNImageRequestHandler(cgImage: image, orientation: .up)
+        do {
+            try classifyHandler.perform([classifyRequest])
+            if let result = classifyRequest.results?.first(where: { $0.confidence >= 0.05 }) {
+                return (
+                    .object,
+                    friendlyClassificationName(result.identifier),
+                    Double(result.confidence)
+                )
+            }
+        } catch { }
+        return (.object, "vật thể", 0)
     }
 
     private func manualSubjectMask(
@@ -738,21 +886,36 @@ final class CameraController: NSObject, ObservableObject {
             )
 
             var cells = Set<Int>()
-            var minimumColumn = selectionGridColumns
-            var maximumColumn = 0
-            var minimumRow = selectionGridRows
-            var maximumRow = 0
             for visualRow in 0..<selectionGridRows {
                 let maskRow = selectionGridRows - 1 - visualRow
                 for column in 0..<selectionGridColumns {
                     if bitmap[maskRow * selectionGridColumns + column] > 48 {
                         cells.insert(visualRow * selectionGridColumns + column)
-                        minimumColumn = min(minimumColumn, column)
-                        maximumColumn = max(maximumColumn, column)
-                        minimumRow = min(minimumRow, visualRow)
-                        maximumRow = max(maximumRow, visualRow)
                     }
                 }
+            }
+
+            let originalCells = cells
+            let handCells = handExclusionCells(from: pixelBuffer)
+            let cleanedCells = cells.subtracting(handCells)
+            let removedHand = !handCells.isEmpty && cleanedCells.count >= 18
+            if removedHand {
+                cells = cleanedCells
+            } else {
+                cells = originalCells
+            }
+
+            var minimumColumn = selectionGridColumns
+            var maximumColumn = 0
+            var minimumRow = selectionGridRows
+            var maximumRow = 0
+            for index in cells {
+                let column = index % selectionGridColumns
+                let row = index / selectionGridColumns
+                minimumColumn = min(minimumColumn, column)
+                maximumColumn = max(maximumColumn, column)
+                minimumRow = min(minimumRow, row)
+                maximumRow = max(maximumRow, row)
             }
             guard cells.count >= 18,
                   minimumColumn <= maximumColumn,
@@ -768,13 +931,70 @@ final class CameraController: NSObject, ObservableObject {
             let boundingRect = rawRect
                 .insetBy(dx: -padding, dy: -padding)
                 .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
-            guard let cgMask = ciContext.createCGImage(maskImage, from: maskImage.extent) else {
+
+            var cleanBitmap = [UInt8](
+                repeating: 0,
+                count: selectionGridColumns * selectionGridRows
+            )
+            for index in cells {
+                let visualRow = index / selectionGridColumns
+                let column = index % selectionGridColumns
+                let maskRow = selectionGridRows - 1 - visualRow
+                cleanBitmap[maskRow * selectionGridColumns + column] = 255
+            }
+            let cleanMaskData = Data(cleanBitmap)
+            let lowResolutionMask = CIImage(
+                bitmapData: cleanMaskData,
+                bytesPerRow: selectionGridColumns,
+                size: CGSize(width: selectionGridColumns, height: selectionGridRows),
+                format: .L8,
+                colorSpace: nil
+            )
+            let fullResolutionMask = lowResolutionMask.transformed(by: CGAffineTransform(
+                scaleX: maskImage.extent.width / CGFloat(selectionGridColumns),
+                y: maskImage.extent.height / CGFloat(selectionGridRows)
+            ))
+            guard let cgMask = ciContext.createCGImage(
+                fullResolutionMask,
+                from: maskImage.extent
+            ) else {
                 return nil
             }
+
+            let rawSource = CIImage(cvPixelBuffer: pixelBuffer)
+            let sourceImage = rawSource.transformed(by: CGAffineTransform(
+                translationX: -rawSource.extent.minX,
+                y: -rawSource.extent.minY
+            ))
+            guard let blendFilter = CIFilter(name: "CIBlendWithMask") else { return nil }
+            blendFilter.setValue(sourceImage, forKey: kCIInputImageKey)
+            blendFilter.setValue(
+                CIImage(color: .black).cropped(to: sourceImage.extent),
+                forKey: kCIInputBackgroundImageKey
+            )
+            blendFilter.setValue(fullResolutionMask, forKey: kCIInputMaskImageKey)
+            guard let maskedImage = blendFilter.outputImage else { return nil }
+            let cropRect = CGRect(
+                x: boundingRect.minX * sourceImage.extent.width,
+                y: (1.0 - boundingRect.maxY) * sourceImage.extent.height,
+                width: boundingRect.width * sourceImage.extent.width,
+                height: boundingRect.height * sourceImage.extent.height
+            ).integral
+            let cropped = maskedImage
+                .cropped(to: cropRect)
+                .transformed(by: CGAffineTransform(
+                    translationX: -cropRect.minX,
+                    y: -cropRect.minY
+                ))
+            guard let referenceImage = ciContext.createCGImage(cropped, from: cropped.extent),
+                  let referenceJPEG = UIImage(cgImage: referenceImage)
+                    .jpegData(compressionQuality: 0.78) else { return nil }
             return ManualSubjectMask(
                 cells: cells,
                 boundingRect: boundingRect,
-                image: UIImage(cgImage: cgMask)
+                image: UIImage(cgImage: cgMask),
+                referenceJPEG: referenceJPEG,
+                removedHand: removedHand
             )
         } catch {
             return nil
@@ -800,6 +1020,11 @@ final class CameraController: NSObject, ObservableObject {
 
         processingRect = selection.boundingRect
         confirmedTargetCells = selection.cells
+        let classification = classifySubject(
+            in: pixelBuffer,
+            rect: selection.boundingRect,
+            referenceJPEG: selection.referenceJPEG
+        )
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.hasSelectedSubject = true
@@ -807,10 +1032,15 @@ final class CameraController: NSObject, ObservableObject {
             self.selectedSubjectRect = selection.boundingRect
             self.scanHasConfirmedTarget = true
             self.targetConfirmationProgress = 1
+            self.scanSubjectKind = classification.kind
+            self.detectedSubjectLabel = classification.label
+            self.detectedSubjectConfidence = classification.confidence
             self.scanNeedsNewAngle = false
             self.scanGuidanceText = "Đã chọn vật • bấm nút tròn để chụp ảnh 1/6"
-            self.matchText = "ĐÃ ĐỊNH VỊ VẬT • nền xung quanh đã làm tối"
-            self.statusText = "Nếu chọn sai, chạm lại vào đúng vật"
+            self.matchText = "NHẬN DIỆN: \(classification.label.uppercased()) • \(Int(classification.confidence * 100))%"
+            self.statusText = selection.removedHand
+                ? "Đã loại vùng bàn tay; nếu chọn sai hãy chạm lại"
+                : "Nếu chọn sai, chạm lại vào đúng vật"
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             self.announce("Đã chọn vật cần chụp.", kind: .success)
             self.onEvent?("SUBJECT_SELECTED")
@@ -832,14 +1062,7 @@ final class CameraController: NSObject, ObservableObject {
             return
         }
         processingRect = selection.boundingRect
-        guard let feature = featurePrint(
-            from: pixelBuffer,
-            normalizedTopLeftRect: selection.boundingRect
-        ), let imageData = referenceJPEG(
-            from: pixelBuffer,
-            normalizedTopLeftRect: selection.boundingRect,
-            orientation: .up
-        ) else {
+        guard let feature = featurePrint(fromJPEGData: selection.referenceJPEG) else {
             DispatchQueue.main.async { [weak self] in
                 self?.scanGuidanceText = "Ảnh chưa rõ • giữ máy chắc rồi chụp lại"
             }
@@ -874,7 +1097,7 @@ final class CameraController: NSObject, ObservableObject {
         lastAcceptedFeature = feature
         featureSamples.append(feature)
         acceptedViewMasks.append(selection.cells)
-        scanReferenceImages.append(imageData)
+        scanReferenceImages.append(selection.referenceJPEG)
         confirmedTargetCells = selection.cells
 
         let count = min(manualPhotoTarget, scanReferenceImages.count)
@@ -1404,23 +1627,122 @@ final class CameraController: NSObject, ObservableObject {
         return best
     }
 
+    private struct ForegroundCandidate {
+        let rect: CGRect
+        let feature: VNFeaturePrintObservation
+    }
+
+    private func foregroundCandidates(from pixelBuffer: CVPixelBuffer) -> [ForegroundCandidate] {
+        let request = VNGenerateForegroundInstanceMaskRequest()
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
+        do {
+            try handler.perform([request])
+            guard let observation = request.results?.first else { return [] }
+            var candidates: [ForegroundCandidate] = []
+            for instance in observation.allInstances.prefix(8) {
+                let instances = IndexSet(integer: instance)
+                let maskBuffer = try observation.generateScaledMaskForImage(
+                    forInstances: instances,
+                    from: handler
+                )
+                let maskImage = CIImage(cvPixelBuffer: maskBuffer)
+                let scaled = maskImage.transformed(by: CGAffineTransform(
+                    scaleX: CGFloat(selectionGridColumns) / maskImage.extent.width,
+                    y: CGFloat(selectionGridRows) / maskImage.extent.height
+                ))
+                var bitmap = [UInt8](
+                    repeating: 0,
+                    count: selectionGridColumns * selectionGridRows
+                )
+                ciContext.render(
+                    scaled,
+                    toBitmap: &bitmap,
+                    rowBytes: selectionGridColumns,
+                    bounds: CGRect(
+                        x: 0,
+                        y: 0,
+                        width: selectionGridColumns,
+                        height: selectionGridRows
+                    ),
+                    format: .L8,
+                    colorSpace: nil
+                )
+
+                var minColumn = selectionGridColumns
+                var maxColumn = 0
+                var minRow = selectionGridRows
+                var maxRow = 0
+                var count = 0
+                for visualRow in 0..<selectionGridRows {
+                    let maskRow = selectionGridRows - 1 - visualRow
+                    for column in 0..<selectionGridColumns
+                    where bitmap[maskRow * selectionGridColumns + column] > 48 {
+                        count += 1
+                        minColumn = min(minColumn, column)
+                        maxColumn = max(maxColumn, column)
+                        minRow = min(minRow, visualRow)
+                        maxRow = max(maxRow, visualRow)
+                    }
+                }
+                guard count >= 12, minColumn <= maxColumn, minRow <= maxRow else {
+                    continue
+                }
+                let padding: CGFloat = 0.025
+                let rawRect = CGRect(
+                    x: CGFloat(minColumn) / CGFloat(selectionGridColumns),
+                    y: CGFloat(minRow) / CGFloat(selectionGridRows),
+                    width: CGFloat(maxColumn - minColumn + 1) / CGFloat(selectionGridColumns),
+                    height: CGFloat(maxRow - minRow + 1) / CGFloat(selectionGridRows)
+                )
+                let rect = rawRect
+                    .insetBy(dx: -padding, dy: -padding)
+                    .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+                let maskedBuffer = try observation.generateMaskedImage(
+                    ofInstances: instances,
+                    from: handler,
+                    croppedToInstancesExtent: true
+                )
+                guard let feature = featurePrint(
+                    from: maskedBuffer,
+                    normalizedTopLeftRect: CGRect(x: 0, y: 0, width: 1, height: 1)
+                ) else { continue }
+                candidates.append(ForegroundCandidate(rect: rect, feature: feature))
+            }
+            return candidates
+        } catch {
+            return []
+        }
+    }
+
     private func verifyAndLock(pixelBuffer: CVPixelBuffer) {
-        guard !featureSamples.isEmpty,
-              let candidate = featurePrint(from: pixelBuffer, normalizedTopLeftRect: processingRect),
-              let distance = minimumDistance(to: candidate) else {
-            publishVerificationFailure(message: "Chưa đọc được hình trong khung")
+        guard !featureSamples.isEmpty else {
+            return
+        }
+        var bestCandidate: ForegroundCandidate?
+        var bestDistance: Float?
+        for candidate in foregroundCandidates(from: pixelBuffer) {
+            guard let distance = minimumDistance(to: candidate.feature) else { continue }
+            if bestDistance == nil || distance < bestDistance! {
+                bestDistance = distance
+                bestCandidate = candidate
+            }
+        }
+        guard let candidate = bestCandidate, let distance = bestDistance else {
+            publishSearchProgress(message: "Đang tìm vật đã lưu trên toàn màn hình...")
             return
         }
 
-        // Khoảng cách feature print càng nhỏ thì ảnh càng giống mẫu đã quét.
-        let threshold: Float = 35.0
+        // Ảnh mẫu đã được tách nền nên có thể tìm lại vật ở bất kỳ vị trí nào.
+        let threshold: Float = 45.0
         let score = max(0.0, min(1.0, 1.0 - Double(distance / threshold)))
         guard distance <= threshold else {
-            publishVerificationFailure(
-                message: String(format: "Vật trong khung chưa giống mẫu (%.1f)", distance)
+            publishSearchProgress(
+                message: String(format: "Đang tìm %@ • gần nhất %.1f", detectedSubjectLabel, distance)
             )
             return
         }
+
+        processingRect = candidate.rect
 
         let visionRect = CGRect(
             x: processingRect.minX,
@@ -1441,7 +1763,7 @@ final class CameraController: NSObject, ObservableObject {
             self.targetRect = self.processingRect
             self.trackingConfidence = score
             self.matchText = String(format: "Khớp mẫu %.0f%%", score * 100)
-            self.statusText = "Đã khóa đúng tên lửa — đang bám mục tiêu"
+            self.statusText = "Đã tự tìm thấy \(self.detectedSubjectLabel) — đang bám mục tiêu"
             self.onEvent?("TARGET_LOCKED")
             if shouldStartRecording {
                 self.beginRecording()
@@ -1451,13 +1773,12 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
-    private func publishVerificationFailure(message: String) {
-        processingMode = .idle
+    private func publishSearchProgress(message: String) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.stage = self.isRecording ? .lost : .ready
+            self.stage = .verifying
             self.matchText = message
-            self.statusText = "Chưa khóa được. Căn tên lửa vừa khung rồi thử lại"
+            self.statusText = "Không cần đưa vào khung • app đang quét toàn màn hình"
         }
     }
 
@@ -2290,8 +2611,12 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             }
 
         case .verifying:
-            processingMode = .idle
-            verifyAndLock(pixelBuffer: pixelBuffer)
+            // Tách nền toàn khung khá nặng. Quét cách vài frame để camera vẫn mượt,
+            // nhưng tiếp tục tìm cho đến khi thấy vật hoặc người dùng hủy.
+            featureFrameCounter += 1
+            if featureFrameCounter % 6 == 1 {
+                verifyAndLock(pixelBuffer: pixelBuffer)
+            }
 
         case .tracking:
             track(pixelBuffer: pixelBuffer)
