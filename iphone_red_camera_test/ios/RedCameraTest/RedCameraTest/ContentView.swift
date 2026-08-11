@@ -385,7 +385,7 @@ struct ContentView: View {
         case .idle, .scanningNear, .waitingFar, .scanningFar, .waitingAround, .scanningAround:
             if camera.stage.isScanning {
                 return camera.hasSelectedSubject
-                    ? "CÙNG MỘT VẬT • \(camera.scanViewpointCount)/6 ẢNH"
+                    ? "MÔ HÌNH ĐA GÓC • \(camera.scanViewpointCount)/\(camera.referencePhotoTarget)"
                     : "CHẠM VÀO VẬT CẦN CHỤP"
             }
             return "CHỌN LOẠI • TẠO MẪU 6 ẢNH"
@@ -446,7 +446,7 @@ struct ContentView: View {
                 Spacer(minLength: 4)
                 Label(
                     camera.stage.isScanning
-                        ? "\(camera.scanViewpointCount)/6"
+                        ? "\(camera.scanViewpointCount)/\(camera.referencePhotoTarget)"
                         : "\(camera.learnedSamples)",
                     systemImage: camera.stage.isScanning
                         ? "photo.stack.fill"
@@ -500,12 +500,12 @@ struct ContentView: View {
                             .lineLimit(2)
                             .minimumScaleFactor(0.78)
                         Spacer(minLength: 4)
-                        Text("\(camera.scanViewpointCount)/6")
+                        Text("\(camera.scanViewpointCount)/\(camera.referencePhotoTarget)")
                             .font(.caption.monospacedDigit().bold())
                     }
 
                     HStack(spacing: 7) {
-                        ForEach(0..<6, id: \.self) { index in
+                        ForEach(0..<camera.referencePhotoTarget, id: \.self) { index in
                             Circle()
                                 .fill(
                                     index < camera.scanViewpointCount
@@ -680,18 +680,18 @@ struct ContentView: View {
     private var actionButtons: some View {
         switch camera.stage {
         case .idle:
-            primaryButton("Tạo mẫu từ 6 ảnh", systemImage: "camera.on.rectangle") {
+            primaryButton("Tạo mô hình 10 góc", systemImage: "camera.on.rectangle") {
                 camera.startShapeScan()
             }
             .disabled(!camera.isReady)
 
         case .waitingFar:
-            primaryButton("Tạo mẫu từ 6 ảnh", systemImage: "camera.on.rectangle") {
+            primaryButton("Tạo mô hình 10 góc", systemImage: "camera.on.rectangle") {
                 camera.startShapeScan()
             }
 
         case .waitingAround:
-            primaryButton("Tạo mẫu từ 6 ảnh", systemImage: "camera.on.rectangle") {
+            primaryButton("Tạo mô hình 10 góc", systemImage: "camera.on.rectangle") {
                 camera.startShapeScan()
             }
 
@@ -699,7 +699,7 @@ struct ContentView: View {
             primaryButton("Khóa, bám & quay", systemImage: "scope") {
                 camera.startTrackingAndRecording()
             }
-            secondaryButton("Tạo lại mẫu 6 ảnh", systemImage: "trash") {
+            secondaryButton("Tạo lại mô hình 10 góc", systemImage: "trash") {
                 camera.resetProfile()
             }
 

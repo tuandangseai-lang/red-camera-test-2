@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "2.2"
-    CURRENT_PROJECT_VERSION: "14"
+    MARKETING_VERSION: "2.3"
+    CURRENT_PROJECT_VERSION: "15"
 targets:
   RedCameraTest:
     type: application

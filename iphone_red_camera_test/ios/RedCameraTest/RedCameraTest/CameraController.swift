@@ -121,6 +121,7 @@ final class CameraController: NSObject, ObservableObject {
     let crystalGridRows = 24
 
     var onEvent: ((String) -> Void)?
+    var referencePhotoTarget: Int { manualPhotoTarget }
 
     var scanRect: CGRect {
         let width = CGFloat(max(0.48, min(scanBoxScale, 0.92)))
@@ -212,7 +213,7 @@ final class CameraController: NSObject, ObservableObject {
     private let voxelColumns = 16
     private let voxelRows = 24
     private let voxelDepthLayers = 12
-    private let manualPhotoTarget = 6
+    private let manualPhotoTarget = 10
     // Lưới đủ mịn để viền không bị vuông nhưng vẫn nhẹ cho iPhone 15.
     private let selectionGridColumns = 48
     private let selectionGridRows = 84
@@ -260,7 +261,7 @@ final class CameraController: NSObject, ObservableObject {
             return
         }
         guard stage == .ready || stage == .lost else {
-            statusText = "Hãy tạo mẫu đủ 6 ảnh trước"
+            statusText = "Hãy tạo mẫu đủ 10 ảnh đa góc trước"
             return
         }
         startTrackingAndRecording()
@@ -336,7 +337,7 @@ final class CameraController: NSObject, ObservableObject {
         trackingConfidence = 0
         matchText = "Chưa có mẫu"
         activeProfileID = nil
-        statusText = "Chọn loại rồi bấm Tạo mẫu từ 6 ảnh"
+        statusText = "Chọn loại rồi bấm Tạo mẫu từ 10 ảnh"
         onEvent?("PROFILE_RESET")
     }
 
@@ -601,7 +602,7 @@ final class CameraController: NSObject, ObservableObject {
         detectedSubjectLabel = "Chưa phân loại"
         detectedSubjectConfidence = 0
         targetRect = rect
-        matchText = "CHƯA CHỌN VẬT • cần 6 ảnh"
+        matchText = "CHƯA CHỌN VẬT • cần 10 ảnh đa góc"
 
         videoQueue.async { [weak self] in
             guard let self else { return }
@@ -688,8 +689,8 @@ final class CameraController: NSObject, ObservableObject {
 
                 guard isComplete else {
                     self.stage = .idle
-                    self.matchText = "ĐÃ CHỤP \(self.scanReferenceImages.count)/6 ẢNH"
-                    self.statusText = "Chưa đủ sáu góc nhìn; hãy chụp bổ sung"
+                    self.matchText = "ĐÃ CHỤP \(self.scanReferenceImages.count)/10 ẢNH"
+                    self.statusText = "Chưa đủ mười góc nhìn; hãy chụp bổ sung"
                     return
                 }
 
@@ -697,8 +698,8 @@ final class CameraController: NSObject, ObservableObject {
                 self.scanIsSufficient = true
                 self.stage = .ready
                 self.matchText = "ĐÃ LƯU 6 GÓC • mẫu \(self.savedProfiles.count)/5"
-                self.statusText = "Đã ghép 6 ảnh thành mẫu nhận diện. Có thể khóa và quay"
-                self.announce("Đã chụp đủ sáu góc. Mẫu nhận diện đã sẵn sàng.", kind: .success)
+                self.statusText = "Đã ghép 10 ảnh thành mô hình đa góc. Có thể khóa và quay"
+                self.announce("Đã chụp đủ mười góc. Mô hình nhận diện đã sẵn sàng.", kind: .success)
                 self.onEvent?("SHAPE_SCAN_DONE")
             }
         }
@@ -1309,7 +1310,7 @@ final class CameraController: NSObject, ObservableObject {
             self.detectedSubjectLabel = classification.label
             self.detectedSubjectConfidence = classification.confidence
             self.scanNeedsNewAngle = false
-            self.scanGuidanceText = "Đã chọn vật • bấm nút tròn để chụp ảnh 1/6"
+            self.scanGuidanceText = self.nextReferenceGuidance(after: 0)
             self.matchText = "NHẬN DIỆN: \(classification.label.uppercased()) • \(Int(classification.confidence * 100))%"
             self.statusText = selection.removedHand
                 ? "Đã loại vùng bàn tay; nếu chọn sai hãy chạm lại"
@@ -1318,6 +1319,23 @@ final class CameraController: NSObject, ObservableObject {
             self.announce("Đã chọn vật cần chụp.", kind: .success)
             self.onEvent?("SUBJECT_SELECTED")
         }
+    }
+
+    private func nextReferenceGuidance(after capturedCount: Int) -> String {
+        let instructions = [
+            "mặt trước chính diện",
+            "xoay phải khoảng 45°",
+            "mặt bên phải",
+            "xoay sau-phải",
+            "mặt sau chính diện",
+            "xoay sau-trái",
+            "mặt bên trái",
+            "xoay trước-trái",
+            "nghiêng nhẹ nhìn từ trên",
+            "nghiêng nhẹ nhìn từ dưới"
+        ]
+        guard capturedCount < instructions.count else { return "Đã đủ 10 góc" }
+        return "Ảnh \(capturedCount + 1)/10 • \(instructions[capturedCount])"
     }
 
     private func captureManualPhoto(
@@ -1355,9 +1373,6 @@ final class CameraController: NSObject, ObservableObject {
                 try feature.computeDistance(&lastDistance, to: previousFeature)
             } catch { }
             let minimumPreviousDistance = minimumDistance(to: feature) ?? lastDistance
-            let previousMask = acceptedViewMasks.last ?? confirmedTargetCells
-            let overlap = maskOverlap(selection.cells, previousMask)
-
             guard minimumPreviousDistance <= 45 else {
                 DispatchQueue.main.async { [weak self] in
                     self?.scanNeedsNewAngle = true
@@ -1365,10 +1380,10 @@ final class CameraController: NSObject, ObservableObject {
                 }
                 return
             }
-            guard lastDistance >= 0.55 || overlap <= 0.96 else {
+            guard lastDistance >= 0.85 else {
                 DispatchQueue.main.async { [weak self] in
                     self?.scanNeedsNewAngle = true
-                    self?.scanGuidanceText = "Ảnh gần như trùng • xoay vật thêm rồi chụp"
+                    self?.scanGuidanceText = "Góc này gần như trùng • xoay vật rõ hơn rồi chụp"
                 }
                 return
             }
@@ -1403,13 +1418,13 @@ final class CameraController: NSObject, ObservableObject {
             self.scanProgress = self.shapeScanCoverage
             self.scanIsSufficient = sufficient
             self.scanNeedsNewAngle = false
-            self.matchText = "ĐÃ CHỤP \(count)/6 ẢNH CÙNG MỘT VẬT"
+            self.matchText = "MÔ HÌNH ĐA GÓC • ĐÃ CHỤP \(count)/10"
             self.scanGuidanceText = sufficient
-                ? "Đã đủ 6 ảnh"
-                : "Ảnh \(count)/6 đã lưu • xoay vật rồi bấm chụp tiếp"
+                ? "Đã đủ 10 góc nhận diện"
+                : self.nextReferenceGuidance(after: count)
             self.statusText = sufficient
-                ? "Đang ghép sáu ảnh thành mẫu nhận diện..."
-                : "Giữ vật trong vùng sáng; có thể giữ iPhone cố định"
+                ? "Đang ghép mười ảnh và tạo bộ bỏ phiếu đa góc..."
+                : "Giữ tâm vật ổn định; thay đổi góc theo hướng dẫn"
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             self.onEvent?("REFERENCE_PHOTO_\(count)")
         }
@@ -1908,7 +1923,15 @@ final class CameraController: NSObject, ObservableObject {
         return best
     }
 
-    private func consensusDistance(to candidate: VNFeaturePrintObservation) -> Float? {
+    private struct MultiViewMatch {
+        let score: Float
+        let bestDistance: Float
+        let votes: Int
+        let requiredVotes: Int
+        let isAccepted: Bool
+    }
+
+    private func multiViewMatch(to candidate: VNFeaturePrintObservation) -> MultiViewMatch? {
         var distances: [Float] = []
         for sample in featureSamples {
             var distance: Float = 0
@@ -1918,10 +1941,30 @@ final class CameraController: NSObject, ObservableObject {
         }
         distances.sort()
         guard let best = distances.first else { return nil }
-        guard distances.count >= 2 else { return best }
-        // Ảnh hiện tại chỉ giống mạnh một vài góc trong sáu ảnh mẫu. Kết hợp
-        // hai góc gần nhất giảm khóa nhầm nhưng vẫn cho phép vật đang xoay.
-        return best * 0.68 + distances[1] * 0.32
+        let requiredVotes: Int
+        if distances.count >= 9 {
+            requiredVotes = 3
+        } else if distances.count >= 5 {
+            requiredVotes = 2
+        } else {
+            requiredVotes = 1
+        }
+        let voteThreshold: Float = 48
+        let votes = distances.filter { $0 <= voteThreshold }.count
+        let selected = distances.prefix(min(requiredVotes, distances.count))
+        let robustScore = selected.reduce(0, +) / Float(selected.count)
+        // Không cho một ảnh trắng duy nhất quyết định. Mẫu phải nhận đủ phiếu
+        // từ nhiều góc độc lập, đồng thời góc gần nhất cũng phải thật sự giống.
+        let accepted = best <= 36
+            && votes >= requiredVotes
+            && robustScore <= 42
+        return MultiViewMatch(
+            score: robustScore,
+            bestDistance: best,
+            votes: votes,
+            requiredVotes: requiredVotes,
+            isAccepted: accepted
+        )
     }
 
     private struct ForegroundCandidate {
@@ -2197,6 +2240,31 @@ final class CameraController: NSObject, ObservableObject {
         return best
     }
 
+    private func bestIdentityCandidate(
+        near bounds: CGRect,
+        in pixelBuffer: CVPixelBuffer
+    ) -> ForegroundCandidate? {
+        var best: ForegroundCandidate?
+        var bestScore = Float.greatestFiniteMagnitude
+        for candidate in foregroundCandidates(from: pixelBuffer) {
+            guard let feature = candidate.feature,
+                  let match = multiViewMatch(to: feature),
+                  match.isAccepted else { continue }
+            let centerDistance = hypot(
+                candidate.rect.midX - bounds.midX,
+                candidate.rect.midY - bounds.midY
+            )
+            let allowedDistance = max(0.14, max(bounds.width, bounds.height) * 1.25)
+            guard centerDistance <= allowedDistance else { continue }
+            let score = match.score + Float(centerDistance * 24)
+            if score < bestScore {
+                bestScore = score
+                best = candidate
+            }
+        }
+        return best
+    }
+
     private func directionLabel(for velocity: CGVector) -> String {
         let speed = hypot(velocity.dx, velocity.dy)
         guard speed >= 0.0007 else { return "ổn định" }
@@ -2218,29 +2286,37 @@ final class CameraController: NSObject, ObservableObject {
             return
         }
         var bestCandidate: ForegroundCandidate?
-        var bestDistance: Float?
+        var bestMatch: MultiViewMatch?
+        var closestRejected: MultiViewMatch?
         for candidate in foregroundCandidates(from: pixelBuffer) {
             guard let feature = candidate.feature,
-                  let distance = consensusDistance(to: feature) else { continue }
-            if bestDistance == nil || distance < bestDistance! {
-                bestDistance = distance
+                  let match = multiViewMatch(to: feature) else { continue }
+            if closestRejected == nil || match.score < closestRejected!.score {
+                closestRejected = match
+            }
+            guard match.isAccepted else { continue }
+            if bestMatch == nil || match.score < bestMatch!.score {
+                bestMatch = match
                 bestCandidate = candidate
             }
         }
-        guard let candidate = bestCandidate, let distance = bestDistance else {
-            publishSearchProgress(message: "Đang tìm vật đã lưu trên toàn màn hình...")
+        guard let candidate = bestCandidate, let match = bestMatch else {
+            if let rejected = closestRejected {
+                publishSearchProgress(
+                    message: String(
+                        format: "Chưa đủ phiếu đa góc • %d/%d góc • %.1f",
+                        rejected.votes,
+                        rejected.requiredVotes,
+                        rejected.score
+                    )
+                )
+            } else {
+                publishSearchProgress(message: "Đang tìm vật đã lưu trên toàn màn hình...")
+            }
             return
         }
 
-        // Ảnh mẫu đã được tách nền nên có thể tìm lại vật ở bất kỳ vị trí nào.
-        let threshold: Float = 45.0
-        let score = max(0.0, min(1.0, 1.0 - Double(distance / threshold)))
-        guard distance <= threshold else {
-            publishSearchProgress(
-                message: String(format: "Đang tìm %@ • gần nhất %.1f", detectedSubjectLabel, distance)
-            )
-            return
-        }
+        let score = max(0.0, min(1.0, 1.0 - Double(match.score / 42)))
 
         processingRect = candidate.rect
 
@@ -2276,7 +2352,12 @@ final class CameraController: NSObject, ObservableObject {
                 y: self.processingRect.midY
             )
             self.trackingConfidence = score
-            self.matchText = String(format: "Khớp mẫu %.0f%%", score * 100)
+            self.matchText = String(
+                format: "Khớp đa góc %d/%d • %.0f%%",
+                match.votes,
+                match.requiredVotes,
+                score * 100
+            )
             self.statusText = "Đã tự tìm thấy \(self.detectedSubjectLabel) — đang bám mục tiêu"
             self.onEvent?("TARGET_LOCKED")
             if shouldStartRecording {
@@ -2333,8 +2414,11 @@ final class CameraController: NSObject, ObservableObject {
 
             // Bộ bám chính chạy mỗi frame cho mượt. Cứ vài frame Vision tách nền
             // lại một lần để kéo tam giác về đúng ba điểm trên giới hạn thật của vật.
-            if trackingFrameCounter % 10 == 0 {
-                if let candidate = bestForegroundCandidate(
+            if trackingFrameCounter % 20 == 0 {
+                // Kiểm tra lại đúng danh tính bằng toàn bộ mô hình đa góc.
+                // Nếu chỉ còn một vật cùng màu hoặc tracker đã dính nền, không
+                // đủ phiếu và app chủ động chuyển sang chế độ tìm lại.
+                if let candidate = bestIdentityCandidate(
                     near: targetBounds,
                     in: pixelBuffer
                 ) {
@@ -2346,8 +2430,26 @@ final class CameraController: NSObject, ObservableObject {
                     sequenceHandler = VNSequenceRequestHandler()
                     segmentationMissFrames = 0
                 } else {
+                    segmentationMissFrames += 1
                     trackingObservation = result
-                    segmentationMissFrames += 10
+                    if segmentationMissFrames >= 2 {
+                        markTargetLost()
+                        return
+                    }
+                }
+            } else if trackingFrameCounter % 10 == 0 {
+                if let candidate = bestForegroundCandidate(
+                    near: targetBounds,
+                    in: pixelBuffer
+                ) {
+                    targetBounds = candidate.rect
+                    rawTriangle = candidate.trianglePoints.count == 3
+                        ? candidate.trianglePoints
+                        : representativeTrackingPoints(in: candidate.rect)
+                    trackingObservation = self.observation(fromTopLeftRect: candidate.rect)
+                    sequenceHandler = VNSequenceRequestHandler()
+                } else {
+                    trackingObservation = result
                 }
             } else {
                 trackingObservation = result
@@ -2455,7 +2557,7 @@ final class CameraController: NSObject, ObservableObject {
             self.trackingPoints = []
             self.predictedTargetPoint = nil
             self.trackingConfidence = 0
-            self.matchText = "Mất mục tiêu • đang tự tìm lại mẫu 6 ảnh"
+            self.matchText = "Mất mục tiêu • đang tự tìm lại mô hình đa góc"
             self.statusText = "Servo đang quét góc nhỏ; app tự khóa lại ngay khi nhận ra vật"
             self.returnToUltraWide()
             self.announce("Mất mục tiêu. Đang tự tìm lại.", kind: .warning)
