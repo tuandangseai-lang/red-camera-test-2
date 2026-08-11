@@ -200,6 +200,7 @@ final class CameraController: NSObject, ObservableObject {
     private var aiDetectionMisses = 0
     private var pendingAIDetectionRect: CGRect?
     private var pendingAIDetectionCount = 0
+    private var parachuteDetected = false
 
     // Quét 3D gần đúng trên iPhone không LiDAR: ARKit cung cấp vị trí camera và
     // điểm đặc trưng 3D, Vision giữ lại các điểm nằm trên mặt nạ chủ thể.
@@ -2389,9 +2390,14 @@ final class CameraController: NSObject, ObservableObject {
         in pixelBuffer: CVPixelBuffer,
         near expectedRect: CGRect?
     ) -> WaterRocketDetection? {
+        let expectedArea = expectedRect.map { $0.width * $0.height } ?? 1
+        let isTinyContinuation = expectedRect != nil && expectedArea < 0.0035
+        // Một tên lửa xa chỉ vài pixel thường có độ tin cậy thấp. Chỉ hạ ngưỡng
+        // khi đã có quỹ đạo dự đoán; tìm mới toàn màn hình vẫn giữ ngưỡng cao để
+        // cây và cờ không thể tự biến thành mục tiêu.
         let minimumConfidence = expectedRect == nil
             ? aiAcquisitionConfidence
-            : aiContinuationConfidence
+            : (isTinyContinuation ? 0.07 : aiContinuationConfidence)
         let detections = aiDetector.detect(
             in: pixelBuffer,
             minimumConfidence: minimumConfidence
@@ -2418,7 +2424,10 @@ final class CameraController: NSObject, ObservableObject {
             let detectedArea = max(0.00001, detection.rect.width * detection.rect.height)
             let expectedArea = max(0.00001, expectedRect.width * expectedRect.height)
             let areaRatio = max(detectedArea, expectedArea) / min(detectedArea, expectedArea)
-            let allowedDistance = max(0.22, max(expectedRect.width, expectedRect.height) * 3.2)
+            let allowedDistance = max(
+                isTinyContinuation ? 0.105 : 0.22,
+                max(expectedRect.width, expectedRect.height) * 3.2
+            )
             guard centerDistance <= allowedDistance || overlap > 0 else { continue }
 
             let score = centerDistance * 3.0
@@ -2457,6 +2466,7 @@ final class CameraController: NSObject, ObservableObject {
         previousTrackingCenter = CGPoint(x: clippedRect.midX, y: clippedRect.midY)
         smoothedTrackingVelocity = .zero
         motionFilter.reset(rect: clippedRect, timestamp: CACurrentMediaTime())
+        parachuteDetected = false
         processingMode = .tracking
 
         let shouldStartRecording = shouldRecordAfterVerification
@@ -2748,12 +2758,31 @@ final class CameraController: NSObject, ObservableObject {
             let predictedPoint = estimate.predictedPoint
             let confidence = max(0, min(1, measurementConfidence))
             let direction = directionLabel(for: estimate.velocity)
+            let previousArea = max(0.00001, previousBounds.width * previousBounds.height)
+            let currentArea = max(0.00001, targetBounds.width * targetBounds.height)
+            let areaGrowth = currentArea / previousArea
+            let aspect = targetBounds.width / max(0.0001, targetBounds.height)
+            if estimate.velocity.dy > 0.00065,
+               (areaGrowth > 1.22 || aspect > 0.72) {
+                parachuteDetected = true
+            }
+            let flightPhase: String
+            if parachuteDetected {
+                flightPhase = "DÙ BUNG • ĐANG RƠI"
+            } else if estimate.velocity.dy > 0.00065 {
+                flightPhase = "ĐANG RƠI"
+            } else if estimate.velocity.dy < -0.00065 {
+                flightPhase = "ĐANG BAY LÊN"
+            } else {
+                flightPhase = "ĐANG GIỮ MỤC TIÊU"
+            }
 
             var appearanceText: String?
             if trackingFrameCounter % 12 == 0 {
                 appearanceText = String(
-                    format: "%@ • Kalman %@ • tin cậy %.0f%%",
+                    format: "%@ • %@ • Kalman %@ • tin cậy %.0f%%",
                     aiDetector.isAvailable ? "YOLO AI" : "Vision dự phòng",
+                    flightPhase,
                     direction,
                     confidence * 100
                 )
@@ -2807,6 +2836,7 @@ final class CameraController: NSObject, ObservableObject {
         smoothedTrackingVelocity = .zero
         motionFilter.clear()
         aiDetectionMisses = 0
+        parachuteDetected = false
         clearPendingAIDetection()
         sequenceHandler = VNSequenceRequestHandler()
         DispatchQueue.main.async { [weak self] in
