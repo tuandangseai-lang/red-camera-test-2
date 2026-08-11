@@ -82,7 +82,7 @@ jobs:
           grep -q "final class RocketAIDetector" "RedCameraTest/RocketAIDetector.swift"
           grep -q "RocketMotionFilter" "RedCameraTest/RocketMotionFilter.swift"
           grep -q "verifyWithAIDetector" "RedCameraTest/CameraController.swift"
-          grep -q "aiAcquisitionConfidence = 0.36" "RedCameraTest/CameraController.swift"
+          grep -q "aiAcquisitionConfidence = 0.42" "RedCameraTest/CameraController.swift"
           test -d "RedCameraTest/WaterRocketDetector.mlpackage"
           grep -q "VNGenerateForegroundInstanceMaskRequest" "RedCameraTest/CameraController.swift"
           grep -q "connectedCrystalCells" "RedCameraTest/CameraController.swift"
