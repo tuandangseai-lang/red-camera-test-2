@@ -20,6 +20,13 @@ Giọng báo được bật mặc định. Có thể tắt bằng công tắc **
 
 Bản 1.1 (build 3) kiểm tra phiên bản trước khi dùng `displayVideoZoomFactorMultiplier`, nhờ đó biên dịch được với deployment target iOS 17 và vẫn tận dụng hệ số zoom hệ thống trên iOS 18 trở lên.
 
+## Vòng báo quét đủ (bản 1.2)
+
+- Quét gần cần 18 mẫu hợp lệ, quét xa cần 18 mẫu và quét xung quanh cần 24 mẫu.
+- Vòng vàng hiển thị phần trăm và chữ **CHƯA ĐỦ** trong lúc lấy mẫu.
+- Khi đạt yêu cầu, vòng chuyển xanh, hiện dấu kiểm và chữ **ĐÃ ĐỦ**.
+- Giao diện trên/dưới đã được rút gọn để dành phần lớn màn hình cho hình camera.
+
 ## Cách học một tên lửa
 
 1. Mở app, chờ camera sẵn sàng.

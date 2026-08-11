@@ -1,4 +1,4 @@
-name: Tao IPA Rocket Tracker v5.1 - sua loi iOS 17
+name: Tao IPA Rocket Tracker v6 - vong quet gon
 
 on:
   workflow_dispatch:
@@ -35,8 +35,10 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :NSBluetoothAlwaysUsageDescription" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :NSPhotoLibraryAddUsageDescription" "$PLIST"
           test -f "RedCameraTest/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
-          grep -q "Giọng báo tiếng Việt" "RedCameraTest/ContentView.swift"
+          grep -q "speaker.wave.2.fill" "RedCameraTest/ContentView.swift"
           grep -q "if #available(iOS 18.0, \*)" "RedCameraTest/CameraController.swift"
+          grep -q "scanProgressRing" "RedCameraTest/ContentView.swift"
+          grep -q "scanSampleTarget" "RedCameraTest/CameraController.swift"
 
       - name: Bien dich app iPhone (chua ky)
         working-directory: iphone_red_camera_test/ios/RedCameraTest

@@ -48,6 +48,9 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var stage: RocketLearningStage = .idle
     @Published private(set) var learnedSamples = 0
     @Published private(set) var scanProgress = 0.0
+    @Published private(set) var scanSampleCount = 0
+    @Published private(set) var scanSampleTarget = 0
+    @Published private(set) var scanIsSufficient = false
     @Published private(set) var targetRect: CGRect?
     @Published private(set) var trackingConfidence = 0.0
     @Published private(set) var matchText = "Chưa có mẫu"
@@ -104,8 +107,7 @@ final class CameraController: NSObject, ObservableObject {
     private var processingRect = CGRect(x: 0.29, y: 0.15, width: 0.42, height: 0.70)
     private var featureSamples: [VNFeaturePrintObservation] = []
     private var stageStartingSampleCount = 0
-    private var scanStartedAt = 0.0
-    private var scanDuration = 5.0
+    private var activeScanTarget = 18
     private var frameCounter = 0
     private var featureFrameCounter = 0
     private var trackingFrameCounter = 0
@@ -186,6 +188,9 @@ final class CameraController: NSObject, ObservableObject {
         stage = .idle
         learnedSamples = 0
         scanProgress = 0
+        scanSampleCount = 0
+        scanSampleTarget = 0
+        scanIsSufficient = false
         targetRect = nil
         trackingConfidence = 0
         matchText = "Chưa có mẫu"
@@ -244,6 +249,7 @@ final class CameraController: NSObject, ObservableObject {
     private func startScan(kind: ScanKind, duration: Double, resetProfile: Bool) {
         scanFinishWorkItem?.cancel()
         let rect = scanRect
+        let requiredSamples = sampleTarget(for: kind)
 
         switch kind {
         case .near:
@@ -258,8 +264,11 @@ final class CameraController: NSObject, ObservableObject {
         }
 
         scanProgress = 0
+        scanSampleCount = 0
+        scanSampleTarget = requiredSamples
+        scanIsSufficient = false
         targetRect = rect
-        matchText = "Đang lấy mẫu hình ảnh..."
+        matchText = "CHƯA ĐỦ • 0/\(requiredSamples) mẫu"
 
         videoQueue.async { [weak self] in
             guard let self else { return }
@@ -267,11 +276,12 @@ final class CameraController: NSObject, ObservableObject {
                 self.featureSamples.removeAll()
                 self.sequenceHandler = VNSequenceRequestHandler()
                 self.trackingObservation = nil
+            } else if self.featureSamples.count > 180 {
+                self.featureSamples.removeFirst(self.featureSamples.count - 180)
             }
             self.processingRect = rect
             self.stageStartingSampleCount = self.featureSamples.count
-            self.scanStartedAt = CACurrentMediaTime()
-            self.scanDuration = duration
+            self.activeScanTarget = requiredSamples
             self.featureFrameCounter = 0
             self.processingMode = .scanning(kind)
         }
@@ -289,13 +299,17 @@ final class CameraController: NSObject, ObservableObject {
             guard let self else { return }
             let newSampleCount = self.featureSamples.count - self.stageStartingSampleCount
             let totalSampleCount = self.featureSamples.count
+            let requiredSamples = self.sampleTarget(for: kind)
             self.processingMode = .idle
             DispatchQueue.main.async {
-                self.scanProgress = 1
+                self.scanSampleCount = newSampleCount
+                self.scanSampleTarget = requiredSamples
+                self.scanProgress = min(1, Double(newSampleCount) / Double(requiredSamples))
+                self.scanIsSufficient = newSampleCount >= requiredSamples
                 self.learnedSamples = totalSampleCount
 
-                guard newSampleCount >= 3 else {
-                    self.matchText = "Chưa lấy đủ mẫu"
+                guard newSampleCount >= requiredSamples else {
+                    self.matchText = "CHƯA ĐỦ • \(newSampleCount)/\(requiredSamples) mẫu"
                     switch kind {
                     case .near:
                         self.stage = .idle
@@ -311,7 +325,9 @@ final class CameraController: NSObject, ObservableObject {
                     return
                 }
 
-                self.matchText = "Đã lưu \(totalSampleCount) mẫu"
+                self.scanProgress = 1
+                self.scanIsSufficient = true
+                self.matchText = "ĐÃ ĐỦ • đã lưu \(totalSampleCount) mẫu"
                 switch kind {
                 case .near:
                     self.stage = .waitingFar
@@ -336,6 +352,14 @@ final class CameraController: NSObject, ObservableObject {
         case .near: return "NEAR"
         case .far: return "FAR"
         case .around: return "AROUND"
+        }
+    }
+
+    private func sampleTarget(for kind: ScanKind) -> Int {
+        switch kind {
+        case .near: return 18
+        case .far: return 18
+        case .around: return 24
         }
     }
 
@@ -842,21 +866,25 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         case .scanning:
             featureFrameCounter += 1
-            if featureFrameCounter % 5 == 0,
-               featureSamples.count < 120,
+            let currentStageSamples = featureSamples.count - stageStartingSampleCount
+            if featureFrameCounter % 6 == 0,
+               currentStageSamples < activeScanTarget,
                let feature = featurePrint(from: pixelBuffer, normalizedTopLeftRect: processingRect) {
                 featureSamples.append(feature)
-                let count = featureSamples.count
+                let totalCount = featureSamples.count
+                let stageCount = totalCount - stageStartingSampleCount
+                let progress = min(1, Double(stageCount) / Double(activeScanTarget))
+                let sufficient = stageCount >= activeScanTarget
                 DispatchQueue.main.async { [weak self] in
-                    self?.learnedSamples = count
-                    self?.matchText = "Đã lấy \(count) mẫu"
-                }
-            }
-
-            if frameCounter % 3 == 0 {
-                let progress = min(1.0, (CACurrentMediaTime() - scanStartedAt) / scanDuration)
-                DispatchQueue.main.async { [weak self] in
-                    self?.scanProgress = progress
+                    guard let self else { return }
+                    self.learnedSamples = totalCount
+                    self.scanSampleCount = stageCount
+                    self.scanSampleTarget = self.activeScanTarget
+                    self.scanProgress = progress
+                    self.scanIsSufficient = sufficient
+                    self.matchText = sufficient
+                        ? "ĐÃ ĐỦ • giữ ổn định đến khi hoàn tất"
+                        : "CHƯA ĐỦ • \(stageCount)/\(self.activeScanTarget) mẫu"
                 }
             }
 
