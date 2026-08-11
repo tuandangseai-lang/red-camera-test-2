@@ -53,12 +53,17 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var scanIsSufficient = false
     @Published private(set) var scanNeedsNewAngle = false
     @Published private(set) var scanGuidanceText = "Đưa tên lửa vào khung"
+    @Published private(set) var crystalCells: [Int] = []
+    @Published private(set) var crystalCoverage = 0.0
     @Published private(set) var targetRect: CGRect?
     @Published private(set) var trackingConfidence = 0.0
     @Published private(set) var matchText = "Chưa có mẫu"
     @Published private(set) var frameAspectRatio: CGFloat = 9.0 / 16.0
     @Published var scanBoxScale = 0.42
     @Published var voiceAnnouncementsEnabled = true
+
+    let crystalGridColumns = 16
+    let crystalGridRows = 24
 
     var onEvent: ((String) -> Void)?
 
@@ -109,8 +114,9 @@ final class CameraController: NSObject, ObservableObject {
     private var processingRect = CGRect(x: 0.29, y: 0.15, width: 0.42, height: 0.70)
     private var featureSamples: [VNFeaturePrintObservation] = []
     private var stageStartingSampleCount = 0
-    private var activeScanTarget = 8
-    private var lastNoveltyCheckAt = 0.0
+    private var shapeScanCoverage = 0.0
+    private var crystalBaseCells: [Int] = []
+    private var lastShapeScanAt = 0.0
     private var frameCounter = 0
     private var featureFrameCounter = 0
     private var trackingFrameCounter = 0
@@ -155,13 +161,13 @@ final class CameraController: NSObject, ObservableObject {
             return
         }
         guard stage == .ready || stage == .lost else {
-            statusText = "Hãy hoàn thành Quét gần, Quét xa và Quét xung quanh trước"
+            statusText = "Hãy quét hình dạng tới khi tinh thể phủ 80% trước"
             return
         }
         startTrackingAndRecording()
     }
 
-    func startNearScan() {
+    func startShapeScan() {
         guard isReady, !isRecording else { return }
         startScan(kind: .near, resetProfile: true)
     }
@@ -194,10 +200,12 @@ final class CameraController: NSObject, ObservableObject {
         scanIsSufficient = false
         scanNeedsNewAngle = false
         scanGuidanceText = "Đưa tên lửa vào khung"
+        crystalCells = []
+        crystalCoverage = 0
         targetRect = nil
         trackingConfidence = 0
         matchText = "Chưa có mẫu"
-        statusText = "Đặt tên lửa vào khung, chỉnh kích thước rồi bấm Quét gần"
+        statusText = "Đặt tên lửa vào khung, chỉnh kích thước rồi bấm Quét hình dạng"
         onEvent?("PROFILE_RESET")
     }
 
@@ -256,7 +264,7 @@ final class CameraController: NSObject, ObservableObject {
         switch kind {
         case .near:
             stage = .scanningNear
-            statusText = "Quét gần không giới hạn thời gian • làm theo mũi chỉ dẫn"
+            statusText = "Giữ tên lửa trong khung • tinh thể đang nhận hình dạng"
         case .far:
             stage = .scanningFar
             statusText = "Quét xa không giới hạn thời gian • làm theo mũi chỉ dẫn"
@@ -270,9 +278,11 @@ final class CameraController: NSObject, ObservableObject {
         scanSampleTarget = requiredSamples
         scanIsSufficient = false
         scanNeedsNewAngle = false
-        scanGuidanceText = scanGuidance(for: kind, collected: 0)
+        scanGuidanceText = "Đang tách vật thể khỏi nền và ghép các tam giác"
+        crystalCells = []
+        crystalCoverage = 0
         targetRect = rect
-        matchText = "0/\(requiredSamples) • cứ quét từ từ, không hết giờ"
+        matchText = "TINH THỂ 0% • mục tiêu phủ 80%"
 
         videoQueue.async { [weak self] in
             guard let self else { return }
@@ -285,9 +295,10 @@ final class CameraController: NSObject, ObservableObject {
             }
             self.processingRect = rect
             self.stageStartingSampleCount = self.featureSamples.count
-            self.activeScanTarget = requiredSamples
+            self.shapeScanCoverage = 0
+            self.crystalBaseCells.removeAll()
             self.featureFrameCounter = 0
-            self.lastNoveltyCheckAt = 0
+            self.lastShapeScanAt = 0
             self.processingMode = .scanning(kind)
         }
 
@@ -297,53 +308,33 @@ final class CameraController: NSObject, ObservableObject {
     private func finishScan(kind: ScanKind) {
         videoQueue.async { [weak self] in
             guard let self else { return }
-            let newSampleCount = self.featureSamples.count - self.stageStartingSampleCount
             let totalSampleCount = self.featureSamples.count
-            let requiredSamples = self.sampleTarget(for: kind)
+            let coveragePercent = Int((self.shapeScanCoverage * 100).rounded())
+            let isComplete = self.shapeScanCoverage >= 0.8
+            let publishedCoverage = self.shapeScanCoverage
             self.processingMode = .idle
             DispatchQueue.main.async {
-                self.scanSampleCount = newSampleCount
-                self.scanSampleTarget = requiredSamples
-                self.scanProgress = min(1, Double(newSampleCount) / Double(requiredSamples))
-                self.scanIsSufficient = newSampleCount >= requiredSamples
+                self.scanSampleCount = coveragePercent
+                self.scanSampleTarget = 80
+                self.scanProgress = publishedCoverage
+                self.scanIsSufficient = isComplete
                 self.scanNeedsNewAngle = false
                 self.learnedSamples = totalSampleCount
 
-                guard newSampleCount >= requiredSamples else {
-                    self.matchText = "CHƯA ĐỦ • \(newSampleCount)/\(requiredSamples) góc mới"
-                    switch kind {
-                    case .near:
-                        self.stage = .idle
-                        self.statusText = "Không thấy đủ hình trong khung; hãy Quét gần lại"
-                    case .far:
-                        self.stage = .waitingFar
-                        self.statusText = "Chưa đủ mẫu xa; hãy chỉnh khung nhỏ hơn và thử lại"
-                    case .around:
-                        self.stage = .waitingAround
-                        self.statusText = "Chưa đủ góc nhìn; hãy quét xung quanh lại"
-                    }
-                    self.announce("Quét chưa đủ. Hãy thử lại.", kind: .warning)
+                guard isComplete else {
+                    self.stage = .idle
+                    self.matchText = "TINH THỂ \(coveragePercent)% • chưa đạt 80%"
+                    self.statusText = "Đặt tên lửa gọn trong khung rồi quét lại hình dạng"
                     return
                 }
 
-                self.scanProgress = 1
+                self.scanProgress = 0.8
                 self.scanIsSufficient = true
-                self.matchText = "ĐÃ ĐỦ • đã lưu \(totalSampleCount) mẫu"
-                switch kind {
-                case .near:
-                    self.stage = .waitingFar
-                    self.statusText = "Xong quét gần. Lùi ra xa, chỉnh khung rồi bấm Quét xa"
-                    self.announce("Đã quét gần.", kind: .success)
-                case .far:
-                    self.stage = .waitingAround
-                    self.statusText = "Xong quét xa. Đổi nhiều góc rồi bấm Quét xung quanh"
-                    self.announce("Đã quét xa.", kind: .success)
-                case .around:
-                    self.stage = .ready
-                    self.statusText = "Đã học xong. Đưa tên lửa vào khung rồi bấm Khóa và bám"
-                    self.announce("Đã quét xong. Sẵn sàng bám tên lửa.", kind: .success)
-                }
-                self.onEvent?("SCAN_\(self.scanName(kind))_DONE")
+                self.stage = .ready
+                self.matchText = "ĐÃ PHỦ 80% • đã ghi nhớ hình dạng"
+                self.statusText = "Tinh thể đã phủ đủ. Có thể bấm Khóa, bám và quay"
+                self.announce("Đã quét đủ hình dạng. Sẵn sàng bám tên lửa.", kind: .success)
+                self.onEvent?("SHAPE_SCAN_DONE")
             }
         }
     }
@@ -357,50 +348,153 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func sampleTarget(for kind: ScanKind) -> Int {
-        switch kind {
-        case .near: return 5
-        case .far: return 5
-        case .around: return 6
+        80
+    }
+
+    private func foregroundCrystalCells(
+        from pixelBuffer: CVPixelBuffer,
+        normalizedTopLeftRect rect: CGRect
+    ) -> [Int]? {
+        let request = VNGenerateForegroundInstanceMaskRequest()
+        request.regionOfInterest = CGRect(
+            x: rect.minX,
+            y: 1.0 - rect.maxY,
+            width: rect.width,
+            height: rect.height
+        )
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
+
+        do {
+            try handler.perform([request])
+            guard let observation = request.results?.first,
+                  !observation.allInstances.isEmpty else { return nil }
+            let maskBuffer = try observation.generateScaledMaskForImage(
+                forInstances: observation.allInstances,
+                from: handler
+            )
+            let maskImage = CIImage(cvPixelBuffer: maskBuffer)
+            let extent = maskImage.extent
+            let cropRect = CGRect(
+                x: extent.minX + rect.minX * extent.width,
+                y: extent.minY + (1.0 - rect.maxY) * extent.height,
+                width: rect.width * extent.width,
+                height: rect.height * extent.height
+            ).intersection(extent)
+            guard cropRect.width > 1, cropRect.height > 1 else { return nil }
+
+            let moved = maskImage
+                .cropped(to: cropRect)
+                .transformed(by: CGAffineTransform(
+                    translationX: -cropRect.minX,
+                    y: -cropRect.minY
+                ))
+            let scaled = moved.transformed(by: CGAffineTransform(
+                scaleX: CGFloat(crystalGridColumns) / cropRect.width,
+                y: CGFloat(crystalGridRows) / cropRect.height
+            ))
+            var bitmap = [UInt8](
+                repeating: 0,
+                count: crystalGridColumns * crystalGridRows
+            )
+            ciContext.render(
+                scaled,
+                toBitmap: &bitmap,
+                rowBytes: crystalGridColumns,
+                bounds: CGRect(
+                    x: 0,
+                    y: 0,
+                    width: crystalGridColumns,
+                    height: crystalGridRows
+                ),
+                format: .L8,
+                colorSpace: nil
+            )
+
+            var cells: [Int] = []
+            for visualRow in 0..<crystalGridRows {
+                let maskRow = crystalGridRows - 1 - visualRow
+                for column in 0..<crystalGridColumns {
+                    let maskIndex = maskRow * crystalGridColumns + column
+                    if bitmap[maskIndex] > 48 {
+                        cells.append(visualRow * crystalGridColumns + column)
+                    }
+                }
+            }
+            return cells.count >= 8 ? cells : nil
+        } catch {
+            return nil
         }
     }
 
-    private func noveltyThreshold(for kind: ScanKind) -> Float {
-        switch kind {
-        case .near, .far: return 0.75
-        case .around: return 1.0
+    private func fallbackRocketCells() -> [Int] {
+        var cells: [Int] = []
+        for row in 0..<crystalGridRows {
+            let y = (Double(row) + 0.5) / Double(crystalGridRows)
+            let halfWidth: Double
+            if y < 0.16 {
+                halfWidth = 0.04 + y * 0.75
+            } else if y > 0.80 {
+                halfWidth = 0.16 + (y - 0.80) * 0.65
+            } else {
+                halfWidth = 0.16
+            }
+            for column in 0..<crystalGridColumns {
+                let x = (Double(column) + 0.5) / Double(crystalGridColumns)
+                if abs(x - 0.5) <= halfWidth {
+                    cells.append(row * crystalGridColumns + column)
+                }
+            }
         }
+        return cells
     }
 
-    private func scanGuidance(for kind: ScanKind, collected: Int) -> String {
-        let steps: [String]
-        switch kind {
-        case .near:
-            steps = [
-                "① Đưa tên lửa gần, nằm đầy trong khung",
-                "② Xoay nhẹ sang trái ↖",
-                "③ Xoay nhẹ sang phải ↗",
-                "④ Nghiêng đầu tên lửa lên ↑",
-                "⑤ Nghiêng đầu tên lửa xuống ↓"
-            ]
-        case .far:
-            steps = [
-                "① Lùi ra để thấy trọn tên lửa",
-                "② Dịch nhẹ sang trái ←",
-                "③ Dịch nhẹ sang phải →",
-                "④ Nâng góc nhìn lên ↑",
-                "⑤ Hạ góc nhìn xuống ↓"
-            ]
-        case .around:
-            steps = [
-                "① Cho camera thấy mặt trước",
-                "② Xoay tên lửa 1/4 vòng trái ↶",
-                "③ Xoay tên lửa 1/4 vòng phải ↷",
-                "④ Cho camera thấy mặt bên",
-                "⑤ Cho camera thấy mặt sau",
-                "⑥ Nghiêng chéo thêm một góc"
-            ]
+    private func connectedCrystalCells(from cells: [Int], coverage: Double) -> [Int] {
+        let available = Set(cells)
+        guard !available.isEmpty else { return [] }
+
+        let centerColumn = crystalGridColumns / 2
+        let centerRow = crystalGridRows / 2
+        func distanceToCenter(_ index: Int) -> Int {
+            let column = index % crystalGridColumns
+            let row = index / crystalGridColumns
+            return abs(column - centerColumn) + abs(row - centerRow)
         }
-        return steps[min(max(0, collected), steps.count - 1)]
+
+        var remaining = available
+        var ordered: [Int] = []
+        while !remaining.isEmpty {
+            guard let seed = remaining.min(by: {
+                distanceToCenter($0) < distanceToCenter($1)
+            }) else { break }
+            var queue = [seed]
+            remaining.remove(seed)
+            var cursor = 0
+            while cursor < queue.count {
+                let current = queue[cursor]
+                cursor += 1
+                ordered.append(current)
+                let column = current % crystalGridColumns
+                let row = current / crystalGridColumns
+                for rowOffset in -1...1 {
+                    for columnOffset in -1...1 where rowOffset != 0 || columnOffset != 0 {
+                        let nextColumn = column + columnOffset
+                        let nextRow = row + rowOffset
+                        guard nextColumn >= 0, nextColumn < crystalGridColumns,
+                              nextRow >= 0, nextRow < crystalGridRows else { continue }
+                        let next = nextRow * crystalGridColumns + nextColumn
+                        if remaining.remove(next) != nil {
+                            queue.append(next)
+                        }
+                    }
+                }
+            }
+        }
+
+        let visibleCount = max(1, min(
+            ordered.count,
+            Int((Double(ordered.count) * min(0.8, coverage)).rounded())
+        ))
+        return Array(ordered.prefix(visibleCount))
     }
 
     private func configureSession(includeAudio: Bool) {
@@ -947,57 +1041,51 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         case .scanning(let kind):
             featureFrameCounter += 1
-            let currentStageSamples = featureSamples.count - stageStartingSampleCount
             let now = CACurrentMediaTime()
             if featureFrameCounter % 6 == 0,
-               currentStageSamples < activeScanTarget,
-               now - lastNoveltyCheckAt >= 0.28 {
-                lastNoveltyCheckAt = now
+               shapeScanCoverage < 0.8,
+               now - lastShapeScanAt >= 0.55 {
+                lastShapeScanAt = now
                 if let feature = featurePrint(
                     from: pixelBuffer,
                     normalizedTopLeftRect: processingRect
                 ) {
-                    let stageSamples = featureSamples[
-                        stageStartingSampleCount..<featureSamples.count
-                    ]
-                    let noveltyDistance = minimumDistance(to: feature, among: stageSamples)
-                    let isNewView = stageSamples.isEmpty
-                        || (noveltyDistance ?? 0) >= noveltyThreshold(for: kind)
+                    featureSamples.append(feature)
+                    if let detectedCells = foregroundCrystalCells(
+                        from: pixelBuffer,
+                        normalizedTopLeftRect: processingRect
+                    ) {
+                        crystalBaseCells = detectedCells
+                    } else if crystalBaseCells.isEmpty {
+                        crystalBaseCells = fallbackRocketCells()
+                    }
 
-                    if isNewView {
-                        featureSamples.append(feature)
-                        let totalCount = featureSamples.count
-                        let stageCount = totalCount - stageStartingSampleCount
-                        let target = activeScanTarget
-                        let progress = min(1, Double(stageCount) / Double(target))
-                        let sufficient = stageCount >= target
-                        DispatchQueue.main.async { [weak self] in
-                            guard let self else { return }
-                            self.learnedSamples = totalCount
-                            self.scanSampleCount = stageCount
-                            self.scanSampleTarget = target
-                            self.scanProgress = progress
-                            self.scanIsSufficient = sufficient
-                            self.scanNeedsNewAngle = false
-                            self.scanGuidanceText = sufficient
-                                ? "Đã đủ • tự chuyển sang bước tiếp theo"
-                                : self.scanGuidance(for: kind, collected: stageCount)
-                            self.matchText = sufficient
-                                ? "ĐÃ ĐỦ • \(stageCount) góc khác nhau"
-                                : "ĐÃ NHẬN • \(stageCount)/\(target) góc"
-                        }
-                        if sufficient {
-                            finishScan(kind: kind)
-                        }
-                    } else {
-                        let stageCount = featureSamples.count - stageStartingSampleCount
-                        let target = activeScanTarget
-                        DispatchQueue.main.async { [weak self] in
-                            guard let self else { return }
-                            self.scanNeedsNewAngle = true
-                            self.scanGuidanceText = "Đổi nhẹ góc • \(self.scanGuidance(for: kind, collected: stageCount))"
-                            self.matchText = "CHỜ GÓC KHÁC • \(stageCount)/\(target) • không hết giờ"
-                        }
+                    shapeScanCoverage = min(0.8, shapeScanCoverage + 0.10)
+                    let visibleCells = connectedCrystalCells(
+                        from: crystalBaseCells,
+                        coverage: shapeScanCoverage
+                    )
+                    let publishedCoverage = shapeScanCoverage
+                    let totalCount = featureSamples.count
+                    let coveragePercent = Int((shapeScanCoverage * 100).rounded())
+                    let sufficient = shapeScanCoverage >= 0.8
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        self.learnedSamples = totalCount
+                        self.scanSampleCount = coveragePercent
+                        self.scanSampleTarget = 80
+                        self.scanProgress = publishedCoverage
+                        self.crystalCoverage = publishedCoverage
+                        self.crystalCells = visibleCells
+                        self.scanIsSufficient = sufficient
+                        self.scanNeedsNewAngle = false
+                        self.scanGuidanceText = sufficient
+                            ? "Tinh thể đã liên kết và phủ gần đủ vật thể"
+                            : "Giữ trong khung, xoay nhẹ để tinh thể phủ tiếp"
+                        self.matchText = "TINH THỂ \(coveragePercent)% • mục tiêu 80%"
+                    }
+                    if sufficient {
+                        finishScan(kind: kind)
                     }
                 }
             }

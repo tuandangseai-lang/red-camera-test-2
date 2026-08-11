@@ -1,4 +1,4 @@
-name: Tao IPA Rocket Tracker v9 - quet khong het gio
+name: Tao IPA Rocket Tracker v10 - tinh the phu 80 phan tram
 
 on:
   workflow_dispatch:
@@ -47,10 +47,10 @@ jobs:
           grep -q "scanSampleTarget" "RedCameraTest/CameraController.swift"
           grep -q "maximumSmoothDisplayZoom: CGFloat = 0.98" "RedCameraTest/CameraController.swift"
           grep -q "hd4K3840x2160" "RedCameraTest/CameraController.swift"
-          grep -q "noveltyThreshold" "RedCameraTest/CameraController.swift"
-          grep -q "scanNeedsNewAngle" "RedCameraTest/ContentView.swift"
-          grep -q "case .near: return 5" "RedCameraTest/CameraController.swift"
-          grep -q "case .around: return 6" "RedCameraTest/CameraController.swift"
+          grep -q "VNGenerateForegroundInstanceMaskRequest" "RedCameraTest/CameraController.swift"
+          grep -q "connectedCrystalCells" "RedCameraTest/CameraController.swift"
+          grep -q "crystalMesh" "RedCameraTest/ContentView.swift"
+          grep -q "startShapeScan" "RedCameraTest/ContentView.swift"
           if grep -q "scanFinishWorkItem" "RedCameraTest/CameraController.swift"; then
             echo "Van con gioi han thoi gian quet"
             exit 1

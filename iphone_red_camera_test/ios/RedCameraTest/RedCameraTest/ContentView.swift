@@ -51,6 +51,11 @@ struct ContentView: View {
                         .frame(width: rect.width, height: rect.height)
                         .position(x: rect.midX, y: rect.midY)
 
+                    if !camera.crystalCells.isEmpty,
+                       camera.stage.isScanning || camera.stage == .ready {
+                        crystalMesh(in: rect)
+                    }
+
                     Text(guideLabel)
                         .font(.caption.bold())
                         .foregroundStyle(.black)
@@ -109,8 +114,8 @@ struct ContentView: View {
                 }
                 Text(
                     camera.scanIsSufficient
-                        ? "ĐÃ ĐỦ"
-                        : (camera.scanNeedsNewAngle ? "GÓC TRÙNG" : "CHƯA ĐỦ")
+                        ? "ĐÃ PHỦ"
+                        : "ĐANG GHÉP"
                 )
                     .font(.system(size: 9, weight: .bold))
             }
@@ -132,14 +137,53 @@ struct ContentView: View {
         return max(40, rect.minX - 46)
     }
 
+    private func crystalMesh(in rect: CGRect) -> some View {
+        Canvas { context, _ in
+            let columns = camera.crystalGridColumns
+            let rows = camera.crystalGridRows
+            let cellWidth = rect.width / CGFloat(columns)
+            let cellHeight = rect.height / CGFloat(rows)
+            context.addFilter(.shadow(color: .cyan.opacity(0.65), radius: 2))
+
+            for index in camera.crystalCells {
+                let column = index % columns
+                let row = index / columns
+                let tile = CGRect(
+                    x: rect.minX + CGFloat(column) * cellWidth,
+                    y: rect.minY + CGFloat(row) * cellHeight,
+                    width: cellWidth + 0.7,
+                    height: cellHeight + 0.7
+                ).insetBy(dx: 0.35, dy: 0.35)
+
+                var first = Path()
+                first.move(to: CGPoint(x: tile.minX, y: tile.minY))
+                first.addLine(to: CGPoint(x: tile.maxX, y: tile.minY))
+                first.addLine(to: CGPoint(x: tile.minX, y: tile.maxY))
+                first.closeSubpath()
+
+                var second = Path()
+                second.move(to: CGPoint(x: tile.maxX, y: tile.minY))
+                second.addLine(to: CGPoint(x: tile.maxX, y: tile.maxY))
+                second.addLine(to: CGPoint(x: tile.minX, y: tile.maxY))
+                second.closeSubpath()
+
+                let firstColor: Color = index.isMultiple(of: 3) ? .mint : .cyan
+                let secondColor: Color = index.isMultiple(of: 2) ? .blue : .teal
+                context.fill(first, with: .color(firstColor.opacity(0.68)))
+                context.fill(second, with: .color(secondColor.opacity(0.62)))
+                context.stroke(first, with: .color(.white.opacity(0.72)), lineWidth: 0.65)
+                context.stroke(second, with: .color(.cyan.opacity(0.85)), lineWidth: 0.55)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.easeInOut(duration: 0.28), value: camera.crystalCells.count)
+        .allowsHitTesting(false)
+    }
+
     private var guideLabel: String {
         switch camera.stage {
-        case .idle, .scanningNear:
-            return "KHUNG QUÉT GẦN"
-        case .waitingFar, .scanningFar:
-            return "KHUNG QUÉT XA"
-        case .waitingAround, .scanningAround:
-            return "ĐỔI GÓC / XOAY QUANH"
+        case .idle, .scanningNear, .waitingFar, .scanningFar, .waitingAround, .scanningAround:
+            return "QUÉT HÌNH DẠNG • PHỦ 80%"
         case .ready, .verifying, .lost:
             return "ĐẶT TÊN LỬA VÀO ĐÂY"
         case .tracking:
@@ -215,7 +259,7 @@ struct ContentView: View {
                         .lineLimit(2)
                         .minimumScaleFactor(0.78)
                     Spacer(minLength: 4)
-                    Text("\(camera.scanSampleCount)/\(camera.scanSampleTarget)")
+                    Text("\(camera.scanSampleCount)% / 80%")
                         .font(.caption.monospacedDigit().bold())
                 }
                 .foregroundStyle(.white)
@@ -253,32 +297,27 @@ struct ContentView: View {
     private var actionButtons: some View {
         switch camera.stage {
         case .idle:
-            primaryButton("Bắt đầu quét gần", systemImage: "viewfinder") {
-                camera.startNearScan()
+            primaryButton("Quét hình dạng tới 80%", systemImage: "viewfinder") {
+                camera.startShapeScan()
             }
             .disabled(!camera.isReady)
 
         case .waitingFar:
-            primaryButton("Bắt đầu quét xa", systemImage: "arrow.up.left.and.arrow.down.right") {
-                camera.startFarScan()
+            primaryButton("Quét hình dạng tới 80%", systemImage: "viewfinder") {
+                camera.startShapeScan()
             }
 
         case .waitingAround:
-            primaryButton("Quét các mặt xung quanh", systemImage: "rotate.3d") {
-                camera.startAroundScan()
+            primaryButton("Quét hình dạng tới 80%", systemImage: "viewfinder") {
+                camera.startShapeScan()
             }
 
         case .ready:
             primaryButton("Khóa, bám & quay", systemImage: "scope") {
                 camera.startTrackingAndRecording()
             }
-            HStack {
-                secondaryButton("Quét thêm góc", systemImage: "camera.viewfinder") {
-                    camera.startAroundScan()
-                }
-                secondaryButton("Học lại", systemImage: "trash") {
-                    camera.resetProfile()
-                }
+            secondaryButton("Quét lại hình dạng", systemImage: "trash") {
+                camera.resetProfile()
             }
 
         case .verifying:

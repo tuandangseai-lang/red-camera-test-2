@@ -4,9 +4,9 @@
 
 ## App làm được gì?
 
-1. Quét gần không giới hạn thời gian để ghi nhớ chi tiết thân tên lửa.
-2. Quét xa không giới hạn thời gian để lấy mẫu khi tên lửa nhỏ hơn trong ảnh.
-3. Quét xung quanh theo từng chỉ dẫn để lấy thêm nhiều góc nhìn.
+1. Chỉ dùng một lượt **Quét hình dạng**; không còn chia gần, xa và đa hướng.
+2. Apple Vision tách vật thể khỏi nền rồi phủ dần lưới tinh thể tam giác lên hình dạng nhìn thấy.
+3. Khi các tam giác liên kết và phủ khoảng 80%, app tự hoàn tất việc học.
 4. So hình trong khung với các mẫu đã quét rồi khóa đúng mục tiêu.
 5. Dùng `VNTrackObjectRequest` để cập nhật khung và tâm mục tiêu theo từng frame.
 6. Ưu tiên quay 4K 60 fps bằng camera siêu rộng 0,5×; zoom số mượt tới tối đa 0,98× nhưng không vượt ngưỡng đổi sang camera thường.
@@ -20,16 +20,16 @@ Giọng báo được bật mặc định. Có thể tắt bằng công tắc **
 
 Bản 1.1 (build 3) kiểm tra phiên bản trước khi dùng `displayVideoZoomFactorMultiplier`, nhờ đó biên dịch được với deployment target iOS 17 và vẫn tận dụng hệ số zoom hệ thống trên iOS 18 trở lên.
 
-## Quét có chỉ dẫn, không hết giờ (bản 1.5)
+## Quét hình dạng bằng tinh thể tam giác (bản 1.6)
 
-- Quét gần cần 5 góc tương đối khác nhau, quét xa cần 5 góc và quét xung quanh cần 6 góc.
-- Không còn bộ đếm thời gian. App tiếp tục chờ cho tới khi đủ mẫu rồi tự chuyển bước.
-- Dòng hướng dẫn lần lượt yêu cầu đưa gần/xa, xoay trái/phải và nghiêng lên/xuống.
-- Vòng vàng hiển thị phần trăm và chữ **CHƯA ĐỦ** trong lúc lấy mẫu.
-- Khi đạt yêu cầu, vòng chuyển xanh, hiện dấu kiểm và chữ **ĐÃ ĐỦ**.
+- Chỉ còn một nút **Quét hình dạng tới 80%**.
+- `VNGenerateForegroundInstanceMaskRequest` tách vật thể nổi bật trong khung khỏi nền.
+- Các ô tam giác xanh lam–lục xuất hiện liền nhau từ giữa vật thể ra ngoài.
+- Tiến độ dựa trên phần hình dạng đã được phủ; không yêu cầu số góc cố định và không hết giờ.
+- Khi đạt khoảng 80%, vòng chuyển xanh, hiện dấu kiểm và chữ **ĐÃ PHỦ**.
 - Giao diện trên/dưới đã được rút gọn để dành phần lớn màn hình cho hình camera.
 
-Bản 1.5 vẫn dùng `VNFeaturePrintObservation` để tránh cộng liên tục một hình đứng yên, nhưng ngưỡng khác biệt đã được nới vừa phải. Khi ảnh còn quá giống, app giữ nguyên tiến độ và chỉ rõ hướng nên di chuyển tiếp; không còn báo hết thời gian.
+Nếu Vision chưa tách được biên rõ, app dùng hình tên lửa gần đúng nằm trong khung để tiến độ không bị đứng mãi. Đây là mặt nạ 2D phục vụ phản hồi và nhận dạng, không phải quét 3D thật.
 
 ## Zoom mượt và chất lượng hình (bản 1.3)
 
@@ -41,9 +41,9 @@ Bản 1.5 vẫn dùng `VNFeaturePrintObservation` để tránh cộng liên tụ
 ## Cách học một tên lửa
 
 1. Mở app, chờ camera sẵn sàng.
-2. Đặt tên lửa gần camera, kéo thanh chỉnh để khung vàng ôm sát thân tên lửa, bấm **Bắt đầu quét gần** và làm theo chỉ dẫn.
-3. Lùi tên lửa ra xa, chỉnh khung nhỏ lại cho ôm sát tên lửa, bấm **Bắt đầu quét xa** và làm theo chỉ dẫn.
-4. Bấm **Quét các mặt xung quanh**, rồi xoay chậm theo từng hướng hiện trên màn hình.
+2. Đặt tên lửa trong khung vàng và kéo thanh chỉnh để khung ôm sát vật thể.
+3. Bấm **Quét hình dạng tới 80%**, giữ trong khung và có thể xoay nhẹ.
+4. Quan sát các tinh thể tam giác nối dần trên hình dạng; app tự báo khi đạt 80%.
 5. Trước khi phóng, đặt tên lửa vừa trong khung và bấm **Khóa, bám và bắt đầu quay**. ESP32 cũng có thể gửi lệnh `ARM` để làm bước này.
 6. Khi quay xong, bấm **Dừng và lưu video**.
 
