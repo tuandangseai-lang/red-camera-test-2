@@ -473,7 +473,16 @@ final class CameraController: NSObject, ObservableObject {
                 mainDeviceZoomFactor = min(2.0, camera.maxAvailableVideoZoomFactor)
             }
 
-            let displayMultiplier = camera.displayVideoZoomFactorMultiplier
+            let displayMultiplier: CGFloat
+            if #available(iOS 18.0, *) {
+                displayMultiplier = camera.displayVideoZoomFactorMultiplier
+            } else {
+                // Trên iOS 17 chưa có displayVideoZoomFactorMultiplier.
+                // Camera kép/siêu rộng dùng hệ số 0,5×; camera thường dùng 1×.
+                displayMultiplier = (
+                    isDualWide || camera.deviceType == .builtInUltraWideCamera
+                ) ? 0.5 : 1.0
+            }
             ultraWideDisplayZoomFactor = ultraWideDeviceZoomFactor * displayMultiplier
             mainDisplayZoomFactor = mainDeviceZoomFactor * displayMultiplier
             camera.videoZoomFactor = ultraWideDeviceZoomFactor

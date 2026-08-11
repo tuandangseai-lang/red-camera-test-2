@@ -18,6 +18,8 @@
 
 Giọng báo được bật mặc định. Có thể tắt bằng công tắc **Giọng báo tiếng Việt** trên màn hình. Câu “Bắt đầu quay” có thể được micro ghi vào đầu video; hãy tắt công tắc nếu muốn video hoàn toàn không có lời báo từ điện thoại.
 
+Bản 1.1 (build 3) kiểm tra phiên bản trước khi dùng `displayVideoZoomFactorMultiplier`, nhờ đó biên dịch được với deployment target iOS 17 và vẫn tận dụng hệ số zoom hệ thống trên iOS 18 trở lên.
+
 ## Cách học một tên lửa
 
 1. Mở app, chờ camera sẵn sàng.
