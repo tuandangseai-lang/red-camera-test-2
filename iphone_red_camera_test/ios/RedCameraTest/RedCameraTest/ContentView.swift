@@ -7,8 +7,13 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            CameraPreview(session: camera.session)
-                .ignoresSafeArea()
+            if camera.isARScanning {
+                ARScanPreview(session: camera.arSession)
+                    .ignoresSafeArea()
+            } else {
+                CameraPreview(session: camera.session)
+                    .ignoresSafeArea()
+            }
 
             trackingOverlay
                 .ignoresSafeArea()
@@ -169,8 +174,10 @@ struct ContentView: View {
 
                 let firstColor: Color = index.isMultiple(of: 3) ? .mint : .cyan
                 let secondColor: Color = index.isMultiple(of: 2) ? .blue : .teal
-                context.fill(first, with: .color(firstColor.opacity(0.68)))
-                context.fill(second, with: .color(secondColor.opacity(0.62)))
+                let depth = camera.crystalDepths[index] ?? 0.5
+                let nearOpacity = 0.82 - depth * 0.28
+                context.fill(first, with: .color(firstColor.opacity(nearOpacity)))
+                context.fill(second, with: .color(secondColor.opacity(nearOpacity * 0.92)))
                 context.stroke(first, with: .color(.white.opacity(0.72)), lineWidth: 0.65)
                 context.stroke(second, with: .color(.cyan.opacity(0.85)), lineWidth: 0.55)
             }
@@ -183,7 +190,9 @@ struct ContentView: View {
     private var guideLabel: String {
         switch camera.stage {
         case .idle, .scanningNear, .waitingFar, .scanningFar, .waitingAround, .scanningAround:
-            return "QUÉT HÌNH DẠNG • PHỦ 80%"
+            return camera.stage.isScanning
+                ? "QUÉT 3D AR • \(camera.scanViewpointCount)/8 GÓC"
+                : "CHỌN LOẠI • QUÉT 3D GẦN ĐÚNG"
         case .ready, .verifying, .lost:
             return "ĐẶT TÊN LỬA VÀO ĐÂY"
         case .tracking:
@@ -218,7 +227,14 @@ struct ContentView: View {
                 )
                 .lineLimit(1)
                 Spacer(minLength: 4)
-                Label("\(camera.learnedSamples)", systemImage: "square.stack.3d.up")
+                Label(
+                    camera.stage.isScanning
+                        ? "\(camera.surfacePointCount)"
+                        : "\(camera.learnedSamples)",
+                    systemImage: camera.stage.isScanning
+                        ? "point.3.connected.trianglepath.dotted"
+                        : "square.stack.3d.up"
+                )
                 Text(camera.zoomText)
                     .monospacedDigit()
             }
@@ -238,42 +254,131 @@ struct ContentView: View {
         .foregroundStyle(.white)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(.black.opacity(0.70), in: RoundedRectangle(cornerRadius: 13))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13))
+        .overlay {
+            RoundedRectangle(cornerRadius: 13)
+                .stroke(.white.opacity(0.12), lineWidth: 0.7)
+        }
     }
 
     @ViewBuilder
     private var controls: some View {
         VStack(spacing: 8) {
             if camera.stage.isScanning {
-                HStack(spacing: 8) {
-                    Image(
-                        systemName: camera.scanIsSufficient
-                            ? "checkmark.circle.fill"
-                            : (camera.scanNeedsNewAngle
-                               ? "arrow.triangle.2.circlepath.circle.fill"
-                               : "viewfinder.circle")
-                    )
-                    .foregroundStyle(scanStatusColor)
-                    Text(camera.scanGuidanceText)
-                        .font(.footnote.weight(.semibold))
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.78)
-                    Spacer(minLength: 4)
-                    Text("\(camera.scanSampleCount)% / 80%")
-                        .font(.caption.monospacedDigit().bold())
+                VStack(spacing: 7) {
+                    HStack(spacing: 8) {
+                        Image(
+                            systemName: camera.scanIsSufficient
+                                ? "checkmark.circle.fill"
+                                : (camera.scanNeedsNewAngle
+                                   ? "arrow.triangle.2.circlepath.circle.fill"
+                                   : "viewfinder.circle")
+                        )
+                        .foregroundStyle(scanStatusColor)
+                        Text(camera.scanGuidanceText)
+                            .font(.footnote.weight(.semibold))
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.78)
+                        Spacer(minLength: 4)
+                        Text("\(camera.scanSampleCount)%")
+                            .font(.caption.monospacedDigit().bold())
+                    }
+                    Button(role: .cancel) {
+                        camera.cancelShapeScan()
+                    } label: {
+                        Label("Dừng quét", systemImage: "xmark.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
                 .foregroundStyle(.white)
             } else {
+                if !camera.savedProfiles.isEmpty {
+                    profileTabs
+                }
                 compactSettings
                 actionButtons
             }
         }
         .padding(8)
-        .background(.black.opacity(0.52), in: RoundedRectangle(cornerRadius: 14))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(.white.opacity(0.12), lineWidth: 0.7)
+        }
+        .animation(
+            .spring(response: 0.32, dampingFraction: 0.86),
+            value: camera.stage
+        )
+        .animation(
+            .easeInOut(duration: 0.22),
+            value: camera.activeProfileID
+        )
+    }
+
+    private var profileTabs: some View {
+        HStack(spacing: 6) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(camera.savedProfiles) { profile in
+                        let isActive = camera.activeProfileID == profile.id
+                        Button {
+                            camera.activateProfile(profile)
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: profile.subjectKind.symbol)
+                                Text(profile.shortName)
+                                    .lineLimit(1)
+                            }
+                            .font(.caption.bold())
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 7)
+                            .foregroundStyle(isActive ? .black : .white)
+                            .background(
+                                isActive ? Color.cyan : Color.white.opacity(0.10),
+                                in: Capsule()
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            if let activeID = camera.activeProfileID,
+               let active = camera.savedProfiles.first(where: { $0.id == activeID }) {
+                Button(role: .destructive) {
+                    camera.deleteProfile(active)
+                } label: {
+                    Image(systemName: "trash")
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(.red)
+                .accessibilityLabel("Xóa mẫu đang chọn")
+            }
+        }
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
     private var compactSettings: some View {
         HStack(spacing: 9) {
+            Menu {
+                ForEach(ScanSubjectKind.allCases) { kind in
+                    Button {
+                        camera.scanSubjectKind = kind
+                    } label: {
+                        Label(kind.title, systemImage: kind.symbol)
+                    }
+                }
+            } label: {
+                Label(camera.scanSubjectKind.title, systemImage: camera.scanSubjectKind.symbol)
+                    .lineLimit(1)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
             Image(systemName: "viewfinder")
                 .foregroundStyle(.yellow)
             Slider(value: $camera.scanBoxScale, in: 0.12...0.62)
@@ -297,18 +402,18 @@ struct ContentView: View {
     private var actionButtons: some View {
         switch camera.stage {
         case .idle:
-            primaryButton("Quét hình dạng tới 80%", systemImage: "viewfinder") {
+            primaryButton("Quét 3D gần đúng tới 80%", systemImage: "move.3d") {
                 camera.startShapeScan()
             }
             .disabled(!camera.isReady)
 
         case .waitingFar:
-            primaryButton("Quét hình dạng tới 80%", systemImage: "viewfinder") {
+            primaryButton("Quét 3D gần đúng tới 80%", systemImage: "move.3d") {
                 camera.startShapeScan()
             }
 
         case .waitingAround:
-            primaryButton("Quét hình dạng tới 80%", systemImage: "viewfinder") {
+            primaryButton("Quét 3D gần đúng tới 80%", systemImage: "move.3d") {
                 camera.startShapeScan()
             }
 
@@ -316,7 +421,7 @@ struct ContentView: View {
             primaryButton("Khóa, bám & quay", systemImage: "scope") {
                 camera.startTrackingAndRecording()
             }
-            secondaryButton("Quét lại hình dạng", systemImage: "trash") {
+            secondaryButton("Quét lại 3D", systemImage: "trash") {
                 camera.resetProfile()
             }
 

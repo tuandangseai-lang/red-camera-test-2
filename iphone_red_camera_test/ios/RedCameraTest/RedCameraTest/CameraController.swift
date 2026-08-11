@@ -1,10 +1,37 @@
 import AVFoundation
+import ARKit
 import CoreImage
 import ImageIO
 import Photos
 import QuartzCore
+import simd
 import SwiftUI
+import UIKit
 import Vision
+
+enum ScanSubjectKind: String, CaseIterable, Codable, Identifiable {
+    case person
+    case animal
+    case object
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .person: return "Người"
+        case .animal: return "Thú"
+        case .object: return "Vật"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .person: return "person.fill"
+        case .animal: return "pawprint.fill"
+        case .object: return "shippingbox.fill"
+        }
+    }
+}
 
 enum RocketLearningStage: Equatable {
     case idle
@@ -39,6 +66,7 @@ enum RocketLearningStage: Equatable {
 
 final class CameraController: NSObject, ObservableObject {
     let session = AVCaptureSession()
+    let arSession = ARSession()
 
     @Published private(set) var statusText = "Đang chuẩn bị camera..."
     @Published private(set) var zoomText = "0.5×"
@@ -54,12 +82,19 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var scanNeedsNewAngle = false
     @Published private(set) var scanGuidanceText = "Đưa tên lửa vào khung"
     @Published private(set) var crystalCells: [Int] = []
+    @Published private(set) var crystalDepths: [Int: Double] = [:]
     @Published private(set) var crystalCoverage = 0.0
+    @Published private(set) var scanViewpointCount = 0
+    @Published private(set) var surfacePointCount = 0
+    @Published private(set) var isARScanning = false
     @Published private(set) var targetRect: CGRect?
     @Published private(set) var trackingConfidence = 0.0
     @Published private(set) var matchText = "Chưa có mẫu"
     @Published private(set) var frameAspectRatio: CGFloat = 9.0 / 16.0
+    @Published private(set) var savedProfiles: [SavedScanProfile] = []
+    @Published private(set) var activeProfileID: UUID?
     @Published var scanBoxScale = 0.42
+    @Published var scanSubjectKind: ScanSubjectKind = .object
     @Published var voiceAnnouncementsEnabled = true
 
     let crystalGridColumns = 16
@@ -98,6 +133,7 @@ final class CameraController: NSObject, ObservableObject {
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
     private let voiceNotifier = VoiceNotifier()
+    private let profileStore = ScanProfileStore()
 
     private var videoDevice: AVCaptureDevice?
     private var ultraWideDeviceZoomFactor: CGFloat = 1.0
@@ -125,8 +161,26 @@ final class CameraController: NSObject, ObservableObject {
     private var sequenceHandler = VNSequenceRequestHandler()
     private var shouldRecordAfterVerification = true
 
+    // Quét 3D gần đúng trên iPhone không LiDAR: ARKit cung cấp vị trí camera và
+    // điểm đặc trưng 3D, Vision giữ lại các điểm nằm trên mặt nạ chủ thể.
+    private var activeARScanKind: ScanKind?
+    private var estimatedObjectCenter: SIMD3<Float>?
+    private var capturedAzimuthBins: Set<Int> = []
+    private var accumulatedSurfacePoints: [SIMD3<Float>] = []
+    private var scanReferenceImages: [Data] = []
+    private var lastARScanAt = 0.0
+    private let requiredAzimuthBins = 8
+    private let totalAzimuthBins = 10
+
     private var zoomInWorkItem: DispatchWorkItem?
     private var zoomFinishedWorkItem: DispatchWorkItem?
+
+    override init() {
+        super.init()
+        arSession.delegate = self
+        arSession.delegateQueue = videoQueue
+        savedProfiles = profileStore.load()
+    }
 
     func start() {
         guard !didRequestStart else { return }
@@ -184,11 +238,13 @@ final class CameraController: NSObject, ObservableObject {
 
     func resetProfile() {
         guard !isRecording else { return }
+        stopARScanAndResumeCamera()
         voiceNotifier.stop()
         videoQueue.async { [weak self] in
             guard let self else { return }
             self.processingMode = .idle
             self.featureSamples.removeAll()
+            self.scanReferenceImages.removeAll()
             self.trackingObservation = nil
             self.sequenceHandler = VNSequenceRequestHandler()
         }
@@ -201,12 +257,90 @@ final class CameraController: NSObject, ObservableObject {
         scanNeedsNewAngle = false
         scanGuidanceText = "Đưa tên lửa vào khung"
         crystalCells = []
+        crystalDepths = [:]
         crystalCoverage = 0
+        scanViewpointCount = 0
+        surfacePointCount = 0
         targetRect = nil
         trackingConfidence = 0
         matchText = "Chưa có mẫu"
+        activeProfileID = nil
         statusText = "Đặt tên lửa vào khung, chỉnh kích thước rồi bấm Quét hình dạng"
         onEvent?("PROFILE_RESET")
+    }
+
+    func cancelShapeScan() {
+        guard stage.isScanning else { return }
+        stopARScanAndResumeCamera()
+        videoQueue.async { [weak self] in
+            guard let self else { return }
+            self.processingMode = .idle
+            self.activeARScanKind = nil
+            self.scanReferenceImages.removeAll()
+        }
+        stage = .idle
+        scanProgress = 0
+        scanSampleCount = 0
+        scanSampleTarget = 80
+        scanIsSufficient = false
+        scanNeedsNewAngle = false
+        scanGuidanceText = "Đã dừng quét"
+        crystalCells = []
+        crystalDepths = [:]
+        crystalCoverage = 0
+        scanViewpointCount = 0
+        surfacePointCount = 0
+        targetRect = nil
+        statusText = "Đã dừng quét 3D gần đúng"
+        onEvent?("SCAN_CANCELLED")
+    }
+
+    func activateProfile(_ profile: SavedScanProfile) {
+        guard !isRecording, !stage.isScanning else { return }
+        statusText = "Đang mở \(profile.name)..."
+        scanSubjectKind = profile.subjectKind
+
+        videoQueue.async { [weak self] in
+            guard let self else { return }
+            let observations = profile.referenceImages.compactMap {
+                self.featurePrint(fromJPEGData: $0)
+            }
+            guard !observations.isEmpty else {
+                DispatchQueue.main.async {
+                    self.statusText = "Mẫu này không còn dữ liệu ảnh hợp lệ"
+                }
+                return
+            }
+
+            self.featureSamples = observations
+            self.processingMode = .idle
+            self.trackingObservation = nil
+            self.sequenceHandler = VNSequenceRequestHandler()
+
+            DispatchQueue.main.async {
+                self.activeProfileID = profile.id
+                self.learnedSamples = observations.count
+                self.surfacePointCount = profile.surfacePointCount
+                self.scanProgress = 0.8
+                self.scanSampleCount = 80
+                self.scanSampleTarget = 80
+                self.scanIsSufficient = true
+                self.scanNeedsNewAngle = false
+                self.stage = .ready
+                self.matchText = "Đã mở \(profile.name) • \(observations.count) góc"
+                self.statusText = "Mẫu đã sẵn sàng để khóa, bám và quay"
+                self.announce("Đã mở mẫu. Sẵn sàng bám mục tiêu.", kind: .success)
+                self.onEvent?("PROFILE_LOADED")
+            }
+        }
+    }
+
+    func deleteProfile(_ profile: SavedScanProfile) {
+        guard !isRecording, !stage.isScanning else { return }
+        savedProfiles = profileStore.delete(id: profile.id)
+        guard activeProfileID == profile.id else { return }
+        resetProfile()
+        statusText = "Đã xóa \(profile.name)"
     }
 
     func startTrackingAndRecording() {
@@ -258,13 +392,17 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func startScan(kind: ScanKind, resetProfile: Bool) {
+        guard ARWorldTrackingConfiguration.isSupported else {
+            statusText = "Máy không hỗ trợ ARKit World Tracking"
+            return
+        }
         let rect = scanRect
         let requiredSamples = sampleTarget(for: kind)
 
         switch kind {
         case .near:
             stage = .scanningNear
-            statusText = "Giữ tên lửa trong khung • tinh thể đang nhận hình dạng"
+            statusText = "Đi chậm vòng quanh chủ thể • giữ chủ thể đứng yên trong khung"
         case .far:
             stage = .scanningFar
             statusText = "Quét xa không giới hạn thời gian • làm theo mũi chỉ dẫn"
@@ -278,11 +416,14 @@ final class CameraController: NSObject, ObservableObject {
         scanSampleTarget = requiredSamples
         scanIsSufficient = false
         scanNeedsNewAngle = false
-        scanGuidanceText = "Đang tách vật thể khỏi nền và ghép các tam giác"
+        scanGuidanceText = "Giữ đúng chủ thể trong khung để lấy góc 3D đầu tiên"
         crystalCells = []
+        crystalDepths = [:]
         crystalCoverage = 0
+        scanViewpointCount = 0
+        surfacePointCount = 0
         targetRect = rect
-        matchText = "TINH THỂ 0% • mục tiêu phủ 80%"
+        matchText = "3D AR 0% • 0/8 góc"
 
         videoQueue.async { [weak self] in
             guard let self else { return }
@@ -297,9 +438,16 @@ final class CameraController: NSObject, ObservableObject {
             self.stageStartingSampleCount = self.featureSamples.count
             self.shapeScanCoverage = 0
             self.crystalBaseCells.removeAll()
+            self.capturedAzimuthBins.removeAll()
+            self.accumulatedSurfacePoints.removeAll()
+            self.scanReferenceImages.removeAll()
+            self.estimatedObjectCenter = nil
             self.featureFrameCounter = 0
             self.lastShapeScanAt = 0
-            self.processingMode = .scanning(kind)
+            self.lastARScanAt = 0
+            self.activeARScanKind = kind
+            self.processingMode = .idle
+            self.beginARScan()
         }
 
         onEvent?("SCAN_\(scanName(kind))_STARTED")
@@ -313,13 +461,36 @@ final class CameraController: NSObject, ObservableObject {
             let isComplete = self.shapeScanCoverage >= 0.8
             let publishedCoverage = self.shapeScanCoverage
             self.processingMode = .idle
+            self.activeARScanKind = nil
+            var savedProfile: SavedScanProfile?
+            var updatedProfiles = self.savedProfiles
+            if isComplete, !self.scanReferenceImages.isEmpty {
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "vi_VN")
+                formatter.dateFormat = "dd/MM HH:mm"
+                let profile = SavedScanProfile(
+                    id: UUID(),
+                    name: "\(self.scanSubjectKind.title) \(formatter.string(from: Date()))",
+                    createdAt: Date(),
+                    subjectKind: self.scanSubjectKind,
+                    referenceImages: self.scanReferenceImages,
+                    surfacePointCount: self.accumulatedSurfacePoints.count
+                )
+                updatedProfiles = self.profileStore.save(profile)
+                savedProfile = profile
+            }
             DispatchQueue.main.async {
+                self.stopARScanAndResumeCamera()
                 self.scanSampleCount = coveragePercent
                 self.scanSampleTarget = 80
                 self.scanProgress = publishedCoverage
                 self.scanIsSufficient = isComplete
                 self.scanNeedsNewAngle = false
                 self.learnedSamples = totalSampleCount
+                if let savedProfile {
+                    self.savedProfiles = updatedProfiles
+                    self.activeProfileID = savedProfile.id
+                }
 
                 guard isComplete else {
                     self.stage = .idle
@@ -331,9 +502,9 @@ final class CameraController: NSObject, ObservableObject {
                 self.scanProgress = 0.8
                 self.scanIsSufficient = true
                 self.stage = .ready
-                self.matchText = "ĐÃ PHỦ 80% • đã ghi nhớ hình dạng"
-                self.statusText = "Tinh thể đã phủ đủ. Có thể bấm Khóa, bám và quay"
-                self.announce("Đã quét đủ hình dạng. Sẵn sàng bám tên lửa.", kind: .success)
+                self.matchText = "3D AR 80% • đã tự lưu mẫu \(self.savedProfiles.count)/5"
+                self.statusText = "Đã lưu mẫu. Có thể khóa, bám và quay"
+                self.announce("Đã quét đủ các góc 3D. Sẵn sàng bám mục tiêu.", kind: .success)
                 self.onEvent?("SHAPE_SCAN_DONE")
             }
         }
@@ -351,9 +522,39 @@ final class CameraController: NSObject, ObservableObject {
         80
     }
 
+    private func beginARScan() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+
+            let configuration = ARWorldTrackingConfiguration()
+            configuration.worldAlignment = .gravity
+            configuration.isAutoFocusEnabled = true
+            self.arSession.run(configuration, options: [.resetTracking, .removeExistingAnchors])
+
+            DispatchQueue.main.async {
+                self.isARScanning = true
+            }
+        }
+    }
+
+    private func stopARScanAndResumeCamera() {
+        arSession.pause()
+        if isARScanning {
+            isARScanning = false
+        }
+        sessionQueue.async { [weak self] in
+            guard let self, self.configured, !self.session.isRunning else { return }
+            self.session.startRunning()
+        }
+    }
+
     private func foregroundCrystalCells(
         from pixelBuffer: CVPixelBuffer,
-        normalizedTopLeftRect rect: CGRect
+        normalizedTopLeftRect rect: CGRect,
+        orientation: CGImagePropertyOrientation = .up
     ) -> [Int]? {
         let request = VNGenerateForegroundInstanceMaskRequest()
         request.regionOfInterest = CGRect(
@@ -362,7 +563,7 @@ final class CameraController: NSObject, ObservableObject {
             width: rect.width,
             height: rect.height
         )
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation)
 
         do {
             try handler.perform([request])
@@ -372,7 +573,7 @@ final class CameraController: NSObject, ObservableObject {
                 forInstances: observation.allInstances,
                 from: handler
             )
-            let maskImage = CIImage(cvPixelBuffer: maskBuffer)
+            let maskImage = CIImage(cvPixelBuffer: maskBuffer).oriented(orientation)
             let extent = maskImage.extent
             let cropRect = CGRect(
                 x: extent.minX + rect.minX * extent.width,
@@ -701,10 +902,16 @@ final class CameraController: NSObject, ObservableObject {
 
     private func featurePrint(
         from pixelBuffer: CVPixelBuffer,
-        normalizedTopLeftRect: CGRect
+        normalizedTopLeftRect: CGRect,
+        orientation: CGImagePropertyOrientation = .up
     ) -> VNFeaturePrintObservation? {
-        let imageWidth = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
-        let imageHeight = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+        let orientedImage = CIImage(cvPixelBuffer: pixelBuffer).oriented(orientation)
+        let image = orientedImage.transformed(by: CGAffineTransform(
+            translationX: -orientedImage.extent.minX,
+            y: -orientedImage.extent.minY
+        ))
+        let imageWidth = image.extent.width
+        let imageHeight = image.extent.height
         guard imageWidth > 0, imageHeight > 0 else { return nil }
 
         let normalized = normalizedTopLeftRect.intersection(
@@ -720,13 +927,63 @@ final class CameraController: NSObject, ObservableObject {
             height: normalized.height * imageHeight
         ).integral
 
-        let image = CIImage(cvPixelBuffer: pixelBuffer)
         guard let cgImage = ciContext.createCGImage(image.cropped(to: cropRect), from: cropRect) else {
             return nil
         }
 
         let request = VNGenerateImageFeaturePrintRequest()
         let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:])
+        do {
+            try handler.perform([request])
+            return request.results?.first
+        } catch {
+            return nil
+        }
+    }
+
+    private func referenceJPEG(
+        from pixelBuffer: CVPixelBuffer,
+        normalizedTopLeftRect: CGRect,
+        orientation: CGImagePropertyOrientation
+    ) -> Data? {
+        let orientedImage = CIImage(cvPixelBuffer: pixelBuffer).oriented(orientation)
+        let image = orientedImage.transformed(by: CGAffineTransform(
+            translationX: -orientedImage.extent.minX,
+            y: -orientedImage.extent.minY
+        ))
+        let normalized = normalizedTopLeftRect.intersection(
+            CGRect(x: 0, y: 0, width: 1, height: 1)
+        )
+        guard normalized.width > 0.02, normalized.height > 0.02 else { return nil }
+
+        let cropRect = CGRect(
+            x: normalized.minX * image.extent.width,
+            y: (1.0 - normalized.maxY) * image.extent.height,
+            width: normalized.width * image.extent.width,
+            height: normalized.height * image.extent.height
+        ).integral
+        let cropped = image
+            .cropped(to: cropRect)
+            .transformed(by: CGAffineTransform(
+                translationX: -cropRect.minX,
+                y: -cropRect.minY
+            ))
+        let longestSide = max(cropped.extent.width, cropped.extent.height)
+        let scale = min(1.0, 640.0 / max(1.0, longestSide))
+        let resized = cropped.transformed(by: CGAffineTransform(
+            scaleX: scale,
+            y: scale
+        ))
+        guard let cgImage = ciContext.createCGImage(resized, from: resized.extent) else {
+            return nil
+        }
+        return UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.76)
+    }
+
+    private func featurePrint(fromJPEGData data: Data) -> VNFeaturePrintObservation? {
+        guard let image = UIImage(data: data)?.cgImage else { return nil }
+        let request = VNGenerateImageFeaturePrintRequest()
+        let handler = VNImageRequestHandler(cgImage: image, orientation: .up)
         do {
             try handler.perform([request])
             return request.results?.first
@@ -1013,6 +1270,323 @@ final class CameraController: NSObject, ObservableObject {
                     self.onEvent?("SAVE_FAILED")
                 }
             }
+        }
+    }
+
+    private var visionScanROI: CGRect {
+        CGRect(
+            x: processingRect.minX,
+            y: 1.0 - processingRect.maxY,
+            width: processingRect.width,
+            height: processingRect.height
+        )
+    }
+
+    private func selectedCategoryIsPresent(
+        in pixelBuffer: CVPixelBuffer,
+        orientation: CGImagePropertyOrientation
+    ) -> Bool {
+        switch scanSubjectKind {
+        case .object:
+            return true
+
+        case .person:
+            let request = VNDetectHumanRectanglesRequest()
+            request.upperBodyOnly = false
+            request.regionOfInterest = visionScanROI
+            let handler = VNImageRequestHandler(
+                cvPixelBuffer: pixelBuffer,
+                orientation: orientation
+            )
+            do {
+                try handler.perform([request])
+                return request.results?.contains(where: { $0.confidence >= 0.35 }) == true
+            } catch {
+                return false
+            }
+
+        case .animal:
+            let request = VNRecognizeAnimalsRequest()
+            request.regionOfInterest = visionScanROI
+            let handler = VNImageRequestHandler(
+                cvPixelBuffer: pixelBuffer,
+                orientation: orientation
+            )
+            do {
+                try handler.perform([request])
+                return request.results?.contains(where: { $0.confidence >= 0.25 }) == true
+            } catch {
+                return false
+            }
+        }
+    }
+
+    private func cameraPosition(from transform: simd_float4x4) -> SIMD3<Float> {
+        SIMD3<Float>(
+            transform.columns.3.x,
+            transform.columns.3.y,
+            transform.columns.3.z
+        )
+    }
+
+    private func cameraForward(from transform: simd_float4x4) -> SIMD3<Float> {
+        -simd_normalize(SIMD3<Float>(
+            transform.columns.2.x,
+            transform.columns.2.y,
+            transform.columns.2.z
+        ))
+    }
+
+    private func projectedCrystalCell(
+        for worldPoint: SIMD3<Float>,
+        camera: ARCamera,
+        allowedCells: Set<Int>
+    ) -> (index: Int, depth: Float)? {
+        let viewport = CGSize(width: 900, height: 1600)
+        let point = camera.projectPoint(
+            worldPoint,
+            orientation: .portrait,
+            viewportSize: viewport
+        )
+        let normalized = CGPoint(
+            x: point.x / viewport.width,
+            y: point.y / viewport.height
+        )
+        guard processingRect.contains(normalized) else { return nil }
+
+        let localX = (normalized.x - processingRect.minX) / processingRect.width
+        let localY = (normalized.y - processingRect.minY) / processingRect.height
+        let column = min(
+            crystalGridColumns - 1,
+            max(0, Int(localX * CGFloat(crystalGridColumns)))
+        )
+        let row = min(
+            crystalGridRows - 1,
+            max(0, Int(localY * CGFloat(crystalGridRows)))
+        )
+        let index = row * crystalGridColumns + column
+        guard allowedCells.contains(index) else { return nil }
+
+        let cameraSpace = simd_inverse(camera.transform) * SIMD4<Float>(
+            worldPoint.x,
+            worldPoint.y,
+            worldPoint.z,
+            1
+        )
+        let depth = -cameraSpace.z
+        guard depth > 0.08, depth < 4.0 else { return nil }
+        return (index, depth)
+    }
+
+    private func estimatedDistanceToSubject(
+        in frame: ARFrame,
+        allowedCells: Set<Int>
+    ) -> Float {
+        guard let pointCloud = frame.rawFeaturePoints else { return 0.8 }
+        let cameraPosition = cameraPosition(from: frame.camera.transform)
+        let distances = pointCloud.points.compactMap { point -> Float? in
+            guard projectedCrystalCell(
+                for: point,
+                camera: frame.camera,
+                allowedCells: allowedCells
+            ) != nil else { return nil }
+            return simd_distance(cameraPosition, point)
+        }.sorted()
+
+        guard !distances.isEmpty else { return 0.8 }
+        return min(2.5, max(0.30, distances[distances.count / 2]))
+    }
+
+    private func collectSurfacePoints(
+        from frame: ARFrame,
+        allowedCells: Set<Int>
+    ) -> [Int: Double] {
+        var depthSums: [Int: Float] = [:]
+        var depthCounts: [Int: Int] = [:]
+
+        if let pointCloud = frame.rawFeaturePoints {
+            for (offset, point) in pointCloud.points.enumerated() where offset.isMultiple(of: 2) {
+                guard let projected = projectedCrystalCell(
+                    for: point,
+                    camera: frame.camera,
+                    allowedCells: allowedCells
+                ) else { continue }
+
+                depthSums[projected.index, default: 0] += projected.depth
+                depthCounts[projected.index, default: 0] += 1
+
+                let recentPoints = accumulatedSurfacePoints.suffix(240)
+                let isNewPoint = !recentPoints.contains {
+                    simd_distance($0, point) < 0.018
+                }
+                if isNewPoint, accumulatedSurfacePoints.count < 1_800 {
+                    accumulatedSurfacePoints.append(point)
+                }
+            }
+        }
+
+        var normalizedDepths: [Int: Double] = [:]
+        for cell in allowedCells {
+            if let sum = depthSums[cell], let count = depthCounts[cell], count > 0 {
+                let depth = sum / Float(count)
+                normalizedDepths[cell] = Double(min(1, max(0, (depth - 0.25) / 1.75)))
+            } else {
+                let column = cell % crystalGridColumns
+                let centerDistance = abs(
+                    Double(column) / Double(max(1, crystalGridColumns - 1)) - 0.5
+                )
+                normalizedDepths[cell] = min(1, 0.28 + centerDistance * 0.9)
+            }
+        }
+        return normalizedDepths
+    }
+
+    private func processARScanFrame(_ frame: ARFrame, kind: ScanKind) {
+        guard shapeScanCoverage < 0.8 else { return }
+        guard frame.timestamp - lastARScanAt >= 0.45 else { return }
+        lastARScanAt = frame.timestamp
+
+        guard case .normal = frame.camera.trackingState else {
+            DispatchQueue.main.async { [weak self] in
+                self?.scanNeedsNewAngle = true
+                self?.scanGuidanceText = "Di chuyển chậm hơn để AR ổn định"
+            }
+            return
+        }
+
+        let pixelBuffer = frame.capturedImage
+        let orientation: CGImagePropertyOrientation = .right
+        guard selectedCategoryIsPresent(in: pixelBuffer, orientation: orientation) else {
+            let selectedTitle = scanSubjectKind.title.lowercased()
+            DispatchQueue.main.async { [weak self] in
+                self?.scanNeedsNewAngle = true
+                self?.scanGuidanceText = "Chưa nhận ra \(selectedTitle) trong khung"
+            }
+            return
+        }
+
+        guard let detectedCells = foregroundCrystalCells(
+            from: pixelBuffer,
+            normalizedTopLeftRect: processingRect,
+            orientation: orientation
+        ) else {
+            DispatchQueue.main.async { [weak self] in
+                self?.scanNeedsNewAngle = true
+                self?.scanGuidanceText = "Đổi nền hoặc ánh sáng để tách rõ bề mặt"
+            }
+            return
+        }
+
+        let allowedCells = Set(detectedCells)
+        let transform = frame.camera.transform
+        let position = cameraPosition(from: transform)
+        if estimatedObjectCenter == nil {
+            let distance = estimatedDistanceToSubject(
+                in: frame,
+                allowedCells: allowedCells
+            )
+            estimatedObjectCenter = position + cameraForward(from: transform) * distance
+        }
+        guard let objectCenter = estimatedObjectCenter else { return }
+
+        let relative = position - objectCenter
+        var azimuth = atan2(relative.x, relative.z)
+        if azimuth < 0 { azimuth += 2 * .pi }
+        let bin = min(
+            totalAzimuthBins - 1,
+            Int(azimuth / (2 * .pi) * Float(totalAzimuthBins))
+        )
+
+        let depthMap = collectSurfacePoints(from: frame, allowedCells: allowedCells)
+        let currentVisibleCells = connectedCrystalCells(
+            from: detectedCells,
+            coverage: max(0.10, shapeScanCoverage)
+        )
+
+        guard !capturedAzimuthBins.contains(bin) else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.crystalCells = currentVisibleCells
+                self.crystalDepths = depthMap
+                self.surfacePointCount = self.accumulatedSurfacePoints.count
+                self.scanNeedsNewAngle = true
+                self.scanGuidanceText = "Góc này đã quét • hãy đi vòng sang bên quanh chủ thể"
+            }
+            return
+        }
+
+        guard let feature = featurePrint(
+            from: pixelBuffer,
+            normalizedTopLeftRect: processingRect,
+            orientation: orientation
+        ) else {
+            DispatchQueue.main.async { [weak self] in
+                self?.scanGuidanceText = "Giữ máy chắc để ghi nhận chi tiết bề mặt"
+            }
+            return
+        }
+
+        capturedAzimuthBins.insert(bin)
+        featureSamples.append(feature)
+        if let imageData = referenceJPEG(
+            from: pixelBuffer,
+            normalizedTopLeftRect: processingRect,
+            orientation: orientation
+        ) {
+            scanReferenceImages.append(imageData)
+        }
+        crystalBaseCells = detectedCells
+        let acceptedViews = min(requiredAzimuthBins, capturedAzimuthBins.count)
+        shapeScanCoverage = min(
+            0.8,
+            Double(acceptedViews) / Double(requiredAzimuthBins) * 0.8
+        )
+        let visibleCells = connectedCrystalCells(
+            from: detectedCells,
+            coverage: shapeScanCoverage
+        )
+        let coveragePercent = Int((shapeScanCoverage * 100).rounded())
+        let pointCount = accumulatedSurfacePoints.count
+        let totalSamples = featureSamples.count
+        let sufficient = acceptedViews >= requiredAzimuthBins
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.learnedSamples = totalSamples
+            self.scanSampleCount = coveragePercent
+            self.scanSampleTarget = 80
+            self.scanProgress = self.shapeScanCoverage
+            self.crystalCoverage = self.shapeScanCoverage
+            self.crystalCells = visibleCells
+            self.crystalDepths = depthMap
+            self.scanViewpointCount = acceptedViews
+            self.surfacePointCount = pointCount
+            self.scanIsSufficient = sufficient
+            self.scanNeedsNewAngle = false
+            self.scanGuidanceText = sufficient
+                ? "Đã đủ các mặt 3D cần thiết"
+                : "Đã nhận góc \(acceptedViews)/8 • tiếp tục đi vòng quanh chủ thể"
+            self.matchText = "3D AR \(coveragePercent)% • \(acceptedViews)/8 góc • \(pointCount) điểm"
+        }
+
+        onEvent?("SCAN_3D_VIEW_\(acceptedViews)")
+        if sufficient {
+            finishScan(kind: kind)
+        }
+    }
+}
+
+extension CameraController: ARSessionDelegate {
+    func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        guard let kind = activeARScanKind else { return }
+        processARScanFrame(frame, kind: kind)
+    }
+
+    func session(_ session: ARSession, didFailWithError error: Error) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.scanNeedsNewAngle = true
+            self.scanGuidanceText = "AR gặp lỗi: \(error.localizedDescription)"
         }
     }
 }
