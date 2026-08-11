@@ -2,6 +2,12 @@ name: Tao IPA Rocket Tracker v8 - mau khong trung
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "iphone_red_camera_test/**"
+      - ".github/workflows/build-iphone-app.yml"
 
 permissions:
   contents: read
