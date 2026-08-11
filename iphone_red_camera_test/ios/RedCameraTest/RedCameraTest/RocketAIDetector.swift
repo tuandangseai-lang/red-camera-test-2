@@ -15,7 +15,7 @@ struct WaterRocketDetection {
 ///
 /// Chỉ cần thêm `WaterRocketDetector.mlpackage` vào thư mục source. Xcode sẽ
 /// biên dịch thành `WaterRocketDetector.mlmodelc` và lớp này tự nạp model.
-final class WaterRocketDetector {
+final class RocketAIDetector {
     private let visionModel: VNCoreMLModel?
     private let modelInputSize: CGSize
     private(set) var loadMessage = "Chưa có WaterRocketDetector.mlpackage"

@@ -157,7 +157,7 @@ final class CameraController: NSObject, ObservableObject {
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
     private let voiceNotifier = VoiceNotifier()
     private let profileStore = ScanProfileStore()
-    private let aiDetector = WaterRocketDetector()
+    private let aiDetector = RocketAIDetector()
     /// A full-screen candidate must be strong because sky highlights, people,
     /// and launch hardware can look rocket-like for one frame.  Once a target
     /// is locked, a weaker detector result is accepted only near the predicted
