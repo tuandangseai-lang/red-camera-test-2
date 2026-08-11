@@ -200,6 +200,7 @@ final class CameraController: NSObject, ObservableObject {
     private var aiDetectionMisses = 0
     private var pendingAIDetectionRect: CGRect?
     private var pendingAIDetectionCount = 0
+    private var identityGateStatus = ""
     private var parachuteDetected = false
     private var recoverySeedEstimate: RocketMotionEstimate?
     private var recoveryStartedAt: TimeInterval = 0
@@ -538,6 +539,7 @@ final class CameraController: NSObject, ObservableObject {
             self.processingRect = fullFrame
             self.featureFrameCounter = 0
             self.aiDetectionMisses = 0
+            self.identityGateStatus = ""
             self.clearPendingAIDetection()
             self.clearRecoveryState()
             self.shouldRecordAfterVerification = recordAfterLock
@@ -559,6 +561,7 @@ final class CameraController: NSObject, ObservableObject {
             self.processingRect = fullFrame
             self.featureFrameCounter = 0
             self.aiDetectionMisses = 0
+            self.identityGateStatus = ""
             self.clearPendingAIDetection()
             self.shouldRecordAfterVerification = false
             self.processingMode = .verifying
@@ -2475,6 +2478,10 @@ final class CameraController: NSObject, ObservableObject {
         in pixelBuffer: CVPixelBuffer
     ) -> WaterRocketDetection? {
         guard !featureSamples.isEmpty else { return detections.first }
+        guard !detections.isEmpty else {
+            identityGateStatus = "AI chưa thấy hộp tên lửa đủ rõ"
+            return nil
+        }
 
         let candidates = foregroundCandidates(from: pixelBuffer)
         var best: WaterRocketDetection?
@@ -2523,8 +2530,35 @@ final class CameraController: NSObject, ObservableObject {
             }
         }
 
-        // Không có đường tắt chỉ dựa vào độ tin cậy của detector: lúc khóa ban đầu,
-        // mục tiêu luôn phải được đa số ảnh mẫu cá nhân xác nhận.
+        // Vision thường không tách được chai PET trong suốt. Khi đó vẫn đối chiếu
+        // trực tiếp vùng YOLO, nhưng giữ ngưỡng đa góc chặt hơn để không biến nó
+        // thành đường tắt chỉ dựa trên độ tin cậy của detector.
+        if best == nil {
+            for detection in detections.prefix(5) {
+                let paddingX = max(0.012, detection.rect.width * 0.08)
+                let paddingY = max(0.012, detection.rect.height * 0.06)
+                let crop = detection.rect
+                    .insetBy(dx: -paddingX, dy: -paddingY)
+                    .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+                guard let feature = featurePrint(
+                    from: pixelBuffer,
+                    normalizedTopLeftRect: crop
+                ),
+                let match = multiViewMatch(to: feature),
+                match.isAccepted,
+                match.bestDistance <= 31,
+                match.votes >= match.requiredVotes else { continue }
+                let score = match.score + 3.5 - Float(detection.confidence * 6)
+                if score < bestScore {
+                    bestScore = score
+                    best = detection
+                }
+            }
+        }
+
+        identityGateStatus = best == nil
+            ? "AI thấy vật nhưng chưa khớp đa số 3/5 ảnh mẫu"
+            : ""
         return best
     }
 
@@ -2640,6 +2674,7 @@ final class CameraController: NSObject, ObservableObject {
         lastTrackingBounds = clippedRect
         segmentationMissFrames = 0
         aiDetectionMisses = 0
+        identityGateStatus = ""
         clearPendingAIDetection()
         sequenceHandler = VNSequenceRequestHandler()
         trackingFrameCounter = 0
@@ -2684,7 +2719,9 @@ final class CameraController: NSObject, ObservableObject {
             pendingAIDetectionCount = max(0, pendingAIDetectionCount - 1)
             let message = isRecoveringLostTarget
                 ? "AI đang phóng to vùng quỹ đạo để bắt lại mục tiêu nhỏ..."
-                : "AI thấy loại tên lửa và đang đối chiếu với 5 ảnh của bạn..."
+                : (identityGateStatus.isEmpty
+                    ? "AI đang tìm ứng viên trên toàn màn hình..."
+                    : identityGateStatus)
             publishSearchProgress(message: message)
             return true
         }
