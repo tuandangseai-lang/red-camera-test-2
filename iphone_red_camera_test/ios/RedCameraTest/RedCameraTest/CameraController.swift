@@ -2342,7 +2342,7 @@ final class CameraController: NSObject, ObservableObject {
                     rawTriangle = candidate.trianglePoints.count == 3
                         ? candidate.trianglePoints
                         : representativeTrackingPoints(in: candidate.rect)
-                    trackingObservation = observation(fromTopLeftRect: candidate.rect)
+                    trackingObservation = self.observation(fromTopLeftRect: candidate.rect)
                     sequenceHandler = VNSequenceRequestHandler()
                     segmentationMissFrames = 0
                 } else {
