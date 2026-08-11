@@ -1,4 +1,4 @@
-name: Tao IPA Rocket Tracker v6 - vong quet gon
+name: Tao IPA Rocket Tracker v7 - zoom 0.98 4K60
 
 on:
   workflow_dispatch:
@@ -39,6 +39,8 @@ jobs:
           grep -q "if #available(iOS 18.0, \*)" "RedCameraTest/CameraController.swift"
           grep -q "scanProgressRing" "RedCameraTest/ContentView.swift"
           grep -q "scanSampleTarget" "RedCameraTest/CameraController.swift"
+          grep -q "maximumSmoothDisplayZoom: CGFloat = 0.98" "RedCameraTest/CameraController.swift"
+          grep -q "hd4K3840x2160" "RedCameraTest/CameraController.swift"
 
       - name: Bien dich app iPhone (chua ky)
         working-directory: iphone_red_camera_test/ios/RedCameraTest

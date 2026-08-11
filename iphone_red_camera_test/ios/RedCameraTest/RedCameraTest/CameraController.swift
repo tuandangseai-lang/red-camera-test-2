@@ -94,10 +94,10 @@ final class CameraController: NSObject, ObservableObject {
 
     private var videoDevice: AVCaptureDevice?
     private var ultraWideDeviceZoomFactor: CGFloat = 1.0
-    private var mainDeviceZoomFactor: CGFloat = 2.0
+    private var mainDeviceZoomFactor: CGFloat = 1.96
     private var ultraWideDisplayZoomFactor: CGFloat = 0.5
-    private var mainDisplayZoomFactor: CGFloat = 1.0
-    private var isUsingMainCamera = false
+    private var mainDisplayZoomFactor: CGFloat = 0.98
+    private var isZoomedIn = false
     private var didRequestStart = false
     private var configured = false
     private var pendingArm = false
@@ -367,7 +367,11 @@ final class CameraController: NSObject, ObservableObject {
         guard !configured else { return }
 
         session.beginConfiguration()
-        session.sessionPreset = .high
+        if session.canSetSessionPreset(.hd4K3840x2160) {
+            session.sessionPreset = .hd4K3840x2160
+        } else {
+            session.sessionPreset = .high
+        }
 
         let dualWideCamera = AVCaptureDevice.default(
             .builtInDualWideCamera,
@@ -465,16 +469,21 @@ final class CameraController: NSObject, ObservableObject {
 
     private func configureFastWideCapture(_ camera: AVCaptureDevice, isDualWide: Bool) {
         let desiredFPS = 60.0
-        let preferredFormat = camera.formats
+        let formatsAt60FPS = camera.formats
             .filter { format in
-                let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-                let isFullHD = dimensions.width == 1920 && dimensions.height == 1080
-                let supports60 = format.videoSupportedFrameRateRanges.contains {
+                format.videoSupportedFrameRateRanges.contains {
                     $0.minFrameRate <= desiredFPS && $0.maxFrameRate >= desiredFPS
                 }
-                return isFullHD && supports60
             }
-            .last
+        let preferred4KFormat = formatsAt60FPS.last { format in
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            return dimensions.width == 3840 && dimensions.height == 2160
+        }
+        let preferredFullHDFormat = formatsAt60FPS.last { format in
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            return dimensions.width == 1920 && dimensions.height == 1080
+        }
+        let preferredFormat = preferred4KFormat ?? preferredFullHDFormat
 
         do {
             try camera.lockForConfiguration()
@@ -486,16 +495,20 @@ final class CameraController: NSObject, ObservableObject {
                 camera.activeVideoMinFrameDuration = duration
                 camera.activeVideoMaxFrameDuration = duration
             }
+            if camera.isFocusModeSupported(.continuousAutoFocus) {
+                camera.focusMode = .continuousAutoFocus
+            }
+            if camera.isExposureModeSupported(.continuousAutoExposure) {
+                camera.exposureMode = .continuousAutoExposure
+            }
+            if camera.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                camera.whiteBalanceMode = .continuousAutoWhiteBalance
+            }
+            camera.isSubjectAreaChangeMonitoringEnabled = true
 
             ultraWideDeviceZoomFactor = max(1.0, camera.minAvailableVideoZoomFactor)
-            if let firstSwitch = camera.virtualDeviceSwitchOverVideoZoomFactors.first {
-                mainDeviceZoomFactor = min(
-                    CGFloat(truncating: firstSwitch),
-                    camera.maxAvailableVideoZoomFactor
-                )
-            } else {
-                mainDeviceZoomFactor = min(2.0, camera.maxAvailableVideoZoomFactor)
-            }
+            let firstSwitchOverFactor = camera.virtualDeviceSwitchOverVideoZoomFactors.first
+                .map { CGFloat(truncating: $0) }
 
             let displayMultiplier: CGFloat
             if #available(iOS 18.0, *) {
@@ -507,19 +520,40 @@ final class CameraController: NSObject, ObservableObject {
                     isDualWide || camera.deviceType == .builtInUltraWideCamera
                 ) ? 0.5 : 1.0
             }
+
+            // 0,98× nằm ngay dưới ngưỡng 1× nên camera kép không đổi sang ống kính thường.
+            let maximumSmoothDisplayZoom: CGFloat = 0.98
+            let requestedDeviceZoom = maximumSmoothDisplayZoom / max(displayMultiplier, 0.01)
+            let safeSwitchLimit = firstSwitchOverFactor.map { $0 * 0.98 }
+                ?? camera.maxAvailableVideoZoomFactor
+            mainDeviceZoomFactor = max(
+                ultraWideDeviceZoomFactor,
+                min(
+                    requestedDeviceZoom,
+                    min(safeSwitchLimit, camera.maxAvailableVideoZoomFactor)
+                )
+            )
             ultraWideDisplayZoomFactor = ultraWideDeviceZoomFactor * displayMultiplier
             mainDisplayZoomFactor = mainDeviceZoomFactor * displayMultiplier
             camera.videoZoomFactor = ultraWideDeviceZoomFactor
 
             let configuredFPS = preferredFormat == nil ? 30 : 60
+            let configuredResolution: String
+            if let preferredFormat {
+                let dimensions = CMVideoFormatDescriptionGetDimensions(preferredFormat.formatDescription)
+                configuredResolution = dimensions.width >= 3840 ? "4K" : "1080p"
+            } else {
+                configuredResolution = "tự động"
+            }
             let mode = isDualWide
                 ? String(
-                    format: "Camera %.1f× → %.1f× • %d fps",
+                    format: "%@ %d fps • zoom %.1f× → %.2f× • không đổi cam",
+                    configuredResolution,
+                    configuredFPS,
                     ultraWideDisplayZoomFactor,
-                    mainDisplayZoomFactor,
-                    configuredFPS
+                    mainDisplayZoomFactor
                 )
-                : "Camera dự phòng • \(configuredFPS) fps"
+                : "Camera dự phòng • \(configuredResolution) \(configuredFPS) fps"
             DispatchQueue.main.async { [weak self] in
                 self?.captureModeText = mode
                 self?.zoomText = String(format: "%.1f×", self?.ultraWideDisplayZoomFactor ?? 0.5)
@@ -699,7 +733,7 @@ final class CameraController: NSObject, ObservableObject {
 
                 let isNearEdge = !(0.12...0.88).contains(topLeftRect.midX)
                     || !(0.10...0.90).contains(topLeftRect.midY)
-                if self.isUsingMainCamera && isNearEdge {
+                if self.isZoomedIn && isNearEdge {
                     self.returnToUltraWide()
                     if self.isRecording {
                         self.scheduleZoomSequence(after: 1.5)
@@ -746,7 +780,7 @@ final class CameraController: NSObject, ObservableObject {
 
         let zoomIn = DispatchWorkItem { [weak self] in
             guard let self, self.isRecording else { return }
-            guard !self.isUsingMainCamera else { return }
+            guard !self.isZoomedIn else { return }
             guard self.stage == .tracking,
                   let target = self.targetRect,
                   (0.20...0.80).contains(target.midX),
@@ -757,17 +791,17 @@ final class CameraController: NSObject, ObservableObject {
             }
 
             self.zoomText = String(
-                format: "%.1f× → %.1f×",
+                format: "%.1f× → %.2f×",
                 self.ultraWideDisplayZoomFactor,
                 self.mainDisplayZoomFactor
             )
-            self.onEvent?("CAMERA_MAIN")
-            self.isUsingMainCamera = true
-            self.rampZoom(to: self.mainDeviceZoomFactor, rate: 1.0)
+            self.onEvent?("ZOOM_098")
+            self.isZoomedIn = true
+            self.rampZoom(to: self.mainDeviceZoomFactor, rate: 0.75)
 
             let finished = DispatchWorkItem { [weak self] in
                 guard let self, self.isRecording else { return }
-                self.zoomText = String(format: "%.1f×", self.mainDisplayZoomFactor)
+                self.zoomText = String(format: "%.2f×", self.mainDisplayZoomFactor)
             }
             self.zoomFinishedWorkItem = finished
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: finished)
@@ -786,7 +820,7 @@ final class CameraController: NSObject, ObservableObject {
 
     private func returnToUltraWide() {
         cancelZoomSequence()
-        isUsingMainCamera = false
+        isZoomedIn = false
         zoomText = String(format: "%.1f×", ultraWideDisplayZoomFactor)
         onEvent?("CAMERA_ULTRAWIDE")
         rampZoom(to: ultraWideDeviceZoomFactor, rate: 2.0)
@@ -907,7 +941,7 @@ extension CameraController: AVCaptureFileOutputRecordingDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.isRecording = true
-            self.statusText = "Đang quay 60 fps ở góc rộng; chỉ sang camera thường khi mục tiêu ở giữa"
+            self.statusText = "Đang quay 4K/60 fps nếu máy hỗ trợ; zoom tối đa 0,98×, không đổi camera"
             self.zoomText = String(format: "%.1f×", self.ultraWideDisplayZoomFactor)
             self.announce("Bắt đầu quay.", kind: .start)
             self.onEvent?("RECORDING_STARTED")
@@ -931,7 +965,7 @@ extension CameraController: AVCaptureFileOutputRecordingDelegate {
             self.cancelZoomSequence()
             self.resetZoom()
             self.isRecording = false
-            self.isUsingMainCamera = false
+            self.isZoomedIn = false
             self.zoomText = String(format: "%.1f×", self.ultraWideDisplayZoomFactor)
             self.targetRect = nil
             self.stage = .ready

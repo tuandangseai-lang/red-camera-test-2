@@ -9,7 +9,7 @@
 3. Quét xung quanh 8 giây để lấy thêm nhiều góc nhìn.
 4. So hình trong khung với các mẫu đã quét rồi khóa đúng mục tiêu.
 5. Dùng `VNTrackObjectRequest` để cập nhật khung và tâm mục tiêu theo từng frame.
-6. Quay 1080p 60 fps bằng camera kép: bắt đầu ở camera siêu rộng 0,5×, sau 5 giây chỉ chuyển dần sang camera thường 1× khi mục tiêu vẫn nằm trong vùng an toàn ở giữa ảnh.
+6. Ưu tiên quay 4K 60 fps bằng camera siêu rộng 0,5×; zoom số mượt tới tối đa 0,98× nhưng không vượt ngưỡng đổi sang camera thường.
 7. Gửi tâm mục tiêu về ESP32 bằng BLE theo dạng `T,xxx,yyy,cc` để dùng cho hai servo ở bước tiếp theo.
 8. Dùng logo trong `Assets.xcassets/AppIcon.appiconset` làm icon iPhone.
 9. Báo bằng giọng Việt và rung nhẹ khi quét xong, sẵn sàng, bắt đầu quay, mất mục tiêu và lưu video.
@@ -26,6 +26,13 @@ Bản 1.1 (build 3) kiểm tra phiên bản trước khi dùng `displayVideoZoom
 - Vòng vàng hiển thị phần trăm và chữ **CHƯA ĐỦ** trong lúc lấy mẫu.
 - Khi đạt yêu cầu, vòng chuyển xanh, hiện dấu kiểm và chữ **ĐÃ ĐỦ**.
 - Giao diện trên/dưới đã được rút gọn để dành phần lớn màn hình cho hình camera.
+
+## Zoom mượt và chất lượng hình (bản 1.3)
+
+- Zoom tối đa 0,98× để không chạm ngưỡng chuyển ống kính ở 1×.
+- Ưu tiên định dạng 4K 60 fps; tự lùi về 1080p 60 fps nếu định dạng 4K không khả dụng.
+- Bật lấy nét, phơi sáng và cân bằng trắng liên tục khi camera hỗ trợ.
+- Vì 0,98× vẫn là phóng lớn kỹ thuật số từ camera siêu rộng, nên cần quay ngoài trời đủ sáng để có chi tiết tốt nhất.
 
 ## Cách học một tên lửa
 
