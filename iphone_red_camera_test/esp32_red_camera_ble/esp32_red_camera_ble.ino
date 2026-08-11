@@ -48,6 +48,12 @@ constexpr uint32_t CONTROL_PERIOD_MS = 20;  // Điều khiển servo 50 lần/gi
 constexpr float PAN_MAX_SPEED_DPS = 120.0f;
 constexpr float TILT_MAX_SPEED_DPS = 100.0f;
 
+// Khi app mất mục tiêu, giá đỡ tự quét nhẹ quanh góc cuối cùng để tìm lại.
+// Biên độ nhỏ để video không bị quăng mạnh và tránh xoắn dây.
+constexpr float SEARCH_PAN_SPAN_DEG = 11.0f;
+constexpr float SEARCH_TILT_SPAN_DEG = 6.0f;
+constexpr float SEARCH_PHASE_SPEED = 2.4f;  // radian/giây.
+
 constexpr char DEVICE_NAME[] = "RocketTracker-Test";
 constexpr char SERVICE_UUID[] = "7E57A000-8E3A-4D6A-9B2B-13B10A000001";
 constexpr char EVENT_CHARACTERISTIC_UUID[] =
@@ -69,9 +75,13 @@ int latestTargetY = IMAGE_CENTER;
 int latestConfidence = 0;
 uint32_t latestTargetAtMs = 0;
 bool targetAvailable = false;
+volatile bool searchMode = false;
 
 float panAngleDeg = PAN_CENTER_DEG;
 float tiltAngleDeg = TILT_CENTER_DEG;
+float searchOriginPanDeg = PAN_CENTER_DEG;
+float searchOriginTiltDeg = TILT_CENTER_DEG;
+float searchPhase = 0.0f;
 uint32_t lastControlAtMs = 0;
 uint32_t lastTelemetryPrintAtMs = 0;
 
@@ -104,6 +114,20 @@ void stopTrackingTarget() {
   portEXIT_CRITICAL(&trackingMux);
 }
 
+void startSearchPattern() {
+  stopTrackingTarget();
+  searchOriginPanDeg = panAngleDeg;
+  searchOriginTiltDeg = tiltAngleDeg;
+  searchPhase = 0.0f;
+  searchMode = true;
+  Serial.println("[SEARCH] Quet nhe trai-phai va tren-duoi quanh goc cuoi.");
+}
+
+void stopSearchPattern() {
+  if (searchMode) Serial.println("[SEARCH] Da tim thay muc tieu, dung quet.");
+  searchMode = false;
+}
+
 void sendEvent(const char *message) {
   if (!phoneConnected || eventCharacteristic == nullptr) {
     Serial.printf("[BLE] Chua co iPhone, khong gui duoc: %s\n", message);
@@ -133,6 +157,18 @@ void updateServosFromTarget() {
   float deltaSeconds = (now - lastControlAtMs) / 1000.0f;
   lastControlAtMs = now;
   deltaSeconds = clampFloat(deltaSeconds, 0.001f, 0.050f);
+
+  if (phoneConnected && searchMode) {
+    searchPhase += SEARCH_PHASE_SPEED * deltaSeconds;
+    // Hai tần số khác nhau tạo đường quét hình số 8 nhỏ, phủ cả bốn hướng.
+    panAngleDeg = searchOriginPanDeg + SEARCH_PAN_SPAN_DEG * sinf(searchPhase);
+    tiltAngleDeg =
+        searchOriginTiltDeg + SEARCH_TILT_SPAN_DEG * sinf(searchPhase * 0.57f);
+    panAngleDeg = clampFloat(panAngleDeg, PAN_MIN_DEG, PAN_MAX_DEG);
+    tiltAngleDeg = clampFloat(tiltAngleDeg, TILT_MIN_DEG, TILT_MAX_DEG);
+    writeServoAngles();
+    return;
+  }
 
   int targetX;
   int targetY;
@@ -171,6 +207,7 @@ void acceptTrackingPacket(int x, int y, int confidence) {
   x = constrain(x, 0, 999);
   y = constrain(y, 0, 999);
   confidence = constrain(confidence, 0, 99);
+  searchMode = false;
 
   portENTER_CRITICAL(&trackingMux);
   latestTargetX = x;
@@ -207,7 +244,11 @@ void handlePhoneMessage(String value) {
     return;
   }
 
-  if (value == "TARGET_LOST" || value == "RECORDING_STOPPED") {
+  if (value == "SEARCH_START" || value == "TARGET_LOST") {
+    startSearchPattern();
+  } else if (value == "SEARCH_STOP" || value == "TARGET_LOCKED" ||
+             value == "RECORDING_STOPPED") {
+    stopSearchPattern();
     stopTrackingTarget();
   }
 
@@ -226,6 +267,7 @@ class TrackerServerCallbacks : public BLEServerCallbacks {
   void onDisconnect(BLEServer *server) override {
     phoneConnected = false;
     autoArmPending = false;
+    searchMode = false;
     stopTrackingTarget();
     digitalWrite(LED_BUILTIN, LOW);
     Serial.println("[BLE] iPhone da ngat; servo giu nguyen goc, dang quang ba lai...");

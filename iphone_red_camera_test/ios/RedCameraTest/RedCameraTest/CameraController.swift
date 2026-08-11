@@ -101,10 +101,13 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var hasSelectedSubject = false
     @Published private(set) var selectedSubjectMaskImage: UIImage?
     @Published private(set) var selectedSubjectRect: CGRect?
+    @Published private(set) var subjectContourPoints: [CGPoint] = []
     @Published private(set) var detectedSubjectLabel = "Chưa phân loại"
     @Published private(set) var detectedSubjectConfidence = 0.0
     @Published private(set) var isARScanning = false
     @Published private(set) var targetRect: CGRect?
+    @Published private(set) var trackingPoints: [CGPoint] = []
+    @Published private(set) var predictedTargetPoint: CGPoint?
     @Published private(set) var trackingConfidence = 0.0
     @Published private(set) var matchText = "Chưa có mẫu"
     @Published private(set) var frameAspectRatio: CGFloat = 9.0 / 16.0
@@ -177,8 +180,11 @@ final class CameraController: NSObject, ObservableObject {
     private var trackingFrameCounter = 0
     private var lowConfidenceFrames = 0
     private var trackingObservation: VNDetectedObjectObservation?
+    private var trackingAnchorObservations: [VNDetectedObjectObservation] = []
     private var sequenceHandler = VNSequenceRequestHandler()
     private var shouldRecordAfterVerification = true
+    private var previousTrackingCenter: CGPoint?
+    private var smoothedTrackingVelocity = CGVector.zero
 
     // Quét 3D gần đúng trên iPhone không LiDAR: ARKit cung cấp vị trí camera và
     // điểm đặc trưng 3D, Vision giữ lại các điểm nằm trên mặt nạ chủ thể.
@@ -289,6 +295,9 @@ final class CameraController: NSObject, ObservableObject {
             self.manualSelectionRequested = false
             self.manualCaptureRequested = false
             self.trackingObservation = nil
+            self.trackingAnchorObservations.removeAll()
+            self.previousTrackingCenter = nil
+            self.smoothedTrackingVelocity = .zero
             self.sequenceHandler = VNSequenceRequestHandler()
         }
         stage = .idle
@@ -310,9 +319,13 @@ final class CameraController: NSObject, ObservableObject {
         hasSelectedSubject = false
         selectedSubjectMaskImage = nil
         selectedSubjectRect = nil
+        subjectContourPoints = []
+        subjectContourPoints = []
         detectedSubjectLabel = "Chưa phân loại"
         detectedSubjectConfidence = 0
         targetRect = nil
+        trackingPoints = []
+        predictedTargetPoint = nil
         trackingConfidence = 0
         matchText = "Chưa có mẫu"
         activeProfileID = nil
@@ -355,10 +368,13 @@ final class CameraController: NSObject, ObservableObject {
         hasSelectedSubject = false
         selectedSubjectMaskImage = nil
         selectedSubjectRect = nil
+        subjectContourPoints = []
         detectedSubjectLabel = "Chưa phân loại"
         detectedSubjectConfidence = 0
         targetRect = nil
-        statusText = "Đã dừng quét 3D gần đúng"
+        trackingPoints = []
+        predictedTargetPoint = nil
+        statusText = "Đã dừng tạo mẫu"
         onEvent?("SCAN_CANCELLED")
     }
 
@@ -419,6 +435,9 @@ final class CameraController: NSObject, ObservableObject {
             let storedFacets = self.makeCrystalFacets(viewIndex: 0)
             self.processingMode = .idle
             self.trackingObservation = nil
+            self.trackingAnchorObservations.removeAll()
+            self.previousTrackingCenter = nil
+            self.smoothedTrackingVelocity = .zero
             self.sequenceHandler = VNSequenceRequestHandler()
 
             DispatchQueue.main.async {
@@ -467,6 +486,8 @@ final class CameraController: NSObject, ObservableObject {
         let recordAfterLock = !isRecording
         stage = .verifying
         targetRect = nil
+        trackingPoints = []
+        predictedTargetPoint = nil
         trackingConfidence = 0
         matchText = "Đang tìm \(detectedSubjectLabel) trên toàn màn hình..."
         statusText = "Không cần đưa vật vào vòng tròn • app đang tự tìm mục tiêu"
@@ -485,6 +506,8 @@ final class CameraController: NSObject, ObservableObject {
         let fullFrame = CGRect(x: 0, y: 0, width: 1, height: 1)
         stage = .verifying
         targetRect = nil
+        trackingPoints = []
+        predictedTargetPoint = nil
         matchText = "Đang tìm lại \(detectedSubjectLabel) trên toàn màn hình..."
         statusText = "Có thể đặt vật ở bất kỳ vị trí nào trong khung camera"
         videoQueue.async { [weak self] in
@@ -502,8 +525,11 @@ final class CameraController: NSObject, ObservableObject {
             self?.processingMode = .idle
         }
         stage = isRecording ? .lost : .ready
+        trackingPoints = []
+        predictedTargetPoint = nil
         matchText = isRecording ? "Đã dừng tìm lại mục tiêu" : "Mẫu đã sẵn sàng"
         statusText = isRecording ? "Mất mục tiêu • có thể bấm Bắt lại" : "Có thể bấm Khóa, bám & quay"
+        onEvent?("SEARCH_STOP")
     }
 
     func stopRecording() {
@@ -511,8 +537,13 @@ final class CameraController: NSObject, ObservableObject {
         videoQueue.async { [weak self] in
             self?.processingMode = .idle
             self?.trackingObservation = nil
+            self?.trackingAnchorObservations.removeAll()
+            self?.previousTrackingCenter = nil
+            self?.smoothedTrackingVelocity = .zero
         }
         targetRect = nil
+        trackingPoints = []
+        predictedTargetPoint = nil
         sessionQueue.async { [weak self] in
             guard let self else { return }
             if self.movieOutput.isRecording {
@@ -565,6 +596,9 @@ final class CameraController: NSObject, ObservableObject {
                 self.featureSamples.removeAll()
                 self.sequenceHandler = VNSequenceRequestHandler()
                 self.trackingObservation = nil
+                self.trackingAnchorObservations.removeAll()
+                self.previousTrackingCenter = nil
+                self.smoothedTrackingVelocity = .zero
             } else if self.featureSamples.count > 180 {
                 self.featureSamples.removeFirst(self.featureSamples.count - 180)
             }
@@ -638,8 +672,8 @@ final class CameraController: NSObject, ObservableObject {
 
                 guard isComplete else {
                     self.stage = .idle
-                    self.matchText = "TINH THỂ \(coveragePercent)% • chưa đạt 80%"
-                    self.statusText = "Đặt tên lửa gọn trong khung rồi quét lại hình dạng"
+                    self.matchText = "ĐÃ CHỤP \(self.scanReferenceImages.count)/6 ẢNH"
+                    self.statusText = "Chưa đủ sáu góc nhìn; hãy chụp bổ sung"
                     return
                 }
 
@@ -672,6 +706,8 @@ final class CameraController: NSObject, ObservableObject {
         let image: UIImage
         let referenceJPEG: Data
         let removedHand: Bool
+        let isCentered: Bool
+        let contourPoints: [CGPoint]
     }
 
     private func instanceLabel(
@@ -752,6 +788,55 @@ final class CameraController: NSObject, ObservableObject {
             }
         }
         return excluded
+    }
+
+    private func subjectOccupiesGuideCenter(_ cells: Set<Int>) -> Bool {
+        // Chỉ bắt buộc một phần thật của vật đi qua lõi vòng tròn. Kích thước
+        // toàn vật không bị giới hạn nên chai/tên lửa lớn vẫn được tràn ra ngoài.
+        let horizontalRadius = max(0.055, scanRect.width * 0.22)
+        let verticalRadius = max(0.035, scanRect.height * 0.22)
+        return cells.contains { index in
+            let column = index % selectionGridColumns
+            let row = index / selectionGridColumns
+            let x = (CGFloat(column) + 0.5) / CGFloat(selectionGridColumns)
+            let y = (CGFloat(row) + 0.5) / CGFloat(selectionGridRows)
+            let dx = (x - 0.5) / horizontalRadius
+            let dy = (y - 0.5) / verticalRadius
+            return dx * dx + dy * dy <= 1
+        }
+    }
+
+    private func contourPoints(from cells: Set<Int>) -> [CGPoint] {
+        guard cells.count >= 8 else { return [] }
+        let locations = cells.map { index -> CGPoint in
+            let column = index % selectionGridColumns
+            let row = index / selectionGridColumns
+            return CGPoint(
+                x: (CGFloat(column) + 0.5) / CGFloat(selectionGridColumns),
+                y: (CGFloat(row) + 0.5) / CGFloat(selectionGridRows)
+            )
+        }
+        let center = CGPoint(
+            x: locations.map(\.x).reduce(0, +) / CGFloat(locations.count),
+            y: locations.map(\.y).reduce(0, +) / CGFloat(locations.count)
+        )
+        let bucketCount = 28
+        var boundary: [Int: (point: CGPoint, radius: CGFloat)] = [:]
+        for point in locations {
+            let dx = point.x - center.x
+            let dy = point.y - center.y
+            var angle = atan2(dy, dx)
+            if angle < 0 { angle += 2 * .pi }
+            let bucket = min(
+                bucketCount - 1,
+                Int(angle / (2 * .pi) * CGFloat(bucketCount))
+            )
+            let radius = dx * dx + dy * dy
+            if boundary[bucket] == nil || radius > boundary[bucket]!.radius {
+                boundary[bucket] = (point, radius)
+            }
+        }
+        return boundary.keys.sorted().compactMap { boundary[$0]?.point }
     }
 
     private func friendlyClassificationName(_ identifier: String) -> String {
@@ -950,10 +1035,23 @@ final class CameraController: NSObject, ObservableObject {
                 format: .L8,
                 colorSpace: nil
             )
-            let fullResolutionMask = lowResolutionMask.transformed(by: CGAffineTransform(
+            let enlargedMask = lowResolutionMask.transformed(by: CGAffineTransform(
                 scaleX: maskImage.extent.width / CGFloat(selectionGridColumns),
                 y: maskImage.extent.height / CGFloat(selectionGridRows)
             ))
+            // Làm mềm viền sau khi phóng lớn để không còn các ô vuông ghép thô.
+            // Morphology lấp khe nhỏ, Gaussian tạo đường bo tự nhiên quanh vật.
+            let fullResolutionMask = enlargedMask
+                .clampedToExtent()
+                .applyingFilter(
+                    "CIMorphologyMaximum",
+                    parameters: [kCIInputRadiusKey: 1.4]
+                )
+                .applyingFilter(
+                    "CIGaussianBlur",
+                    parameters: [kCIInputRadiusKey: 2.2]
+                )
+                .cropped(to: maskImage.extent)
             guard let cgMask = ciContext.createCGImage(
                 fullResolutionMask,
                 from: maskImage.extent
@@ -994,7 +1092,9 @@ final class CameraController: NSObject, ObservableObject {
                 boundingRect: boundingRect,
                 image: UIImage(cgImage: cgMask),
                 referenceJPEG: referenceJPEG,
-                removedHand: removedHand
+                removedHand: removedHand,
+                isCentered: subjectOccupiesGuideCenter(cells),
+                contourPoints: contourPoints(from: cells)
             )
         } catch {
             return nil
@@ -1011,9 +1111,24 @@ final class CameraController: NSObject, ObservableObject {
                 self.hasSelectedSubject = false
                 self.selectedSubjectMaskImage = nil
                 self.selectedSubjectRect = nil
+                self.subjectContourPoints = []
                 self.scanNeedsNewAngle = true
                 self.scanGuidanceText = "Không tách được vật • hãy chạm gần giữa vật"
                 self.statusText = "Nền nên khác màu vật và không có vật khác chạm vào"
+            }
+            return
+        }
+
+        guard selection.isCentered else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.hasSelectedSubject = false
+                self.selectedSubjectMaskImage = nil
+                self.selectedSubjectRect = nil
+                self.subjectContourPoints = []
+                self.scanNeedsNewAngle = true
+                self.scanGuidanceText = "Đưa một phần chính của vật qua tâm vòng tròn"
+                self.statusText = "Vật được phép lớn và tràn khỏi vòng, nhưng tâm vòng phải chạm vật"
             }
             return
         }
@@ -1030,6 +1145,7 @@ final class CameraController: NSObject, ObservableObject {
             self.hasSelectedSubject = true
             self.selectedSubjectMaskImage = selection.image
             self.selectedSubjectRect = selection.boundingRect
+            self.subjectContourPoints = selection.contourPoints
             self.scanHasConfirmedTarget = true
             self.targetConfirmationProgress = 1
             self.scanSubjectKind = classification.kind
@@ -1058,6 +1174,13 @@ final class CameraController: NSObject, ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 self?.scanNeedsNewAngle = true
                 self?.scanGuidanceText = "Không thấy vật đã chọn • chạm lại vào vật"
+            }
+            return
+        }
+        guard selection.isCentered else {
+            DispatchQueue.main.async { [weak self] in
+                self?.scanNeedsNewAngle = true
+                self?.scanGuidanceText = "Đưa vật đi qua tâm vòng tròn rồi chụp"
             }
             return
         }
@@ -1113,6 +1236,7 @@ final class CameraController: NSObject, ObservableObject {
             self.hasSelectedSubject = true
             self.selectedSubjectMaskImage = selection.image
             self.selectedSubjectRect = selection.boundingRect
+            self.subjectContourPoints = selection.contourPoints
             self.scanHasConfirmedTarget = true
             self.targetConfirmationProgress = 1
             self.learnedSamples = count
@@ -1627,6 +1751,22 @@ final class CameraController: NSObject, ObservableObject {
         return best
     }
 
+    private func consensusDistance(to candidate: VNFeaturePrintObservation) -> Float? {
+        var distances: [Float] = []
+        for sample in featureSamples {
+            var distance: Float = 0
+            if (try? candidate.computeDistance(&distance, to: sample)) != nil {
+                distances.append(distance)
+            }
+        }
+        distances.sort()
+        guard let best = distances.first else { return nil }
+        guard distances.count >= 2 else { return best }
+        // Ảnh hiện tại chỉ giống mạnh một vài góc trong sáu ảnh mẫu. Kết hợp
+        // hai góc gần nhất giảm khóa nhầm nhưng vẫn cho phép vật đang xoay.
+        return best * 0.68 + distances[1] * 0.32
+    }
+
     private struct ForegroundCandidate {
         let rect: CGRect
         let feature: VNFeaturePrintObservation
@@ -1714,6 +1854,83 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    private func topLeftRect(from observation: VNDetectedObjectObservation) -> CGRect {
+        CGRect(
+            x: observation.boundingBox.minX,
+            y: 1.0 - observation.boundingBox.maxY,
+            width: observation.boundingBox.width,
+            height: observation.boundingBox.height
+        )
+    }
+
+    private func observation(fromTopLeftRect rect: CGRect) -> VNDetectedObjectObservation {
+        let clipped = rect.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        return VNDetectedObjectObservation(boundingBox: CGRect(
+            x: clipped.minX,
+            y: 1.0 - clipped.maxY,
+            width: clipped.width,
+            height: clipped.height
+        ))
+    }
+
+    private func trackingAnchorRects(in rect: CGRect) -> [CGRect] {
+        let centers: [CGPoint]
+        if rect.height > rect.width * 1.18 {
+            centers = [
+                CGPoint(x: rect.midX, y: rect.minY + rect.height * 0.20),
+                CGPoint(x: rect.midX, y: rect.midY),
+                CGPoint(x: rect.midX, y: rect.minY + rect.height * 0.80)
+            ]
+        } else if rect.width > rect.height * 1.18 {
+            centers = [
+                CGPoint(x: rect.minX + rect.width * 0.20, y: rect.midY),
+                CGPoint(x: rect.midX, y: rect.midY),
+                CGPoint(x: rect.minX + rect.width * 0.80, y: rect.midY)
+            ]
+        } else {
+            centers = [
+                CGPoint(x: rect.midX, y: rect.minY + rect.height * 0.25),
+                CGPoint(x: rect.minX + rect.width * 0.30, y: rect.minY + rect.height * 0.72),
+                CGPoint(x: rect.minX + rect.width * 0.70, y: rect.minY + rect.height * 0.72)
+            ]
+        }
+
+        let anchorWidth = max(0.035, min(0.15, rect.width * 0.58))
+        let anchorHeight = max(0.035, min(0.15, rect.height * 0.24))
+        return centers.map { center in
+            CGRect(
+                x: center.x - anchorWidth / 2,
+                y: center.y - anchorHeight / 2,
+                width: anchorWidth,
+                height: anchorHeight
+            ).intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+    }
+
+    private func makeTrackingAnchors(in rect: CGRect) -> [VNDetectedObjectObservation] {
+        trackingAnchorRects(in: rect).map { observation(fromTopLeftRect: $0) }
+    }
+
+    private func representativeTrackingPoints(in rect: CGRect) -> [CGPoint] {
+        trackingAnchorRects(in: rect).map { CGPoint(x: $0.midX, y: $0.midY) }
+    }
+
+    private func directionLabel(for velocity: CGVector) -> String {
+        let speed = hypot(velocity.dx, velocity.dy)
+        guard speed >= 0.0007 else { return "ổn định" }
+        let angle = atan2(-velocity.dy, velocity.dx) * 180 / .pi
+        switch angle {
+        case -22.5..<22.5: return "sang phải →"
+        case 22.5..<67.5: return "chéo lên phải ↗"
+        case 67.5..<112.5: return "bay lên ↑"
+        case 112.5..<157.5: return "chéo lên trái ↖"
+        case -67.5 ..< -22.5: return "chéo xuống phải ↘"
+        case -112.5 ..< -67.5: return "đi xuống ↓"
+        case -157.5 ..< -112.5: return "chéo xuống trái ↙"
+        default: return "sang trái ←"
+        }
+    }
+
     private func verifyAndLock(pixelBuffer: CVPixelBuffer) {
         guard !featureSamples.isEmpty else {
             return
@@ -1721,7 +1938,7 @@ final class CameraController: NSObject, ObservableObject {
         var bestCandidate: ForegroundCandidate?
         var bestDistance: Float?
         for candidate in foregroundCandidates(from: pixelBuffer) {
-            guard let distance = minimumDistance(to: candidate.feature) else { continue }
+            guard let distance = consensusDistance(to: candidate.feature) else { continue }
             if bestDistance == nil || distance < bestDistance! {
                 bestDistance = distance
                 bestCandidate = candidate
@@ -1751,16 +1968,25 @@ final class CameraController: NSObject, ObservableObject {
             height: processingRect.height
         )
         trackingObservation = VNDetectedObjectObservation(boundingBox: visionRect)
+        trackingAnchorObservations = makeTrackingAnchors(in: candidate.rect)
         sequenceHandler = VNSequenceRequestHandler()
         trackingFrameCounter = 0
         lowConfidenceFrames = 0
+        previousTrackingCenter = CGPoint(x: candidate.rect.midX, y: candidate.rect.midY)
+        smoothedTrackingVelocity = .zero
         processingMode = .tracking
 
         let shouldStartRecording = shouldRecordAfterVerification
+        let initialPoints = representativeTrackingPoints(in: candidate.rect)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.stage = .tracking
             self.targetRect = self.processingRect
+            self.trackingPoints = initialPoints
+            self.predictedTargetPoint = CGPoint(
+                x: self.processingRect.midX,
+                y: self.processingRect.midY
+            )
             self.trackingConfidence = score
             self.matchText = String(format: "Khớp mẫu %.0f%%", score * 100)
             self.statusText = "Đã tự tìm thấy \(self.detectedSubjectLabel) — đang bám mục tiêu"
@@ -1783,68 +2009,120 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func track(pixelBuffer: CVPixelBuffer) {
-        guard let observation = trackingObservation else {
+        guard !trackingAnchorObservations.isEmpty else {
             markTargetLost()
             return
         }
 
-        let request = VNTrackObjectRequest(detectedObjectObservation: observation)
-        request.trackingLevel = .fast
+        let requests = trackingAnchorObservations.map { observation -> VNTrackObjectRequest in
+            let request = VNTrackObjectRequest(detectedObjectObservation: observation)
+            request.trackingLevel = .fast
+            return request
+        }
 
         do {
-            try sequenceHandler.perform([request], on: pixelBuffer, orientation: .up)
-            guard let result = request.results?.first as? VNDetectedObjectObservation else {
-                markTargetLost()
-                return
-            }
-
-            trackingObservation = result
+            try sequenceHandler.perform(
+                requests.map { $0 as VNRequest },
+                on: pixelBuffer,
+                orientation: .up
+            )
+            let results = requests.compactMap {
+                $0.results?.first as? VNDetectedObjectObservation
+            }.filter { $0.confidence >= 0.07 }
             trackingFrameCounter += 1
 
-            if result.confidence < 0.12 {
+            if results.count < 2 {
                 lowConfidenceFrames += 1
             } else {
                 lowConfidenceFrames = 0
             }
-            if lowConfidenceFrames >= 4 {
+            if lowConfidenceFrames >= 3 || results.isEmpty {
                 markTargetLost()
                 return
             }
 
-            let topLeftRect = CGRect(
-                x: result.boundingBox.minX,
-                y: 1.0 - result.boundingBox.maxY,
-                width: result.boundingBox.width,
-                height: result.boundingBox.height
+            let trackedRects = results.map { topLeftRect(from: $0) }
+            let rawUnion = trackedRects.dropFirst().reduce(trackedRects[0]) {
+                $0.union($1)
+            }
+            let topLeftRect = rawUnion
+                .insetBy(
+                    dx: -max(0.012, rawUnion.width * 0.22),
+                    dy: -max(0.012, rawUnion.height * 0.22)
+                )
+                .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+
+            let measuredPoints = trackedRects.map {
+                CGPoint(x: $0.midX, y: $0.midY)
+            }
+            let measuredCenter = CGPoint(
+                x: measuredPoints.map(\.x).reduce(0, +) / CGFloat(measuredPoints.count),
+                y: measuredPoints.map(\.y).reduce(0, +) / CGFloat(measuredPoints.count)
             )
+            if let previousTrackingCenter {
+                let measuredVelocity = CGVector(
+                    dx: measuredCenter.x - previousTrackingCenter.x,
+                    dy: measuredCenter.y - previousTrackingCenter.y
+                )
+                smoothedTrackingVelocity = CGVector(
+                    dx: smoothedTrackingVelocity.dx * 0.70 + measuredVelocity.dx * 0.30,
+                    dy: smoothedTrackingVelocity.dy * 0.70 + measuredVelocity.dy * 0.30
+                )
+            }
+            previousTrackingCenter = measuredCenter
+
+            let speed = hypot(smoothedTrackingVelocity.dx, smoothedTrackingVelocity.dy)
+            let leadFrames: CGFloat = min(12, 5 + speed * 180)
+            let predictedPoint = CGPoint(
+                x: max(0.02, min(0.98, measuredCenter.x + smoothedTrackingVelocity.dx * leadFrames)),
+                y: max(0.02, min(0.98, measuredCenter.y + smoothedTrackingVelocity.dy * leadFrames))
+            )
+            let publishedPoints = results.count == 3
+                ? measuredPoints
+                : representativeTrackingPoints(in: topLeftRect)
+            let averageConfidence = results
+                .map { Double($0.confidence) }
+                .reduce(0, +) / Double(results.count)
+            let direction = directionLabel(for: smoothedTrackingVelocity)
 
             var appearanceText: String?
-            if trackingFrameCounter % 60 == 0,
+            if trackingFrameCounter % 45 == 0,
                let candidate = featurePrint(from: pixelBuffer, normalizedTopLeftRect: topLeftRect),
                let distance = minimumDistance(to: candidate) {
-                appearanceText = String(format: "Đang bám • sai khác %.1f", distance)
+                appearanceText = String(
+                    format: "Bám 3 điểm • %@ • khớp %.1f",
+                    direction,
+                    distance
+                )
             }
 
+            trackingAnchorObservations = results.count == 3
+                ? results
+                : makeTrackingAnchors(in: topLeftRect)
+            trackingObservation = observation(fromTopLeftRect: topLeftRect)
+
             // Ở 60 fps, gửi tâm mục tiêu về ESP32 khoảng 20 lần/giây.
-            // Tọa độ 0...999: x tăng từ trái sang phải, y tăng từ trên xuống dưới.
+            // Dùng điểm dự đoán thay vì tâm hiện tại để bù trễ cho tên lửa bay nhanh.
             let telemetry: String? = trackingFrameCounter % 3 == 0
                 ? String(
                     format: "T,%03d,%03d,%02d",
-                    Int(max(0, min(999, topLeftRect.midX * 999))),
-                    Int(max(0, min(999, topLeftRect.midY * 999))),
-                    Int(max(0, min(99, Double(result.confidence) * 99)))
+                    Int(max(0, min(999, predictedPoint.x * 999))),
+                    Int(max(0, min(999, predictedPoint.y * 999))),
+                    Int(max(0, min(99, averageConfidence * 99)))
                 )
                 : nil
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.targetRect = topLeftRect
-                self.trackingConfidence = Double(result.confidence)
+                self.trackingPoints = publishedPoints
+                self.predictedTargetPoint = predictedPoint
+                self.trackingConfidence = averageConfidence
                 if let appearanceText { self.matchText = appearanceText }
                 if let telemetry { self.onEvent?(telemetry) }
 
-                let isNearEdge = !(0.12...0.88).contains(topLeftRect.midX)
-                    || !(0.10...0.90).contains(topLeftRect.midY)
+                let isNearEdge = !(0.12...0.88).contains(predictedPoint.x)
+                    || !(0.10...0.90).contains(predictedPoint.y)
                 if self.isZoomedIn && isNearEdge {
                     self.returnToUltraWide()
                     if self.isRecording {
@@ -1858,19 +2136,28 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func markTargetLost() {
-        processingMode = .lost
+        // Chuyển thẳng sang tìm lại tự động. Không yêu cầu người dùng bấm nút
+        // hoặc đưa vật vào vòng tròn lần nữa.
+        processingMode = .verifying
+        featureFrameCounter = 0
+        shouldRecordAfterVerification = false
         trackingObservation = nil
+        trackingAnchorObservations.removeAll()
+        previousTrackingCenter = nil
+        smoothedTrackingVelocity = .zero
         sequenceHandler = VNSequenceRequestHandler()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.stage = .lost
+            self.stage = .verifying
             self.targetRect = nil
+            self.trackingPoints = []
+            self.predictedTargetPoint = nil
             self.trackingConfidence = 0
-            self.matchText = "Đã mất mục tiêu"
-            self.statusText = "Đã trở về góc rộng 0,5×; đưa tên lửa vào khung rồi bấm Bắt lại"
+            self.matchText = "Mất mục tiêu • đang tự tìm lại mẫu 6 ảnh"
+            self.statusText = "Servo đang quét góc nhỏ; app tự khóa lại ngay khi nhận ra vật"
             self.returnToUltraWide()
-            self.announce("Mất mục tiêu. Đã trở về góc rộng.", kind: .warning)
-            self.onEvent?("TARGET_LOST")
+            self.announce("Mất mục tiêu. Đang tự tìm lại.", kind: .warning)
+            self.onEvent?("SEARCH_START")
         }
     }
 
@@ -2650,6 +2937,9 @@ extension CameraController: AVCaptureFileOutputRecordingDelegate {
         videoQueue.async { [weak self] in
             self?.processingMode = .idle
             self?.trackingObservation = nil
+            self?.trackingAnchorObservations.removeAll()
+            self?.previousTrackingCenter = nil
+            self?.smoothedTrackingVelocity = .zero
         }
 
         DispatchQueue.main.async { [weak self] in
@@ -2660,6 +2950,8 @@ extension CameraController: AVCaptureFileOutputRecordingDelegate {
             self.isZoomedIn = false
             self.zoomText = String(format: "%.1f×", self.ultraWideDisplayZoomFactor)
             self.targetRect = nil
+            self.trackingPoints = []
+            self.predictedTargetPoint = nil
             self.stage = .ready
             self.statusText = "Đã dừng, đang lưu video..."
             self.onEvent?("RECORDING_STOPPED")

@@ -73,6 +73,14 @@ struct ContentView: View {
                     subjectSpotlight(maskImage: maskImage, in: geometry.size)
                 }
 
+                if camera.stage.isScanning,
+                   camera.subjectContourPoints.count >= 3 {
+                    subjectContourOverlay(
+                        points: camera.subjectContourPoints,
+                        in: geometry.size
+                    )
+                }
+
                 if camera.stage.showsGuide {
                     let rect = mappedRect(camera.scanRect, in: geometry.size)
                     let guideColor: Color = camera.stage.isScanning
@@ -100,17 +108,9 @@ struct ContentView: View {
 
                 }
 
-                if let target = camera.targetRect, camera.stage == .tracking {
-                    let rect = mappedRect(target, in: geometry.size)
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.green, lineWidth: 4)
-                        .frame(width: rect.width, height: rect.height)
-                        .position(x: rect.midX, y: rect.midY)
-
-                    Circle()
-                        .fill(Color.red)
-                        .frame(width: 12, height: 12)
-                        .position(x: rect.midX, y: rect.midY)
+                if camera.stage == .tracking,
+                   camera.trackingPoints.count >= 2 {
+                    aiTrackingOverlay(in: geometry.size)
                 }
             }
         }
@@ -157,6 +157,95 @@ struct ContentView: View {
         .allowsHitTesting(false)
     }
 
+    private func subjectContourOverlay(
+        points: [CGPoint],
+        in size: CGSize
+    ) -> some View {
+        Canvas { context, _ in
+            let mapped = points.map { mappedPoint($0, in: size) }
+            guard mapped.count >= 3 else { return }
+            context.addFilter(.shadow(color: .cyan.opacity(0.85), radius: 5))
+            let outline = smoothClosedPath(mapped)
+            context.stroke(
+                outline,
+                with: .color(.cyan.opacity(0.95)),
+                style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round)
+            )
+            for (index, point) in mapped.enumerated() where index.isMultiple(of: 3) {
+                context.fill(
+                    Path(ellipseIn: CGRect(x: point.x - 2.5, y: point.y - 2.5, width: 5, height: 5)),
+                    with: .color(.white.opacity(0.92))
+                )
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func aiTrackingOverlay(in size: CGSize) -> some View {
+        Canvas { context, _ in
+            let points = camera.trackingPoints.map { mappedPoint($0, in: size) }
+            guard points.count >= 2 else { return }
+            context.addFilter(.shadow(color: .cyan.opacity(0.9), radius: 6))
+
+            var links = Path()
+            links.move(to: points[0])
+            for point in points.dropFirst() { links.addLine(to: point) }
+            context.stroke(
+                links,
+                with: .color(.cyan.opacity(0.90)),
+                style: StrokeStyle(lineWidth: 2.6, lineCap: .round, lineJoin: .round)
+            )
+
+            for (index, point) in points.enumerated() {
+                context.fill(
+                    Path(ellipseIn: CGRect(x: point.x - 8, y: point.y - 8, width: 16, height: 16)),
+                    with: .color(.cyan.opacity(0.20))
+                )
+                context.fill(
+                    Path(ellipseIn: CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8)),
+                    with: .color(index == 1 ? .white : .cyan)
+                )
+            }
+
+            if let predicted = camera.predictedTargetPoint {
+                let target = mappedPoint(predicted, in: size)
+                let center = CGPoint(
+                    x: points.map(\.x).reduce(0, +) / CGFloat(points.count),
+                    y: points.map(\.y).reduce(0, +) / CGFloat(points.count)
+                )
+                var direction = Path()
+                direction.move(to: center)
+                direction.addLine(to: target)
+                context.stroke(
+                    direction,
+                    with: .color(.yellow.opacity(0.95)),
+                    style: StrokeStyle(lineWidth: 2.2, lineCap: .round, dash: [6, 4])
+                )
+                context.stroke(
+                    Path(ellipseIn: CGRect(x: target.x - 7, y: target.y - 7, width: 14, height: 14)),
+                    with: .color(.yellow),
+                    lineWidth: 2.2
+                )
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func smoothClosedPath(_ points: [CGPoint]) -> Path {
+        var path = Path()
+        guard let first = points.first, let last = points.last else { return path }
+        let firstMidpoint = CGPoint(x: (last.x + first.x) / 2, y: (last.y + first.y) / 2)
+        path.move(to: firstMidpoint)
+        for index in points.indices {
+            let current = points[index]
+            let next = points[(index + 1) % points.count]
+            let midpoint = CGPoint(x: (current.x + next.x) / 2, y: (current.y + next.y) / 2)
+            path.addQuadCurve(to: midpoint, control: current)
+        }
+        path.closeSubpath()
+        return path
+    }
+
     private var scanProgressRing: some View {
         let displayedProgress = camera.scanHasConfirmedTarget
             ? camera.scanProgress
@@ -184,8 +273,8 @@ struct ContentView: View {
                 }
                 Text(
                     camera.scanIsSufficient
-                        ? "ĐÃ PHỦ"
-                        : (camera.scanHasConfirmedTarget ? "DỰNG 3D" : "XÁC NHẬN")
+                        ? "ĐÃ ĐỦ"
+                        : (camera.scanHasConfirmedTarget ? "6 GÓC" : "XÁC NHẬN")
                 )
                     .font(.system(size: 9, weight: .bold))
             }
@@ -320,6 +409,14 @@ struct ContentView: View {
             width: normalized.width * displayedWidth,
             height: normalized.height * displayedHeight
         )
+    }
+
+    private func mappedPoint(_ normalized: CGPoint, in viewSize: CGSize) -> CGPoint {
+        let mapped = mappedRect(
+            CGRect(x: normalized.x, y: normalized.y, width: 0, height: 0),
+            in: viewSize
+        )
+        return mapped.origin
     }
 
     private func normalizedPoint(_ point: CGPoint, in viewSize: CGSize) -> CGPoint {
