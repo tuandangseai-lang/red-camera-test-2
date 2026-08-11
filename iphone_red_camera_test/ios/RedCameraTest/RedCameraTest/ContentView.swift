@@ -121,6 +121,9 @@ struct ContentView: View {
             Text(camera.matchText)
                 .font(.subheadline)
                 .foregroundStyle(.white.opacity(0.9))
+            Text(camera.captureModeText)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.cyan)
         }
         .foregroundStyle(.white)
         .padding(14)
@@ -139,10 +142,15 @@ struct ContentView: View {
                     .foregroundStyle(.white)
             } else {
                 scanSizeControl
+                Toggle(isOn: $camera.voiceAnnouncementsEnabled) {
+                    Label("Giọng báo tiếng Việt", systemImage: "speaker.wave.2.fill")
+                }
+                .tint(.green)
+                .foregroundStyle(.white)
                 actionButtons
             }
 
-            Text("Tên lửa có thể là bất kỳ màu nào • giữ app mở và màn hình không khóa")
+            Text("Quay trước khi phóng khoảng 3 giây • tên lửa có thể là bất kỳ màu nào")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.9))
                 .multilineTextAlignment(.center)

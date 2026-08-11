@@ -41,7 +41,8 @@ final class CameraController: NSObject, ObservableObject {
     let session = AVCaptureSession()
 
     @Published private(set) var statusText = "Đang chuẩn bị camera..."
-    @Published private(set) var zoomText = "1.0×"
+    @Published private(set) var zoomText = "0.5×"
+    @Published private(set) var captureModeText = "Đang chọn camera 0,5× / 60 fps..."
     @Published private(set) var isReady = false
     @Published private(set) var isRecording = false
     @Published private(set) var stage: RocketLearningStage = .idle
@@ -52,6 +53,7 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var matchText = "Chưa có mẫu"
     @Published private(set) var frameAspectRatio: CGFloat = 9.0 / 16.0
     @Published var scanBoxScale = 0.42
+    @Published var voiceAnnouncementsEnabled = true
 
     var onEvent: ((String) -> Void)?
 
@@ -85,8 +87,14 @@ final class CameraController: NSObject, ObservableObject {
     private let movieOutput = AVCaptureMovieFileOutput()
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
+    private let voiceNotifier = VoiceNotifier()
 
     private var videoDevice: AVCaptureDevice?
+    private var ultraWideDeviceZoomFactor: CGFloat = 1.0
+    private var mainDeviceZoomFactor: CGFloat = 2.0
+    private var ultraWideDisplayZoomFactor: CGFloat = 0.5
+    private var mainDisplayZoomFactor: CGFloat = 1.0
+    private var isUsingMainCamera = false
     private var didRequestStart = false
     private var configured = false
     private var pendingArm = false
@@ -108,7 +116,6 @@ final class CameraController: NSObject, ObservableObject {
 
     private var scanFinishWorkItem: DispatchWorkItem?
     private var zoomInWorkItem: DispatchWorkItem?
-    private var zoomOutWorkItem: DispatchWorkItem?
     private var zoomFinishedWorkItem: DispatchWorkItem?
 
     func start() {
@@ -167,6 +174,7 @@ final class CameraController: NSObject, ObservableObject {
 
     func resetProfile() {
         guard !isRecording else { return }
+        voiceNotifier.stop()
         scanFinishWorkItem?.cancel()
         videoQueue.async { [weak self] in
             guard let self else { return }
@@ -299,6 +307,7 @@ final class CameraController: NSObject, ObservableObject {
                         self.stage = .waitingAround
                         self.statusText = "Chưa đủ góc nhìn; hãy quét xung quanh lại"
                     }
+                    self.announce("Quét chưa đủ. Hãy thử lại.", kind: .warning)
                     return
                 }
 
@@ -307,12 +316,15 @@ final class CameraController: NSObject, ObservableObject {
                 case .near:
                     self.stage = .waitingFar
                     self.statusText = "Xong quét gần. Lùi ra xa, chỉnh khung rồi bấm Quét xa"
+                    self.announce("Đã quét gần.", kind: .success)
                 case .far:
                     self.stage = .waitingAround
                     self.statusText = "Xong quét xa. Đổi nhiều góc rồi bấm Quét xung quanh"
+                    self.announce("Đã quét xa.", kind: .success)
                 case .around:
                     self.stage = .ready
                     self.statusText = "Đã học xong. Đưa tên lửa vào khung rồi bấm Khóa và bám"
+                    self.announce("Đã quét xong. Sẵn sàng bám tên lửa.", kind: .success)
                 }
                 self.onEvent?("SCAN_\(self.scanName(kind))_DONE")
             }
@@ -333,11 +345,17 @@ final class CameraController: NSObject, ObservableObject {
         session.beginConfiguration()
         session.sessionPreset = .high
 
-        guard let camera = AVCaptureDevice.default(
-            .builtInWideAngleCamera,
+        let dualWideCamera = AVCaptureDevice.default(
+            .builtInDualWideCamera,
             for: .video,
             position: .back
-        ), let cameraInput = try? AVCaptureDeviceInput(device: camera),
+        )
+        let camera = dualWideCamera
+            ?? AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back)
+            ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+
+        guard let camera,
+           let cameraInput = try? AVCaptureDeviceInput(device: camera),
            session.canAddInput(cameraInput) else {
             session.commitConfiguration()
             DispatchQueue.main.async { [weak self] in
@@ -348,6 +366,8 @@ final class CameraController: NSObject, ObservableObject {
 
         session.addInput(cameraInput)
         videoDevice = camera
+        configureFastWideCapture(camera, isDualWide: dualWideCamera != nil)
+        configureAudioSession(includeAudio: includeAudio)
 
         if includeAudio,
            let microphone = AVCaptureDevice.default(for: .audio),
@@ -385,10 +405,95 @@ final class CameraController: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.isReady = true
-            self.statusText = "Đặt tên lửa vào khung, chỉnh kích thước rồi bấm Quét gần"
+            self.statusText = "Đặt tên lửa vào khung; app đang dùng góc siêu rộng để tránh hụt mục tiêu"
             if self.pendingArm {
                 self.pendingArm = false
                 self.statusText = "Đã nhận ARM nhưng cần quét tên lửa trước"
+            }
+        }
+    }
+
+    private func configureAudioSession(includeAudio: Bool) {
+        let audioSession = AVAudioSession.sharedInstance()
+        do {
+            if includeAudio {
+                session.automaticallyConfiguresApplicationAudioSession = false
+                try audioSession.setCategory(
+                    .playAndRecord,
+                    mode: .videoRecording,
+                    options: [.defaultToSpeaker, .duckOthers]
+                )
+            } else {
+                try audioSession.setCategory(.playback, mode: .voicePrompt, options: [.duckOthers])
+            }
+            try audioSession.setActive(true)
+        } catch {
+            DispatchQueue.main.async { [weak self] in
+                self?.captureModeText += " • chưa mở được loa báo"
+            }
+        }
+    }
+
+    private func announce(_ text: String, kind: VoiceNotifier.FeedbackKind) {
+        guard voiceAnnouncementsEnabled else { return }
+        voiceNotifier.speak(text, kind: kind)
+    }
+
+    private func configureFastWideCapture(_ camera: AVCaptureDevice, isDualWide: Bool) {
+        let desiredFPS = 60.0
+        let preferredFormat = camera.formats
+            .filter { format in
+                let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                let isFullHD = dimensions.width == 1920 && dimensions.height == 1080
+                let supports60 = format.videoSupportedFrameRateRanges.contains {
+                    $0.minFrameRate <= desiredFPS && $0.maxFrameRate >= desiredFPS
+                }
+                return isFullHD && supports60
+            }
+            .last
+
+        do {
+            try camera.lockForConfiguration()
+            defer { camera.unlockForConfiguration() }
+
+            if let preferredFormat {
+                camera.activeFormat = preferredFormat
+                let duration = CMTime(value: 1, timescale: 60)
+                camera.activeVideoMinFrameDuration = duration
+                camera.activeVideoMaxFrameDuration = duration
+            }
+
+            ultraWideDeviceZoomFactor = max(1.0, camera.minAvailableVideoZoomFactor)
+            if let firstSwitch = camera.virtualDeviceSwitchOverVideoZoomFactors.first {
+                mainDeviceZoomFactor = min(
+                    CGFloat(truncating: firstSwitch),
+                    camera.maxAvailableVideoZoomFactor
+                )
+            } else {
+                mainDeviceZoomFactor = min(2.0, camera.maxAvailableVideoZoomFactor)
+            }
+
+            let displayMultiplier = camera.displayVideoZoomFactorMultiplier
+            ultraWideDisplayZoomFactor = ultraWideDeviceZoomFactor * displayMultiplier
+            mainDisplayZoomFactor = mainDeviceZoomFactor * displayMultiplier
+            camera.videoZoomFactor = ultraWideDeviceZoomFactor
+
+            let configuredFPS = preferredFormat == nil ? 30 : 60
+            let mode = isDualWide
+                ? String(
+                    format: "Camera %.1f× → %.1f× • %d fps",
+                    ultraWideDisplayZoomFactor,
+                    mainDisplayZoomFactor,
+                    configuredFPS
+                )
+                : "Camera dự phòng • \(configuredFPS) fps"
+            DispatchQueue.main.async { [weak self] in
+                self?.captureModeText = mode
+                self?.zoomText = String(format: "%.1f×", self?.ultraWideDisplayZoomFactor ?? 0.5)
+            }
+        } catch {
+            DispatchQueue.main.async { [weak self] in
+                self?.captureModeText = "Không đặt được 60 fps; đang dùng cấu hình tự động"
             }
         }
     }
@@ -482,6 +587,8 @@ final class CameraController: NSObject, ObservableObject {
             self.onEvent?("TARGET_LOCKED")
             if shouldStartRecording {
                 self.beginRecording()
+            } else if self.isRecording {
+                self.scheduleZoomSequence(after: 2.0)
             }
         }
     }
@@ -533,15 +640,15 @@ final class CameraController: NSObject, ObservableObject {
             )
 
             var appearanceText: String?
-            if trackingFrameCounter % 15 == 0,
+            if trackingFrameCounter % 60 == 0,
                let candidate = featurePrint(from: pixelBuffer, normalizedTopLeftRect: topLeftRect),
                let distance = minimumDistance(to: candidate) {
                 appearanceText = String(format: "Đang bám • sai khác %.1f", distance)
             }
 
-            // Gửi tâm mục tiêu về ESP32 khoảng 6 lần/giây để điều khiển hai servo.
+            // Ở 60 fps, gửi tâm mục tiêu về ESP32 khoảng 20 lần/giây.
             // Tọa độ 0...999: x tăng từ trái sang phải, y tăng từ trên xuống dưới.
-            let telemetry: String? = trackingFrameCounter % 5 == 0
+            let telemetry: String? = trackingFrameCounter % 3 == 0
                 ? String(
                     format: "T,%03d,%03d,%02d",
                     Int(max(0, min(999, topLeftRect.midX * 999))),
@@ -556,6 +663,15 @@ final class CameraController: NSObject, ObservableObject {
                 self.trackingConfidence = Double(result.confidence)
                 if let appearanceText { self.matchText = appearanceText }
                 if let telemetry { self.onEvent?(telemetry) }
+
+                let isNearEdge = !(0.12...0.88).contains(topLeftRect.midX)
+                    || !(0.10...0.90).contains(topLeftRect.midY)
+                if self.isUsingMainCamera && isNearEdge {
+                    self.returnToUltraWide()
+                    if self.isRecording {
+                        self.scheduleZoomSequence(after: 1.5)
+                    }
+                }
             }
         } catch {
             markTargetLost()
@@ -572,7 +688,9 @@ final class CameraController: NSObject, ObservableObject {
             self.targetRect = nil
             self.trackingConfidence = 0
             self.matchText = "Đã mất mục tiêu"
-            self.statusText = "Đưa tên lửa vào khung rồi bấm Bắt lại"
+            self.statusText = "Đã trở về góc rộng 0,5×; đưa tên lửa vào khung rồi bấm Bắt lại"
+            self.returnToUltraWide()
+            self.announce("Mất mục tiêu. Đã trở về góc rộng.", kind: .warning)
             self.onEvent?("TARGET_LOST")
         }
     }
@@ -590,42 +708,55 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
-    private func scheduleZoomSequence() {
+    private func scheduleZoomSequence(after delay: TimeInterval = 5.0) {
         cancelZoomSequence()
 
         let zoomIn = DispatchWorkItem { [weak self] in
             guard let self, self.isRecording else { return }
-            self.zoomText = "1× → 2×"
-            self.onEvent?("ZOOM_IN")
-            self.rampZoom(to: 2.0, rate: 0.4)
-        }
-        let zoomOut = DispatchWorkItem { [weak self] in
-            guard let self, self.isRecording else { return }
-            self.zoomText = "2× → 1×"
-            self.onEvent?("ZOOM_OUT")
-            self.rampZoom(to: 1.0, rate: 0.4)
-        }
-        let zoomFinished = DispatchWorkItem { [weak self] in
-            guard let self, self.isRecording else { return }
-            self.zoomText = "1.0×"
-            self.onEvent?("ZOOM_CYCLE_DONE")
+            guard !self.isUsingMainCamera else { return }
+            guard self.stage == .tracking,
+                  let target = self.targetRect,
+                  (0.20...0.80).contains(target.midX),
+                  (0.18...0.82).contains(target.midY) else {
+                self.zoomText = "0.5× • chờ mục tiêu vào giữa"
+                self.scheduleZoomSequence(after: 0.5)
+                return
+            }
+
+            self.zoomText = String(
+                format: "%.1f× → %.1f×",
+                self.ultraWideDisplayZoomFactor,
+                self.mainDisplayZoomFactor
+            )
+            self.onEvent?("CAMERA_MAIN")
+            self.isUsingMainCamera = true
+            self.rampZoom(to: self.mainDeviceZoomFactor, rate: 1.0)
+
+            let finished = DispatchWorkItem { [weak self] in
+                guard let self, self.isRecording else { return }
+                self.zoomText = String(format: "%.1f×", self.mainDisplayZoomFactor)
+            }
+            self.zoomFinishedWorkItem = finished
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: finished)
         }
 
         zoomInWorkItem = zoomIn
-        zoomOutWorkItem = zoomOut
-        zoomFinishedWorkItem = zoomFinished
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: zoomIn)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 7.5, execute: zoomOut)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0, execute: zoomFinished)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: zoomIn)
     }
 
     private func cancelZoomSequence() {
         zoomInWorkItem?.cancel()
-        zoomOutWorkItem?.cancel()
         zoomFinishedWorkItem?.cancel()
         zoomInWorkItem = nil
-        zoomOutWorkItem = nil
         zoomFinishedWorkItem = nil
+    }
+
+    private func returnToUltraWide() {
+        cancelZoomSequence()
+        isUsingMainCamera = false
+        zoomText = String(format: "%.1f×", ultraWideDisplayZoomFactor)
+        onEvent?("CAMERA_ULTRAWIDE")
+        rampZoom(to: ultraWideDeviceZoomFactor, rate: 2.0)
     }
 
     private func rampZoom(to requestedFactor: CGFloat, rate: Float) {
@@ -634,7 +765,7 @@ final class CameraController: NSObject, ObservableObject {
             do {
                 try device.lockForConfiguration()
                 defer { device.unlockForConfiguration() }
-                let maximum = min(device.activeFormat.videoMaxZoomFactor, 2.0)
+                let maximum = device.maxAvailableVideoZoomFactor
                 let target = max(1.0, min(requestedFactor, maximum))
                 device.cancelVideoZoomRamp()
                 device.ramp(toVideoZoomFactor: target, withRate: rate)
@@ -652,7 +783,7 @@ final class CameraController: NSObject, ObservableObject {
             do {
                 try device.lockForConfiguration()
                 device.cancelVideoZoomRamp()
-                device.videoZoomFactor = 1.0
+                device.videoZoomFactor = self?.ultraWideDeviceZoomFactor ?? 1.0
                 device.unlockForConfiguration()
             } catch { }
         }
@@ -667,6 +798,7 @@ final class CameraController: NSObject, ObservableObject {
                 guard let self else { return }
                 if saved {
                     self.statusText = "Đã lưu video. Có thể khóa và quay lượt tiếp theo"
+                    self.announce("Đã lưu video.", kind: .success)
                     self.onEvent?("VIDEO_SAVED")
                 } else {
                     self.statusText = "Quay xong nhưng chưa lưu được: \(error?.localizedDescription ?? "thiếu quyền Ảnh")"
@@ -738,8 +870,9 @@ extension CameraController: AVCaptureFileOutputRecordingDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.isRecording = true
-            self.statusText = "Đang quay và bám — 5 giây nữa bắt đầu zoom"
-            self.zoomText = "1.0×"
+            self.statusText = "Đang quay 60 fps ở góc rộng; chỉ sang camera thường khi mục tiêu ở giữa"
+            self.zoomText = String(format: "%.1f×", self.ultraWideDisplayZoomFactor)
+            self.announce("Bắt đầu quay.", kind: .start)
             self.onEvent?("RECORDING_STARTED")
             self.scheduleZoomSequence()
         }
@@ -761,7 +894,8 @@ extension CameraController: AVCaptureFileOutputRecordingDelegate {
             self.cancelZoomSequence()
             self.resetZoom()
             self.isRecording = false
-            self.zoomText = "1.0×"
+            self.isUsingMainCamera = false
+            self.zoomText = String(format: "%.1f×", self.ultraWideDisplayZoomFactor)
             self.targetRect = nil
             self.stage = .ready
             self.statusText = "Đã dừng, đang lưu video..."

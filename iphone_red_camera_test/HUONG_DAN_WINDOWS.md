@@ -80,7 +80,7 @@ Nếu app chưa mở được:
 4. App tự tìm thiết bị `RocketTracker-Test`.
 5. Quét chính chiếc tên lửa sẽ phóng theo ba lượt: **gần 5 giây → xa 5 giây → xung quanh 8 giây**. Tên lửa có thể là bất kỳ màu nào.
 6. Trước khi phóng, căn tên lửa vào khung và bấm **Khóa, bám và bắt đầu quay**; hoặc nhấn nút `GPIO 25` để ESP32 gửi `ARM`.
-7. App khóa mục tiêu và bắt đầu quay; sau 5 giây sẽ zoom 1× → 2× → 1×.
+7. Bấm quay khoảng 3 giây trước lúc phóng. App quay 1080p 60 fps ở góc siêu rộng 0,5×; sau 5 giây chỉ chuyển sang camera thường 1× nếu tên lửa còn ở vùng giữa ảnh.
 8. Bấm **Dừng và lưu video**. Serial Monitor sẽ thấy dữ liệu tâm mục tiêu dạng `T,xxx,yyy,cc`.
 
 ## App hết hạn sau 7 ngày thì sao?

@@ -9,11 +9,14 @@
 3. Quét xung quanh 8 giây để lấy thêm nhiều góc nhìn.
 4. So hình trong khung với các mẫu đã quét rồi khóa đúng mục tiêu.
 5. Dùng `VNTrackObjectRequest` để cập nhật khung và tâm mục tiêu theo từng frame.
-6. Quay video; sau 5 giây zoom dần 1× → 2× trong 2,5 giây, rồi 2× → 1× trong 2,5 giây.
+6. Quay 1080p 60 fps bằng camera kép: bắt đầu ở camera siêu rộng 0,5×, sau 5 giây chỉ chuyển dần sang camera thường 1× khi mục tiêu vẫn nằm trong vùng an toàn ở giữa ảnh.
 7. Gửi tâm mục tiêu về ESP32 bằng BLE theo dạng `T,xxx,yyy,cc` để dùng cho hai servo ở bước tiếp theo.
 8. Dùng logo trong `Assets.xcassets/AppIcon.appiconset` làm icon iPhone.
+9. Báo bằng giọng Việt và rung nhẹ khi quét xong, sẵn sàng, bắt đầu quay, mất mục tiêu và lưu video.
 
-`xxx` và `yyy` chạy từ `000...999`; `cc` là độ tin cậy từ `00...99`. Firmware ESP32 hiện in dữ liệu này ra Serial Monitor, chưa tự quay servo.
+`xxx` và `yyy` chạy từ `000...999`; `cc` là độ tin cậy từ `00...99`. Firmware ESP32 dùng dữ liệu này để điều khiển servo PAN/TILT và đồng thời in trạng thái ra Serial Monitor.
+
+Giọng báo được bật mặc định. Có thể tắt bằng công tắc **Giọng báo tiếng Việt** trên màn hình. Câu “Bắt đầu quay” có thể được micro ghi vào đầu video; hãy tắt công tắc nếu muốn video hoàn toàn không có lời báo từ điện thoại.
 
 ## Cách học một tên lửa
 
@@ -24,6 +27,8 @@
 5. Trước khi phóng, đặt tên lửa vừa trong khung và bấm **Khóa, bám và bắt đầu quay**. ESP32 cũng có thể gửi lệnh `ARM` để làm bước này.
 6. Khi quay xong, bấm **Dừng và lưu video**.
 
+Nên bấm bắt đầu quay khoảng 3 giây trước khi phóng. Như vậy app đã khóa mục tiêu và đang ghi hình trước lúc tên lửa tăng tốc.
+
 Mẫu chỉ được giữ trong bộ nhớ khi app đang mở. Nếu đóng hẳn app hoặc đổi sang chiếc tên lửa khác, bấm **Học lại** và quét lại ba lượt.
 
 ## Mẹo để bám tốt hơn
@@ -33,6 +38,7 @@ Mẫu chỉ được giữ trong bộ nhớ khi app đang mở. Nếu đóng h�
 - Khi quét xung quanh, xoay chậm và cho app thấy cả phần mũi, thân, cánh và tem đặc trưng.
 - Nên dán một họa tiết tương phản hoặc mã hình học lên thân nếu nhiều tên lửa có hình dáng giống nhau.
 - Đặt iPhone đủ xa và dùng khung rộng lúc khóa để tên lửa không thoát khỏi ảnh ngay ở các frame đầu.
+- Trong đoạn tăng tốc đầu tiên, camera giữ góc siêu rộng 0,5×. Nếu mất mục tiêu, app tự trở lại 0,5× thay vì tiếp tục phóng lớn sai hướng.
 
 Đây là nhận dạng theo mẫu hình ảnh trong phiên chạy, không phải mô hình Core ML đã được huấn luyện bằng hàng trăm ảnh. Nó phù hợp để thử nhanh; tốc độ phóng quá cao, rung mạnh, vật bị che khuất hoặc nền quá giống nhau vẫn có thể làm mất mục tiêu.
 
@@ -44,6 +50,8 @@ Mẫu chỉ được giữ trong bộ nhớ khi app đang mở. Nếu đóng h�
 4. Mở Serial Monitor ở `115200 baud`.
 
 Không cần mô-đun Bluetooth rời vì ESP32 có BLE sẵn. Có thể nối nút giữa `GPIO 25` và `GND` để gửi `ARM`, hoặc gõ `a` trong Serial Monitor.
+
+Firmware hiện đã điều khiển hai servo PAN/TILT: PAN ở `GPIO 18`, TILT ở `GPIO 19`. Xem sơ đồ nguồn, cách đổi chiều và giới hạn góc trong `HUONG_DAN_2_SERVO.md`.
 
 ## Build app trên Windows
 
