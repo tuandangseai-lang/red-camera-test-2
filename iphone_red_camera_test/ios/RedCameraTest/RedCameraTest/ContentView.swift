@@ -190,6 +190,7 @@ struct ContentView: View {
             var links = Path()
             links.move(to: points[0])
             for point in points.dropFirst() { links.addLine(to: point) }
+            if points.count == 3 { links.addLine(to: points[0]) }
             context.stroke(
                 links,
                 with: .color(.cyan.opacity(0.90)),

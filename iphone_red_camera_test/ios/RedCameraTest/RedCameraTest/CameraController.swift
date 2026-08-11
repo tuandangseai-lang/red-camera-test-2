@@ -185,6 +185,9 @@ final class CameraController: NSObject, ObservableObject {
     private var shouldRecordAfterVerification = true
     private var previousTrackingCenter: CGPoint?
     private var smoothedTrackingVelocity = CGVector.zero
+    private var trackingTrianglePoints: [CGPoint] = []
+    private var lastTrackingBounds: CGRect?
+    private var segmentationMissFrames = 0
 
     // Quét 3D gần đúng trên iPhone không LiDAR: ARKit cung cấp vị trí camera và
     // điểm đặc trưng 3D, Vision giữ lại các điểm nằm trên mặt nạ chủ thể.
@@ -210,8 +213,9 @@ final class CameraController: NSObject, ObservableObject {
     private let voxelRows = 24
     private let voxelDepthLayers = 12
     private let manualPhotoTarget = 6
-    private let selectionGridColumns = 32
-    private let selectionGridRows = 56
+    // Lưới đủ mịn để viền không bị vuông nhưng vẫn nhẹ cho iPhone 15.
+    private let selectionGridColumns = 48
+    private let selectionGridRows = 84
 
     private var zoomInWorkItem: DispatchWorkItem?
     private var zoomFinishedWorkItem: DispatchWorkItem?
@@ -296,6 +300,9 @@ final class CameraController: NSObject, ObservableObject {
             self.manualCaptureRequested = false
             self.trackingObservation = nil
             self.trackingAnchorObservations.removeAll()
+            self.trackingTrianglePoints.removeAll()
+            self.lastTrackingBounds = nil
+            self.segmentationMissFrames = 0
             self.previousTrackingCenter = nil
             self.smoothedTrackingVelocity = .zero
             self.sequenceHandler = VNSequenceRequestHandler()
@@ -436,6 +443,9 @@ final class CameraController: NSObject, ObservableObject {
             self.processingMode = .idle
             self.trackingObservation = nil
             self.trackingAnchorObservations.removeAll()
+            self.trackingTrianglePoints.removeAll()
+            self.lastTrackingBounds = nil
+            self.segmentationMissFrames = 0
             self.previousTrackingCenter = nil
             self.smoothedTrackingVelocity = .zero
             self.sequenceHandler = VNSequenceRequestHandler()
@@ -538,6 +548,9 @@ final class CameraController: NSObject, ObservableObject {
             self?.processingMode = .idle
             self?.trackingObservation = nil
             self?.trackingAnchorObservations.removeAll()
+            self?.trackingTrianglePoints.removeAll()
+            self?.lastTrackingBounds = nil
+            self?.segmentationMissFrames = 0
             self?.previousTrackingCenter = nil
             self?.smoothedTrackingVelocity = .zero
         }
@@ -597,6 +610,9 @@ final class CameraController: NSObject, ObservableObject {
                 self.sequenceHandler = VNSequenceRequestHandler()
                 self.trackingObservation = nil
                 self.trackingAnchorObservations.removeAll()
+                self.trackingTrianglePoints.removeAll()
+                self.lastTrackingBounds = nil
+                self.segmentationMissFrames = 0
                 self.previousTrackingCenter = nil
                 self.smoothedTrackingVelocity = .zero
             } else if self.featureSamples.count > 180 {
@@ -753,7 +769,7 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func handExclusionCells(from pixelBuffer: CVPixelBuffer) -> Set<Int> {
-        guard scanSubjectKind == .object else { return [] }
+        guard scanSubjectKind != .person else { return [] }
         let request = VNDetectHumanHandPoseRequest()
         request.maximumHandCount = 2
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
@@ -777,10 +793,10 @@ final class CameraController: NSObject, ObservableObject {
             guard let minimumColumn = columns.min(), let maximumColumn = columns.max(),
                   let minimumRow = rows.min(), let maximumRow = rows.max() else { continue }
 
-            let minColumn = max(0, minimumColumn - 3)
-            let maxColumn = min(selectionGridColumns - 1, maximumColumn + 3)
-            let minRow = max(0, minimumRow - 3)
-            let maxRow = min(selectionGridRows - 1, maximumRow + 4)
+            let minColumn = max(0, minimumColumn - 5)
+            let maxColumn = min(selectionGridColumns - 1, maximumColumn + 5)
+            let minRow = max(0, minimumRow - 5)
+            let maxRow = min(selectionGridRows - 1, maximumRow + 7)
             for row in minRow...maxRow {
                 for column in minColumn...maxColumn {
                     excluded.insert(row * selectionGridColumns + column)
@@ -788,6 +804,103 @@ final class CameraController: NSObject, ObservableObject {
             }
         }
         return excluded
+    }
+
+    private func personExclusionCells(from pixelBuffer: CVPixelBuffer) -> Set<Int> {
+        guard scanSubjectKind != .person else { return [] }
+        let request = VNGeneratePersonSegmentationRequest()
+        request.qualityLevel = .balanced
+        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
+        do {
+            try handler.perform([request])
+            guard let maskBuffer = request.results?.first?.pixelBuffer else { return [] }
+            let rawMask = CIImage(cvPixelBuffer: maskBuffer)
+            let normalizedMask = rawMask.transformed(by: CGAffineTransform(
+                translationX: -rawMask.extent.minX,
+                y: -rawMask.extent.minY
+            ))
+            let scaled = normalizedMask.transformed(by: CGAffineTransform(
+                scaleX: CGFloat(selectionGridColumns) / normalizedMask.extent.width,
+                y: CGFloat(selectionGridRows) / normalizedMask.extent.height
+            ))
+            var bitmap = [UInt8](
+                repeating: 0,
+                count: selectionGridColumns * selectionGridRows
+            )
+            ciContext.render(
+                scaled,
+                toBitmap: &bitmap,
+                rowBytes: selectionGridColumns,
+                bounds: CGRect(
+                    x: 0,
+                    y: 0,
+                    width: selectionGridColumns,
+                    height: selectionGridRows
+                ),
+                format: .L8,
+                colorSpace: nil
+            )
+            var excluded = Set<Int>()
+            for visualRow in 0..<selectionGridRows {
+                let maskRow = selectionGridRows - 1 - visualRow
+                for column in 0..<selectionGridColumns
+                where bitmap[maskRow * selectionGridColumns + column] > 72 {
+                    excluded.insert(visualRow * selectionGridColumns + column)
+                }
+            }
+            return excluded
+        } catch {
+            return []
+        }
+    }
+
+    private func connectedComponent(
+        in cells: Set<Int>,
+        nearestTo point: CGPoint
+    ) -> Set<Int> {
+        guard let seed = cells.min(by: { first, second in
+            let firstPoint = normalizedGridPoint(for: first)
+            let secondPoint = normalizedGridPoint(for: second)
+            let firstDX = firstPoint.x - point.x
+            let firstDY = firstPoint.y - point.y
+            let secondDX = secondPoint.x - point.x
+            let secondDY = secondPoint.y - point.y
+            return firstDX * firstDX + firstDY * firstDY
+                < secondDX * secondDX + secondDY * secondDY
+        }) else { return [] }
+
+        var visited: Set<Int> = [seed]
+        var queue: [Int] = [seed]
+        var cursor = 0
+        while cursor < queue.count {
+            let current = queue[cursor]
+            cursor += 1
+            let column = current % selectionGridColumns
+            let row = current / selectionGridColumns
+            for rowOffset in -1...1 {
+                for columnOffset in -1...1 where rowOffset != 0 || columnOffset != 0 {
+                    let nextColumn = column + columnOffset
+                    let nextRow = row + rowOffset
+                    guard (0..<selectionGridColumns).contains(nextColumn),
+                          (0..<selectionGridRows).contains(nextRow) else { continue }
+                    let next = nextRow * selectionGridColumns + nextColumn
+                    if cells.contains(next), visited.insert(next).inserted {
+                        queue.append(next)
+                    }
+                }
+            }
+        }
+        return visited
+    }
+
+    private func normalizedGridPoint(for index: Int) -> CGPoint {
+        CGPoint(
+            x: (CGFloat(index % selectionGridColumns) + 0.5)
+                / CGFloat(selectionGridColumns),
+            y: (CGFloat(index / selectionGridColumns) + 0.5)
+                / CGFloat(selectionGridRows)
+        )
     }
 
     private func subjectOccupiesGuideCenter(_ cells: Set<Int>) -> Bool {
@@ -837,6 +950,39 @@ final class CameraController: NSObject, ObservableObject {
             }
         }
         return boundary.keys.sorted().compactMap { boundary[$0]?.point }
+    }
+
+    private func trianglePoints(from cells: Set<Int>) -> [CGPoint] {
+        let outline = contourPoints(from: cells)
+        guard outline.count >= 3 else { return [] }
+        var best: [CGPoint] = []
+        var bestArea: CGFloat = -1
+        for first in 0..<(outline.count - 2) {
+            for second in (first + 1)..<(outline.count - 1) {
+                for third in (second + 1)..<outline.count {
+                    let a = outline[first]
+                    let b = outline[second]
+                    let c = outline[third]
+                    let area = abs(
+                        (b.x - a.x) * (c.y - a.y)
+                        - (b.y - a.y) * (c.x - a.x)
+                    )
+                    if area > bestArea {
+                        bestArea = area
+                        best = [a, b, c]
+                    }
+                }
+            }
+        }
+        guard best.count == 3 else { return [] }
+        let center = CGPoint(
+            x: best.map(\.x).reduce(0, +) / 3,
+            y: best.map(\.y).reduce(0, +) / 3
+        )
+        return best.sorted {
+            atan2($0.y - center.y, $0.x - center.x)
+                < atan2($1.y - center.y, $1.x - center.x)
+        }
     }
 
     private func friendlyClassificationName(_ identifier: String) -> String {
@@ -982,11 +1128,22 @@ final class CameraController: NSObject, ObservableObject {
 
             let originalCells = cells
             let handCells = handExclusionCells(from: pixelBuffer)
-            let cleanedCells = cells.subtracting(handCells)
-            let removedHand = !handCells.isEmpty && cleanedCells.count >= 18
-            if removedHand {
-                cells = cleanedCells
-            } else {
+            let personCells = personExclusionCells(from: pixelBuffer)
+            let humanCells = handCells.union(personCells)
+            let withoutHuman = cells.subtracting(humanCells)
+            let minimumUsefulCount = max(24, originalCells.count / 12)
+            let removedHand = !humanCells.isEmpty && withoutHuman.count >= minimumUsefulCount
+            if removedHand { cells = withoutHuman }
+
+            // Sau khi bỏ tay/người, chỉ giữ mảng liền khối gần tâm nhất. Điều này
+            // loại cánh tay, nền và vật phụ ở xa nhưng không cắt phần vật tràn vòng.
+            let focusedCells = connectedComponent(
+                in: cells,
+                nearestTo: CGPoint(x: 0.5, y: 0.5)
+            )
+            if focusedCells.count >= max(24, cells.count / 10) {
+                cells = focusedCells
+            } else if cells.count < 24 {
                 cells = originalCells
             }
 
@@ -1769,10 +1926,14 @@ final class CameraController: NSObject, ObservableObject {
 
     private struct ForegroundCandidate {
         let rect: CGRect
-        let feature: VNFeaturePrintObservation
+        let feature: VNFeaturePrintObservation?
+        let trianglePoints: [CGPoint]
     }
 
-    private func foregroundCandidates(from pixelBuffer: CVPixelBuffer) -> [ForegroundCandidate] {
+    private func foregroundCandidates(
+        from pixelBuffer: CVPixelBuffer,
+        includeFeaturePrints: Bool = true
+    ) -> [ForegroundCandidate] {
         let request = VNGenerateForegroundInstanceMaskRequest()
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
         do {
@@ -1812,19 +1973,19 @@ final class CameraController: NSObject, ObservableObject {
                 var maxColumn = 0
                 var minRow = selectionGridRows
                 var maxRow = 0
-                var count = 0
+                var cells = Set<Int>()
                 for visualRow in 0..<selectionGridRows {
                     let maskRow = selectionGridRows - 1 - visualRow
                     for column in 0..<selectionGridColumns
                     where bitmap[maskRow * selectionGridColumns + column] > 48 {
-                        count += 1
+                        cells.insert(visualRow * selectionGridColumns + column)
                         minColumn = min(minColumn, column)
                         maxColumn = max(maxColumn, column)
                         minRow = min(minRow, visualRow)
                         maxRow = max(maxRow, visualRow)
                     }
                 }
-                guard count >= 12, minColumn <= maxColumn, minRow <= maxRow else {
+                guard cells.count >= 24, minColumn <= maxColumn, minRow <= maxRow else {
                     continue
                 }
                 let padding: CGFloat = 0.025
@@ -1837,16 +1998,24 @@ final class CameraController: NSObject, ObservableObject {
                 let rect = rawRect
                     .insetBy(dx: -padding, dy: -padding)
                     .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
-                let maskedBuffer = try observation.generateMaskedImage(
-                    ofInstances: instances,
-                    from: handler,
-                    croppedToInstancesExtent: true
-                )
-                guard let feature = featurePrint(
-                    from: maskedBuffer,
-                    normalizedTopLeftRect: CGRect(x: 0, y: 0, width: 1, height: 1)
-                ) else { continue }
-                candidates.append(ForegroundCandidate(rect: rect, feature: feature))
+                var feature: VNFeaturePrintObservation?
+                if includeFeaturePrints {
+                    let maskedBuffer = try observation.generateMaskedImage(
+                        ofInstances: instances,
+                        from: handler,
+                        croppedToInstancesExtent: true
+                    )
+                    feature = featurePrint(
+                        from: maskedBuffer,
+                        normalizedTopLeftRect: CGRect(x: 0, y: 0, width: 1, height: 1)
+                    )
+                    guard feature != nil else { continue }
+                }
+                candidates.append(ForegroundCandidate(
+                    rect: rect,
+                    feature: feature,
+                    trianglePoints: trianglePoints(from: cells)
+                ))
             }
             return candidates
         } catch {
@@ -1912,7 +2081,120 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func representativeTrackingPoints(in rect: CGRect) -> [CGPoint] {
-        trackingAnchorRects(in: rect).map { CGPoint(x: $0.midX, y: $0.midY) }
+        [
+            CGPoint(x: rect.midX, y: rect.minY + rect.height * 0.10),
+            CGPoint(x: rect.minX + rect.width * 0.12, y: rect.maxY - rect.height * 0.10),
+            CGPoint(x: rect.maxX - rect.width * 0.12, y: rect.maxY - rect.height * 0.10)
+        ]
+    }
+
+    private func transformedTriangle(
+        _ points: [CGPoint],
+        from oldRect: CGRect,
+        to newRect: CGRect
+    ) -> [CGPoint] {
+        guard points.count == 3, oldRect.width > 0.001, oldRect.height > 0.001 else {
+            return representativeTrackingPoints(in: newRect)
+        }
+        return points.map { point in
+            let relativeX = (point.x - oldRect.minX) / oldRect.width
+            let relativeY = (point.y - oldRect.minY) / oldRect.height
+            return CGPoint(
+                x: newRect.minX + relativeX * newRect.width,
+                y: newRect.minY + relativeY * newRect.height
+            )
+        }
+    }
+
+    private func alignedTriangle(_ points: [CGPoint], to reference: [CGPoint]) -> [CGPoint] {
+        guard points.count == 3, reference.count == 3 else { return points }
+        let permutations = [
+            [0, 1, 2], [0, 2, 1], [1, 0, 2],
+            [1, 2, 0], [2, 0, 1], [2, 1, 0]
+        ]
+        var best = points
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+        for order in permutations {
+            let arranged = order.map { points[$0] }
+            var distance: CGFloat = 0
+            for index in 0..<3 {
+                let dx = arranged[index].x - reference[index].x
+                let dy = arranged[index].y - reference[index].y
+                distance += dx * dx + dy * dy
+            }
+            if distance < bestDistance {
+                bestDistance = distance
+                best = arranged
+            }
+        }
+        return best
+    }
+
+    private func smoothedTriangle(_ points: [CGPoint]) -> [CGPoint] {
+        guard points.count == 3 else { return trackingTrianglePoints }
+        guard trackingTrianglePoints.count == 3 else {
+            trackingTrianglePoints = points
+            return points
+        }
+        let aligned = alignedTriangle(points, to: trackingTrianglePoints)
+        var displacement: CGFloat = 0
+        for index in 0..<3 {
+            displacement += hypot(
+                aligned[index].x - trackingTrianglePoints[index].x,
+                aligned[index].y - trackingTrianglePoints[index].y
+            )
+        }
+        let alpha: CGFloat = displacement / 3 > 0.025 ? 0.82 : 0.52
+        let filtered = (0..<3).map { index in
+            CGPoint(
+                x: trackingTrianglePoints[index].x * (1 - alpha) + aligned[index].x * alpha,
+                y: trackingTrianglePoints[index].y * (1 - alpha) + aligned[index].y * alpha
+            )
+        }
+        trackingTrianglePoints = filtered
+        return filtered
+    }
+
+    private func bestForegroundCandidate(
+        near bounds: CGRect,
+        in pixelBuffer: CVPixelBuffer
+    ) -> ForegroundCandidate? {
+        var best: ForegroundCandidate?
+        var bestScore = CGFloat.greatestFiniteMagnitude
+        for candidate in foregroundCandidates(
+            from: pixelBuffer,
+            includeFeaturePrints: false
+        ) {
+            let centerDistance = hypot(
+                candidate.rect.midX - bounds.midX,
+                candidate.rect.midY - bounds.midY
+            )
+            let intersection = candidate.rect.intersection(bounds)
+            let intersectionArea = intersection.isNull
+                ? 0
+                : intersection.width * intersection.height
+            let unionArea = candidate.rect.width * candidate.rect.height
+                + bounds.width * bounds.height - intersectionArea
+            let overlap = unionArea > 0 ? intersectionArea / unionArea : 0
+            let areaRatio = max(
+                candidate.rect.width * candidate.rect.height,
+                bounds.width * bounds.height
+            ) / max(
+                0.0001,
+                min(
+                    candidate.rect.width * candidate.rect.height,
+                    bounds.width * bounds.height
+                )
+            )
+            let allowedDistance = max(0.10, max(bounds.width, bounds.height) * 0.9)
+            guard overlap > 0.015 || centerDistance <= allowedDistance else { continue }
+            let score = centerDistance * 2.8 + min(areaRatio, 5) * 0.08 - overlap * 0.7
+            if score < bestScore {
+                bestScore = score
+                best = candidate
+            }
+        }
+        return best
     }
 
     private func directionLabel(for velocity: CGVector) -> String {
@@ -1938,7 +2220,8 @@ final class CameraController: NSObject, ObservableObject {
         var bestCandidate: ForegroundCandidate?
         var bestDistance: Float?
         for candidate in foregroundCandidates(from: pixelBuffer) {
-            guard let distance = consensusDistance(to: candidate.feature) else { continue }
+            guard let feature = candidate.feature,
+                  let distance = consensusDistance(to: feature) else { continue }
             if bestDistance == nil || distance < bestDistance! {
                 bestDistance = distance
                 bestCandidate = candidate
@@ -1968,7 +2251,12 @@ final class CameraController: NSObject, ObservableObject {
             height: processingRect.height
         )
         trackingObservation = VNDetectedObjectObservation(boundingBox: visionRect)
-        trackingAnchorObservations = makeTrackingAnchors(in: candidate.rect)
+        trackingAnchorObservations.removeAll()
+        trackingTrianglePoints = candidate.trianglePoints.count == 3
+            ? candidate.trianglePoints
+            : representativeTrackingPoints(in: candidate.rect)
+        lastTrackingBounds = candidate.rect
+        segmentationMissFrames = 0
         sequenceHandler = VNSequenceRequestHandler()
         trackingFrameCounter = 0
         lowConfidenceFrames = 0
@@ -1977,7 +2265,7 @@ final class CameraController: NSObject, ObservableObject {
         processingMode = .tracking
 
         let shouldStartRecording = shouldRecordAfterVerification
-        let initialPoints = representativeTrackingPoints(in: candidate.rect)
+        let initialPoints = trackingTrianglePoints
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.stage = .tracking
@@ -2009,58 +2297,71 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func track(pixelBuffer: CVPixelBuffer) {
-        guard !trackingAnchorObservations.isEmpty else {
+        guard let observation = trackingObservation else {
             markTargetLost()
             return
         }
 
-        let requests = trackingAnchorObservations.map { observation -> VNTrackObjectRequest in
-            let request = VNTrackObjectRequest(detectedObjectObservation: observation)
-            request.trackingLevel = .fast
-            return request
-        }
+        let request = VNTrackObjectRequest(detectedObjectObservation: observation)
+        request.trackingLevel = .fast
 
         do {
-            try sequenceHandler.perform(
-                requests.map { $0 as VNRequest },
-                on: pixelBuffer,
-                orientation: .up
-            )
-            let results = requests.compactMap {
-                $0.results?.first as? VNDetectedObjectObservation
-            }.filter { $0.confidence >= 0.07 }
+            try sequenceHandler.perform([request], on: pixelBuffer, orientation: .up)
+            guard let result = request.results?.first as? VNDetectedObjectObservation else {
+                markTargetLost()
+                return
+            }
             trackingFrameCounter += 1
 
-            if results.count < 2 {
+            if result.confidence < 0.10 {
                 lowConfidenceFrames += 1
             } else {
                 lowConfidenceFrames = 0
             }
-            if lowConfidenceFrames >= 3 || results.isEmpty {
+            if lowConfidenceFrames >= 4 {
                 markTargetLost()
                 return
             }
 
-            let trackedRects = results.map { self.topLeftRect(from: $0) }
-            let rawUnion = trackedRects.dropFirst().reduce(trackedRects[0]) {
-                $0.union($1)
-            }
-            let expandedX = max(CGFloat(0.012), rawUnion.width * CGFloat(0.22))
-            let expandedY = max(CGFloat(0.012), rawUnion.height * CGFloat(0.22))
-            let expandedBounds = rawUnion.insetBy(dx: -expandedX, dy: -expandedY)
-            let targetBounds = expandedBounds
-                .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+            var targetBounds = topLeftRect(from: result)
+            let previousBounds = lastTrackingBounds ?? targetBounds
+            var rawTriangle = transformedTriangle(
+                trackingTrianglePoints,
+                from: previousBounds,
+                to: targetBounds
+            )
 
-            let measuredPoints = trackedRects.map {
-                CGPoint(x: $0.midX, y: $0.midY)
+            // Bộ bám chính chạy mỗi frame cho mượt. Cứ vài frame Vision tách nền
+            // lại một lần để kéo tam giác về đúng ba điểm trên giới hạn thật của vật.
+            if trackingFrameCounter % 10 == 0 {
+                if let candidate = bestForegroundCandidate(
+                    near: targetBounds,
+                    in: pixelBuffer
+                ) {
+                    targetBounds = candidate.rect
+                    rawTriangle = candidate.trianglePoints.count == 3
+                        ? candidate.trianglePoints
+                        : representativeTrackingPoints(in: candidate.rect)
+                    trackingObservation = observation(fromTopLeftRect: candidate.rect)
+                    sequenceHandler = VNSequenceRequestHandler()
+                    segmentationMissFrames = 0
+                } else {
+                    trackingObservation = result
+                    segmentationMissFrames += 10
+                }
+            } else {
+                trackingObservation = result
             }
+
+            let publishedPoints = smoothedTriangle(rawTriangle)
+            lastTrackingBounds = targetBounds
             var measuredX: CGFloat = 0
             var measuredY: CGFloat = 0
-            for point in measuredPoints {
+            for point in publishedPoints {
                 measuredX += point.x
                 measuredY += point.y
             }
-            let measuredCount = CGFloat(measuredPoints.count)
+            let measuredCount = CGFloat(max(1, publishedPoints.count))
             let measuredCenter = CGPoint(
                 x: measuredX / measuredCount,
                 y: measuredY / measuredCount
@@ -2087,29 +2388,17 @@ final class CameraController: NSObject, ObservableObject {
                 x: max(0.02, min(0.98, measuredCenter.x + smoothedTrackingVelocity.dx * leadFrames)),
                 y: max(0.02, min(0.98, measuredCenter.y + smoothedTrackingVelocity.dy * leadFrames))
             )
-            let publishedPoints = results.count == 3
-                ? measuredPoints
-                : representativeTrackingPoints(in: targetBounds)
-            let averageConfidence = results
-                .map { Double($0.confidence) }
-                .reduce(0, +) / Double(results.count)
+            let confidence = Double(result.confidence)
             let direction = directionLabel(for: smoothedTrackingVelocity)
 
             var appearanceText: String?
-            if trackingFrameCounter % 45 == 0,
-               let candidate = featurePrint(from: pixelBuffer, normalizedTopLeftRect: targetBounds),
-               let distance = minimumDistance(to: candidate) {
+            if trackingFrameCounter % 12 == 0 {
                 appearanceText = String(
-                    format: "Bám 3 điểm • %@ • khớp %.1f",
+                    format: "Tam giác AI • %@ • tin cậy %.0f%%",
                     direction,
-                    distance
+                    confidence * 100
                 )
             }
-
-            trackingAnchorObservations = results.count == 3
-                ? results
-                : makeTrackingAnchors(in: targetBounds)
-            trackingObservation = observation(fromTopLeftRect: targetBounds)
 
             // Ở 60 fps, gửi tâm mục tiêu về ESP32 khoảng 20 lần/giây.
             // Dùng điểm dự đoán thay vì tâm hiện tại để bù trễ cho tên lửa bay nhanh.
@@ -2118,7 +2407,7 @@ final class CameraController: NSObject, ObservableObject {
                     format: "T,%03d,%03d,%02d",
                     Int(max(0, min(999, predictedPoint.x * 999))),
                     Int(max(0, min(999, predictedPoint.y * 999))),
-                    Int(max(0, min(99, averageConfidence * 99)))
+                    Int(max(0, min(99, confidence * 99)))
                 )
                 : nil
 
@@ -2127,7 +2416,7 @@ final class CameraController: NSObject, ObservableObject {
                 self.targetRect = targetBounds
                 self.trackingPoints = publishedPoints
                 self.predictedTargetPoint = predictedPoint
-                self.trackingConfidence = averageConfidence
+                self.trackingConfidence = confidence
                 if let appearanceText { self.matchText = appearanceText }
                 if let telemetry { self.onEvent?(telemetry) }
 
@@ -2153,6 +2442,9 @@ final class CameraController: NSObject, ObservableObject {
         shouldRecordAfterVerification = false
         trackingObservation = nil
         trackingAnchorObservations.removeAll()
+        trackingTrianglePoints.removeAll()
+        lastTrackingBounds = nil
+        segmentationMissFrames = 0
         previousTrackingCenter = nil
         smoothedTrackingVelocity = .zero
         sequenceHandler = VNSequenceRequestHandler()
@@ -2948,6 +3240,9 @@ extension CameraController: AVCaptureFileOutputRecordingDelegate {
             self?.processingMode = .idle
             self?.trackingObservation = nil
             self?.trackingAnchorObservations.removeAll()
+            self?.trackingTrianglePoints.removeAll()
+            self?.lastTrackingBounds = nil
+            self?.segmentationMissFrames = 0
             self?.previousTrackingCenter = nil
             self?.smoothedTrackingVelocity = .zero
         }
