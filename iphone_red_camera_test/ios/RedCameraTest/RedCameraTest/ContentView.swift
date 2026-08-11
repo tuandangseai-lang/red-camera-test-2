@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @StateObject private var camera = CameraController()
@@ -17,6 +18,11 @@ struct ContentView: View {
 
             trackingOverlay
                 .ignoresSafeArea()
+
+            if camera.stage.isScanning {
+                subjectTapLayer
+                    .ignoresSafeArea()
+            }
 
             VStack(spacing: 12) {
                 statusPanel
@@ -40,8 +46,14 @@ struct ContentView: View {
     private var trackingOverlay: some View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
+                if camera.stage.isScanning,
+                   let maskImage = camera.selectedSubjectMaskImage {
+                    subjectSpotlight(maskImage: maskImage, in: geometry.size)
+                }
+
                 if camera.stage.showsGuide {
-                    let rect = mappedRect(camera.scanRect, in: geometry.size)
+                    let guideRect = camera.selectedSubjectRect ?? camera.scanRect
+                    let rect = mappedRect(guideRect, in: geometry.size)
                     let guideColor: Color = camera.stage.isScanning
                         ? scanStatusColor
                         : (camera.stage == .ready ? .green : .yellow)
@@ -56,14 +68,6 @@ struct ContentView: View {
                         .frame(width: rect.width, height: rect.height)
                         .position(x: rect.midX, y: rect.midY)
 
-                    if camera.stage.isScanning || camera.stage == .ready {
-                        if !camera.crystalFacets3D.isEmpty {
-                            crystalVolumeMesh(in: rect)
-                        } else if !camera.crystalCells.isEmpty {
-                            crystalMesh(in: rect)
-                        }
-                    }
-
                     Text(guideLabel)
                         .font(.caption.bold())
                         .foregroundStyle(.black)
@@ -72,13 +76,6 @@ struct ContentView: View {
                         .background(guideColor, in: Capsule())
                         .position(x: rect.midX, y: max(18, rect.minY - 16))
 
-                    if camera.stage.isScanning {
-                        scanProgressRing
-                            .position(
-                                x: scanRingX(for: rect, viewWidth: geometry.size.width),
-                                y: max(54, rect.minY + 44)
-                            )
-                    }
                 }
 
                 if let target = camera.targetRect, camera.stage == .tracking {
@@ -94,6 +91,46 @@ struct ContentView: View {
                         .position(x: rect.midX, y: rect.midY)
                 }
             }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private var subjectTapLayer: some View {
+        GeometryReader { geometry in
+            Color.clear
+                .contentShape(Rectangle())
+                .gesture(
+                    SpatialTapGesture()
+                        .onEnded { value in
+                            camera.selectSubject(
+                                at: normalizedPoint(value.location, in: geometry.size)
+                            )
+                        }
+                )
+        }
+    }
+
+    private func subjectSpotlight(maskImage: UIImage, in size: CGSize) -> some View {
+        ZStack {
+            Color.black.opacity(0.72)
+            Image(uiImage: maskImage)
+                .resizable()
+                .scaledToFill()
+                .frame(width: size.width, height: size.height)
+                .clipped()
+                .luminanceToAlpha()
+                .blendMode(.destinationOut)
+        }
+        .compositingGroup()
+        .overlay {
+            Image(uiImage: maskImage)
+                .resizable()
+                .scaledToFill()
+                .frame(width: size.width, height: size.height)
+                .clipped()
+                .luminanceToAlpha()
+                .colorMultiply(.cyan)
+                .opacity(0.14)
         }
         .allowsHitTesting(false)
     }
@@ -235,11 +272,11 @@ struct ContentView: View {
         switch camera.stage {
         case .idle, .scanningNear, .waitingFar, .scanningFar, .waitingAround, .scanningAround:
             if camera.stage.isScanning {
-                return camera.scanHasConfirmedTarget
-                    ? "KHỐI 3D • \(camera.scanViewpointCount)/8 MẶT"
-                    : "ĐANG XÁC NHẬN CHỦ THỂ"
+                return camera.hasSelectedSubject
+                    ? "CÙNG MỘT VẬT • \(camera.scanViewpointCount)/6 ẢNH"
+                    : "CHẠM VÀO VẬT CẦN CHỤP"
             }
-            return "CHỌN LOẠI • QUÉT 3D GẦN ĐÚNG"
+            return "CHỌN LOẠI • TẠO MẪU 6 ẢNH"
         case .ready, .verifying, .lost:
             return "ĐẶT TÊN LỬA VÀO ĐÂY"
         case .tracking:
@@ -263,6 +300,19 @@ struct ContentView: View {
         )
     }
 
+    private func normalizedPoint(_ point: CGPoint, in viewSize: CGSize) -> CGPoint {
+        let sourceWidth = max(0.1, camera.frameAspectRatio)
+        let scale = max(viewSize.width / sourceWidth, viewSize.height)
+        let displayedWidth = sourceWidth * scale
+        let displayedHeight = scale
+        let offsetX = (viewSize.width - displayedWidth) / 2.0
+        let offsetY = (viewSize.height - displayedHeight) / 2.0
+        return CGPoint(
+            x: min(1, max(0, (point.x - offsetX) / displayedWidth)),
+            y: min(1, max(0, (point.y - offsetY) / displayedHeight))
+        )
+    }
+
     private var statusPanel: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 9) {
@@ -276,10 +326,10 @@ struct ContentView: View {
                 Spacer(minLength: 4)
                 Label(
                     camera.stage.isScanning
-                        ? "\(camera.surfacePointCount)"
+                        ? "\(camera.scanViewpointCount)/6"
                         : "\(camera.learnedSamples)",
                     systemImage: camera.stage.isScanning
-                        ? "point.3.connected.trianglepath.dotted"
+                        ? "photo.stack.fill"
                         : "square.stack.3d.up"
                 )
                 Text(camera.zoomText)
@@ -312,14 +362,14 @@ struct ContentView: View {
     private var controls: some View {
         VStack(spacing: 8) {
             if camera.stage.isScanning {
-                VStack(spacing: 7) {
+                VStack(spacing: 10) {
                     HStack(spacing: 8) {
                         Image(
                             systemName: camera.scanIsSufficient
                                 ? "checkmark.circle.fill"
                                 : (camera.scanNeedsNewAngle
-                                   ? "arrow.triangle.2.circlepath.circle.fill"
-                                   : "viewfinder.circle")
+                                   ? "exclamationmark.circle.fill"
+                                   : "camera.viewfinder")
                         )
                         .foregroundStyle(scanStatusColor)
                         Text(camera.scanGuidanceText)
@@ -327,21 +377,63 @@ struct ContentView: View {
                             .lineLimit(2)
                             .minimumScaleFactor(0.78)
                         Spacer(minLength: 4)
-                        Text(
-                            camera.scanHasConfirmedTarget
-                                ? "\(camera.scanSampleCount)%"
-                                : "\(Int(camera.targetConfirmationProgress * 100))%"
-                        )
+                        Text("\(camera.scanViewpointCount)/6")
                             .font(.caption.monospacedDigit().bold())
                     }
-                    Button(role: .cancel) {
-                        camera.cancelShapeScan()
-                    } label: {
-                        Label("Dừng quét", systemImage: "xmark.circle")
-                            .frame(maxWidth: .infinity)
+
+                    HStack(spacing: 7) {
+                        ForEach(0..<6, id: \.self) { index in
+                            Circle()
+                                .fill(
+                                    index < camera.scanViewpointCount
+                                        ? Color.cyan
+                                        : Color.white.opacity(0.20)
+                                )
+                                .frame(width: 9, height: 9)
+                        }
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+
+                    HStack {
+                        Button(role: .cancel) {
+                            camera.cancelShapeScan()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.headline.bold())
+                                .frame(width: 42, height: 42)
+                                .background(.black.opacity(0.42), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Spacer()
+
+                        Button {
+                            camera.captureManualReferencePhoto()
+                        } label: {
+                            ZStack {
+                                Circle()
+                                    .fill(
+                                        camera.hasSelectedSubject
+                                            ? Color.white
+                                            : Color.gray
+                                    )
+                                    .frame(width: 76, height: 76)
+                                Circle()
+                                    .stroke(.black.opacity(0.70), lineWidth: 3)
+                                    .frame(width: 64, height: 64)
+                            }
+                            .shadow(color: .black.opacity(0.35), radius: 5, y: 2)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!camera.hasSelectedSubject)
+                        .accessibilityLabel("Chụp ảnh mẫu")
+
+                        Spacer()
+
+                        Image(systemName: "hand.tap.fill")
+                            .font(.title3)
+                            .foregroundStyle(camera.hasSelectedSubject ? .cyan : .yellow)
+                            .frame(width: 42, height: 42)
+                    }
                 }
                 .foregroundStyle(.white)
             } else {
@@ -453,18 +545,18 @@ struct ContentView: View {
     private var actionButtons: some View {
         switch camera.stage {
         case .idle:
-            primaryButton("Quét 3D gần đúng tới 80%", systemImage: "move.3d") {
+            primaryButton("Tạo mẫu từ 6 ảnh", systemImage: "camera.on.rectangle") {
                 camera.startShapeScan()
             }
             .disabled(!camera.isReady)
 
         case .waitingFar:
-            primaryButton("Quét 3D gần đúng tới 80%", systemImage: "move.3d") {
+            primaryButton("Tạo mẫu từ 6 ảnh", systemImage: "camera.on.rectangle") {
                 camera.startShapeScan()
             }
 
         case .waitingAround:
-            primaryButton("Quét 3D gần đúng tới 80%", systemImage: "move.3d") {
+            primaryButton("Tạo mẫu từ 6 ảnh", systemImage: "camera.on.rectangle") {
                 camera.startShapeScan()
             }
 
@@ -472,7 +564,7 @@ struct ContentView: View {
             primaryButton("Khóa, bám & quay", systemImage: "scope") {
                 camera.startTrackingAndRecording()
             }
-            secondaryButton("Quét lại 3D", systemImage: "trash") {
+            secondaryButton("Tạo lại mẫu 6 ảnh", systemImage: "trash") {
                 camera.resetProfile()
             }
 
