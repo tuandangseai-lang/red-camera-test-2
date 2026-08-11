@@ -1,0 +1,76 @@
+name: Tao IPA Rocket Tracker v5.1 - sua loi iOS 17
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-unsigned-ipa:
+    name: Build Rocket Tracker
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Lay ma nguon
+        uses: actions/checkout@v6
+
+      - name: Cai XcodeGen
+        run: brew install xcodegen
+
+      - name: Tao project Xcode
+        working-directory: iphone_red_camera_test/ios/RedCameraTest
+        run: |
+          test -f "RedCameraTest/VoiceNotifier.swift"
+          xcodegen generate
+
+      - name: Kiem tra quyen, icon va giong bao
+        working-directory: iphone_red_camera_test/ios/RedCameraTest
+        run: |
+          set -euo pipefail
+          PLIST="RedCameraTest/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :NSCameraUsageDescription" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :NSBluetoothAlwaysUsageDescription" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :NSPhotoLibraryAddUsageDescription" "$PLIST"
+          test -f "RedCameraTest/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
+          grep -q "Giọng báo tiếng Việt" "RedCameraTest/ContentView.swift"
+          grep -q "if #available(iOS 18.0, \*)" "RedCameraTest/CameraController.swift"
+
+      - name: Bien dich app iPhone (chua ky)
+        working-directory: iphone_red_camera_test/ios/RedCameraTest
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project RedCameraTest.xcodeproj \
+            -scheme RedCameraTest \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Dong goi thanh IPA
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/RedCameraTest.app"
+          test -d "$APP_PATH"
+          test -f "$APP_PATH/Assets.car"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP_PATH/Info.plist"
+          rm -rf "$RUNNER_TEMP/Payload"
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/RocketTracker-unsigned.ipa"
+
+      - name: Cho phep tai IPA ve Windows
+        uses: actions/upload-artifact@v7
+        with:
+          name: RocketTracker-unsigned-ipa
+          path: RocketTracker-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
