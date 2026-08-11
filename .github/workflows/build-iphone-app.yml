@@ -1,4 +1,4 @@
-name: Tao IPA Rocket Tracker v10 - tinh the phu 80 phan tram
+name: Tao IPA Rocket Tracker v11 - YOLO Kalman hybrid
 
 on:
   workflow_dispatch:
@@ -47,6 +47,9 @@ jobs:
           grep -q "scanSampleTarget" "RedCameraTest/CameraController.swift"
           grep -q "maximumSmoothDisplayZoom: CGFloat = 0.98" "RedCameraTest/CameraController.swift"
           grep -q "hd4K3840x2160" "RedCameraTest/CameraController.swift"
+          grep -q "WaterRocketDetector" "RedCameraTest/WaterRocketDetector.swift"
+          grep -q "RocketMotionFilter" "RedCameraTest/RocketMotionFilter.swift"
+          grep -q "verifyWithAIDetector" "RedCameraTest/CameraController.swift"
           grep -q "VNGenerateForegroundInstanceMaskRequest" "RedCameraTest/CameraController.swift"
           grep -q "connectedCrystalCells" "RedCameraTest/CameraController.swift"
           grep -q "crystalMesh" "RedCameraTest/ContentView.swift"

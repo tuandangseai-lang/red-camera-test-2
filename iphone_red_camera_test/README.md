@@ -2,6 +2,18 @@
 
 Đây là bản thử dùng camera iPhone 15 để **học đúng chiếc tên lửa nước đang chuẩn bị phóng**, khóa mục tiêu, bám theo bằng Apple Vision, quay video và điều khiển zoom. Tên lửa có thể mang bất kỳ màu nào; app không còn dùng điều kiện “màu đỏ”.
 
+## Bản 2.4 — YOLO + tracker + Kalman
+
+- App tự nạp `WaterRocketDetector.mlpackage` khi model đã được huấn luyện.
+- YOLO hiệu chỉnh danh tính/vị trí định kỳ; Vision tracker bám các frame xen giữa.
+- Một kết quả AI đơn lẻ không được phép đổi mục tiêu. Mục tiêu ở xa quỹ đạo phải
+  được xác nhận liên tiếp trước khi tracker chuyển sang.
+- Bộ lọc alpha-beta/Kalman làm mượt tọa độ và dự đoán trước tối đa 180 ms để bù
+  độ trễ Bluetooth và servo.
+- Khi chưa có model, app hiện rõ `Vision dự phòng` và chỉ dùng ứng viên đạt đủ
+  phiếu đa góc; đã bỏ bước tách nền không xác thực mỗi 10 frame gây nhảy mục tiêu.
+- Công cụ tạo dataset và huấn luyện YOLO26n nằm trong `ai_training/`.
+
 ## App làm được gì?
 
 1. Chỉ dùng một lượt **Quét hình dạng**; không còn chia gần, xa và đa hướng.

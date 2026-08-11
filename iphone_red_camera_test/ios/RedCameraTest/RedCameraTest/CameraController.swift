@@ -157,6 +157,7 @@ final class CameraController: NSObject, ObservableObject {
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
     private let voiceNotifier = VoiceNotifier()
     private let profileStore = ScanProfileStore()
+    private let aiDetector = WaterRocketDetector()
 
     private var videoDevice: AVCaptureDevice?
     private var ultraWideDeviceZoomFactor: CGFloat = 1.0
@@ -189,6 +190,10 @@ final class CameraController: NSObject, ObservableObject {
     private var trackingTrianglePoints: [CGPoint] = []
     private var lastTrackingBounds: CGRect?
     private var segmentationMissFrames = 0
+    private var motionFilter = RocketMotionFilter()
+    private var aiDetectionMisses = 0
+    private var pendingAIDetectionRect: CGRect?
+    private var pendingAIDetectionCount = 0
 
     // Quét 3D gần đúng trên iPhone không LiDAR: ARKit cung cấp vị trí camera và
     // điểm đặc trưng 3D, Vision giữ lại các điểm nằm trên mặt nạ chủ thể.
@@ -306,6 +311,9 @@ final class CameraController: NSObject, ObservableObject {
             self.segmentationMissFrames = 0
             self.previousTrackingCenter = nil
             self.smoothedTrackingVelocity = .zero
+            self.motionFilter.clear()
+            self.aiDetectionMisses = 0
+            self.clearPendingAIDetection()
             self.sequenceHandler = VNSequenceRequestHandler()
         }
         stage = .idle
@@ -449,6 +457,9 @@ final class CameraController: NSObject, ObservableObject {
             self.segmentationMissFrames = 0
             self.previousTrackingCenter = nil
             self.smoothedTrackingVelocity = .zero
+            self.motionFilter.clear()
+            self.aiDetectionMisses = 0
+            self.clearPendingAIDetection()
             self.sequenceHandler = VNSequenceRequestHandler()
 
             DispatchQueue.main.async {
@@ -500,13 +511,19 @@ final class CameraController: NSObject, ObservableObject {
         trackingPoints = []
         predictedTargetPoint = nil
         trackingConfidence = 0
-        matchText = "Đang tìm \(detectedSubjectLabel) trên toàn màn hình..."
-        statusText = "Không cần đưa vật vào vòng tròn • app đang tự tìm mục tiêu"
+        matchText = aiDetector.isAvailable
+            ? "YOLO Core ML đang xác nhận tên lửa trên toàn màn hình..."
+            : "Chế độ dự phòng đa góc • chờ model YOLO đã huấn luyện"
+        statusText = aiDetector.isAvailable
+            ? "AI detector + tracker + dự đoán quỹ đạo đang hoạt động"
+            : "Chưa có model dữ liệu thật; app dùng nhận diện đa góc ổn định hơn"
 
         videoQueue.async { [weak self] in
             guard let self else { return }
             self.processingRect = fullFrame
             self.featureFrameCounter = 0
+            self.aiDetectionMisses = 0
+            self.clearPendingAIDetection()
             self.shouldRecordAfterVerification = recordAfterLock
             self.processingMode = .verifying
         }
@@ -525,6 +542,8 @@ final class CameraController: NSObject, ObservableObject {
             guard let self else { return }
             self.processingRect = fullFrame
             self.featureFrameCounter = 0
+            self.aiDetectionMisses = 0
+            self.clearPendingAIDetection()
             self.shouldRecordAfterVerification = false
             self.processingMode = .verifying
         }
@@ -554,6 +573,9 @@ final class CameraController: NSObject, ObservableObject {
             self?.segmentationMissFrames = 0
             self?.previousTrackingCenter = nil
             self?.smoothedTrackingVelocity = .zero
+            self?.motionFilter.clear()
+            self?.aiDetectionMisses = 0
+            self?.clearPendingAIDetection()
         }
         targetRect = nil
         trackingPoints = []
@@ -2265,6 +2287,154 @@ final class CameraController: NSObject, ObservableObject {
         return best
     }
 
+    private func intersectionOverUnion(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
+        let intersection = lhs.intersection(rhs)
+        guard !intersection.isNull, !intersection.isEmpty else { return 0 }
+        let intersectionArea = intersection.width * intersection.height
+        let unionArea = lhs.width * lhs.height + rhs.width * rhs.height - intersectionArea
+        return unionArea > 0 ? intersectionArea / unionArea : 0
+    }
+
+    private func isSameCandidate(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        let centerDistance = hypot(lhs.midX - rhs.midX, lhs.midY - rhs.midY)
+        let allowedDistance = max(
+            0.075,
+            max(max(lhs.width, lhs.height), max(rhs.width, rhs.height)) * 1.35
+        )
+        return intersectionOverUnion(lhs, rhs) >= 0.08 || centerDistance <= allowedDistance
+    }
+
+    /// Không cho một frame AI đơn lẻ đổi mục tiêu. Mục tiêu mới hoặc mục tiêu
+    /// ở xa dự đoán phải xuất hiện ổn định ở nhiều lần detector liên tiếp.
+    private func confirmsAIDetection(_ rect: CGRect, requiredCount: Int) -> Bool {
+        if let pending = pendingAIDetectionRect, isSameCandidate(pending, rect) {
+            pendingAIDetectionCount += 1
+            let blend: CGFloat = 0.62
+            pendingAIDetectionRect = CGRect(
+                x: pending.minX * (1 - blend) + rect.minX * blend,
+                y: pending.minY * (1 - blend) + rect.minY * blend,
+                width: pending.width * (1 - blend) + rect.width * blend,
+                height: pending.height * (1 - blend) + rect.height * blend
+            )
+        } else {
+            pendingAIDetectionRect = rect
+            pendingAIDetectionCount = 1
+        }
+        return pendingAIDetectionCount >= requiredCount
+    }
+
+    private func clearPendingAIDetection() {
+        pendingAIDetectionRect = nil
+        pendingAIDetectionCount = 0
+    }
+
+    private func bestAIDetection(
+        in pixelBuffer: CVPixelBuffer,
+        near expectedRect: CGRect?
+    ) -> WaterRocketDetection? {
+        let detections = aiDetector.detect(in: pixelBuffer)
+        guard let expectedRect else { return detections.first }
+
+        var best: WaterRocketDetection?
+        var bestScore = CGFloat.greatestFiniteMagnitude
+        for detection in detections {
+            let centerDistance = hypot(
+                detection.rect.midX - expectedRect.midX,
+                detection.rect.midY - expectedRect.midY
+            )
+            let overlap = intersectionOverUnion(detection.rect, expectedRect)
+            let detectedArea = max(0.00001, detection.rect.width * detection.rect.height)
+            let expectedArea = max(0.00001, expectedRect.width * expectedRect.height)
+            let areaRatio = max(detectedArea, expectedArea) / min(detectedArea, expectedArea)
+            let allowedDistance = max(0.22, max(expectedRect.width, expectedRect.height) * 3.2)
+            guard centerDistance <= allowedDistance || overlap > 0 else { continue }
+
+            let score = centerDistance * 3.0
+                + min(areaRatio, 8) * 0.035
+                - overlap * 0.85
+                - CGFloat(detection.confidence) * 0.34
+            if score < bestScore {
+                bestScore = score
+                best = detection
+            }
+        }
+        return best
+    }
+
+    private func lockTarget(
+        rect: CGRect,
+        trianglePoints: [CGPoint],
+        confidence: Double,
+        matchDescription: String,
+        statusDescription: String
+    ) {
+        let clippedRect = rect.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        processingRect = clippedRect
+        trackingObservation = observation(fromTopLeftRect: clippedRect)
+        trackingAnchorObservations.removeAll()
+        trackingTrianglePoints = trianglePoints.count == 3
+            ? trianglePoints
+            : representativeTrackingPoints(in: clippedRect)
+        lastTrackingBounds = clippedRect
+        segmentationMissFrames = 0
+        aiDetectionMisses = 0
+        clearPendingAIDetection()
+        sequenceHandler = VNSequenceRequestHandler()
+        trackingFrameCounter = 0
+        lowConfidenceFrames = 0
+        previousTrackingCenter = CGPoint(x: clippedRect.midX, y: clippedRect.midY)
+        smoothedTrackingVelocity = .zero
+        motionFilter.reset(rect: clippedRect, timestamp: CACurrentMediaTime())
+        processingMode = .tracking
+
+        let shouldStartRecording = shouldRecordAfterVerification
+        let initialPoints = trackingTrianglePoints
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.stage = .tracking
+            self.targetRect = clippedRect
+            self.trackingPoints = initialPoints
+            self.predictedTargetPoint = CGPoint(x: clippedRect.midX, y: clippedRect.midY)
+            self.trackingConfidence = confidence
+            self.matchText = matchDescription
+            self.statusText = statusDescription
+            self.onEvent?("TARGET_LOCKED")
+            if shouldStartRecording {
+                self.beginRecording()
+            } else if self.isRecording {
+                self.scheduleZoomSequence(after: 2.0)
+            }
+        }
+    }
+
+    /// Trả về `true` khi app đã có model Core ML và frame này đã được xử lý.
+    /// Khi đó không chạy bộ so ảnh cũ song song để tránh hai thuật toán giành mục tiêu.
+    @discardableResult
+    private func verifyWithAIDetector(pixelBuffer: CVPixelBuffer) -> Bool {
+        guard aiDetector.isAvailable else { return false }
+        guard let detection = bestAIDetection(in: pixelBuffer, near: nil) else {
+            pendingAIDetectionCount = max(0, pendingAIDetectionCount - 1)
+            publishSearchProgress(message: "AI đang tìm tên lửa nước trên toàn khung...")
+            return true
+        }
+
+        guard confirmsAIDetection(detection.rect, requiredCount: 3) else {
+            publishSearchProgress(
+                message: "AI xác nhận mục tiêu \(pendingAIDetectionCount)/3 • \(Int(detection.confidence * 100))%"
+            )
+            return true
+        }
+
+        lockTarget(
+            rect: pendingAIDetectionRect ?? detection.rect,
+            trianglePoints: representativeTrackingPoints(in: detection.rect),
+            confidence: detection.confidence,
+            matchDescription: "YOLO Core ML • đã xác nhận 3 frame • \(Int(detection.confidence * 100))%",
+            statusDescription: "AI đã khóa đúng tên lửa nước — đang bám và dự đoán quỹ đạo"
+        )
+        return true
+    }
+
     private func directionLabel(for velocity: CGVector) -> String {
         let speed = hypot(velocity.dx, velocity.dy)
         guard speed >= 0.0007 else { return "ổn định" }
@@ -2317,55 +2487,24 @@ final class CameraController: NSObject, ObservableObject {
         }
 
         let score = max(0.0, min(1.0, 1.0 - Double(match.score / 42)))
-
-        processingRect = candidate.rect
-
-        let visionRect = CGRect(
-            x: processingRect.minX,
-            y: 1.0 - processingRect.maxY,
-            width: processingRect.width,
-            height: processingRect.height
-        )
-        trackingObservation = VNDetectedObjectObservation(boundingBox: visionRect)
-        trackingAnchorObservations.removeAll()
-        trackingTrianglePoints = candidate.trianglePoints.count == 3
-            ? candidate.trianglePoints
-            : representativeTrackingPoints(in: candidate.rect)
-        lastTrackingBounds = candidate.rect
-        segmentationMissFrames = 0
-        sequenceHandler = VNSequenceRequestHandler()
-        trackingFrameCounter = 0
-        lowConfidenceFrames = 0
-        previousTrackingCenter = CGPoint(x: candidate.rect.midX, y: candidate.rect.midY)
-        smoothedTrackingVelocity = .zero
-        processingMode = .tracking
-
-        let shouldStartRecording = shouldRecordAfterVerification
-        let initialPoints = trackingTrianglePoints
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.stage = .tracking
-            self.targetRect = self.processingRect
-            self.trackingPoints = initialPoints
-            self.predictedTargetPoint = CGPoint(
-                x: self.processingRect.midX,
-                y: self.processingRect.midY
+        guard confirmsAIDetection(candidate.rect, requiredCount: 2) else {
+            publishSearchProgress(
+                message: "Đang xác nhận mẫu đa góc \(pendingAIDetectionCount)/2 • không khóa từ một frame"
             )
-            self.trackingConfidence = score
-            self.matchText = String(
+            return
+        }
+        lockTarget(
+            rect: pendingAIDetectionRect ?? candidate.rect,
+            trianglePoints: candidate.trianglePoints,
+            confidence: score,
+            matchDescription: String(
                 format: "Khớp đa góc %d/%d • %.0f%%",
                 match.votes,
                 match.requiredVotes,
                 score * 100
-            )
-            self.statusText = "Đã tự tìm thấy \(self.detectedSubjectLabel) — đang bám mục tiêu"
-            self.onEvent?("TARGET_LOCKED")
-            if shouldStartRecording {
-                self.beginRecording()
-            } else if self.isRecording {
-                self.scheduleZoomSequence(after: 2.0)
-            }
-        }
+            ),
+            statusDescription: "Đã xác nhận liên tiếp \(detectedSubjectLabel) — đang bám mục tiêu"
+        )
     }
 
     private func publishSearchProgress(message: String) {
@@ -2399,10 +2538,6 @@ final class CameraController: NSObject, ObservableObject {
             } else {
                 lowConfidenceFrames = 0
             }
-            if lowConfidenceFrames >= 4 {
-                markTargetLost()
-                return
-            }
 
             var targetBounds = topLeftRect(from: result)
             let previousBounds = lastTrackingBounds ?? targetBounds
@@ -2411,99 +2546,139 @@ final class CameraController: NSObject, ObservableObject {
                 from: previousBounds,
                 to: targetBounds
             )
+            var measurementConfidence = Double(result.confidence)
+            var isDetectorMeasurement = false
 
-            // Bộ bám chính chạy mỗi frame cho mượt. Cứ vài frame Vision tách nền
-            // lại một lần để kéo tam giác về đúng ba điểm trên giới hạn thật của vật.
-            if trackingFrameCounter % 20 == 0 {
-                // Kiểm tra lại đúng danh tính bằng toàn bộ mô hình đa góc.
-                // Nếu chỉ còn một vật cùng màu hoặc tracker đã dính nền, không
-                // đủ phiếu và app chủ động chuyển sang chế độ tìm lại.
-                if let candidate = bestIdentityCandidate(
-                    near: targetBounds,
-                    in: pixelBuffer
-                ) {
-                    targetBounds = candidate.rect
-                    rawTriangle = candidate.trianglePoints.count == 3
-                        ? candidate.trianglePoints
-                        : representativeTrackingPoints(in: candidate.rect)
-                    trackingObservation = self.observation(fromTopLeftRect: candidate.rect)
-                    sequenceHandler = VNSequenceRequestHandler()
-                    segmentationMissFrames = 0
-                } else {
-                    segmentationMissFrames += 1
-                    trackingObservation = result
-                    if segmentationMissFrames >= 2 {
-                        markTargetLost()
-                        return
+            if aiDetector.isAvailable {
+                // Detector chạy khoảng 15 lần/giây ở camera 60 fps. Tracker chạy
+                // các frame xen giữa; khi tracker yếu, detector được gọi ngay.
+                let shouldRunDetector = trackingFrameCounter % 4 == 0 || lowConfidenceFrames > 0
+                if shouldRunDetector {
+                    let expectedRect = motionFilter.isInitialized
+                        ? motionFilter.estimate(at: CACurrentMediaTime()).filteredRect
+                        : targetBounds
+                    if let detection = bestAIDetection(in: pixelBuffer, near: expectedRect) {
+                        let centerDistance = hypot(
+                            detection.rect.midX - expectedRect.midX,
+                            detection.rect.midY - expectedRect.midY
+                        )
+                        let closeEnough = centerDistance <= max(
+                            0.09,
+                            max(expectedRect.width, expectedRect.height) * 1.45
+                        ) || intersectionOverUnion(detection.rect, expectedRect) > 0.10
+
+                        // Kết quả gần quỹ đạo được dùng ngay. Kết quả ở xa phải
+                        // lặp lại hai lần, tránh đổi sang vật giống tên lửa.
+                        if closeEnough || confirmsAIDetection(detection.rect, requiredCount: 2) {
+                            targetBounds = closeEnough
+                                ? detection.rect
+                                : (pendingAIDetectionRect ?? detection.rect)
+                            rawTriangle = representativeTrackingPoints(in: targetBounds)
+                            measurementConfidence = detection.confidence
+                            isDetectorMeasurement = true
+                            trackingObservation = self.observation(fromTopLeftRect: targetBounds)
+                            sequenceHandler = VNSequenceRequestHandler()
+                            aiDetectionMisses = 0
+                            lowConfidenceFrames = 0
+                            clearPendingAIDetection()
+                        } else {
+                            trackingObservation = result
+                        }
+                    } else {
+                        aiDetectionMisses += 1
+                        pendingAIDetectionCount = max(0, pendingAIDetectionCount - 1)
+                        trackingObservation = result
                     }
-                }
-            } else if trackingFrameCounter % 10 == 0 {
-                if let candidate = bestForegroundCandidate(
-                    near: targetBounds,
-                    in: pixelBuffer
-                ) {
-                    targetBounds = candidate.rect
-                    rawTriangle = candidate.trianglePoints.count == 3
-                        ? candidate.trianglePoints
-                        : representativeTrackingPoints(in: candidate.rect)
-                    trackingObservation = self.observation(fromTopLeftRect: candidate.rect)
-                    sequenceHandler = VNSequenceRequestHandler()
                 } else {
                     trackingObservation = result
+                }
+
+                if lowConfidenceFrames >= 5 && aiDetectionMisses >= 2 {
+                    markTargetLost()
+                    return
                 }
             } else {
-                trackingObservation = result
+                // Chế độ dự phòng trước khi có model YOLO đã huấn luyện:
+                // bỏ việc tách nền không xác thực mỗi 10 frame (nguồn gây nhảy
+                // mục tiêu), chỉ dùng kết quả đạt đủ phiếu từ toàn bộ ảnh mẫu.
+                if trackingFrameCounter % 12 == 0 {
+                    if let candidate = bestIdentityCandidate(
+                        near: targetBounds,
+                        in: pixelBuffer
+                    ) {
+                        let centerDistance = hypot(
+                            candidate.rect.midX - targetBounds.midX,
+                            candidate.rect.midY - targetBounds.midY
+                        )
+                        let closeEnough = centerDistance <= max(
+                            0.08,
+                            max(targetBounds.width, targetBounds.height) * 1.25
+                        )
+                        if closeEnough || confirmsAIDetection(candidate.rect, requiredCount: 2) {
+                            targetBounds = closeEnough
+                                ? candidate.rect
+                                : (pendingAIDetectionRect ?? candidate.rect)
+                            rawTriangle = candidate.trianglePoints.count == 3
+                                ? candidate.trianglePoints
+                                : representativeTrackingPoints(in: candidate.rect)
+                            measurementConfidence = max(measurementConfidence, 0.72)
+                            isDetectorMeasurement = true
+                            trackingObservation = self.observation(fromTopLeftRect: targetBounds)
+                            sequenceHandler = VNSequenceRequestHandler()
+                            segmentationMissFrames = 0
+                            clearPendingAIDetection()
+                        } else {
+                            trackingObservation = result
+                        }
+                    } else {
+                        segmentationMissFrames += 1
+                        trackingObservation = result
+                    }
+                } else {
+                    trackingObservation = result
+                }
+
+                if lowConfidenceFrames >= 5
+                    || (segmentationMissFrames >= 5 && result.confidence < 0.32) {
+                    markTargetLost()
+                    return
+                }
             }
 
+            let timestamp = CACurrentMediaTime()
+            let measuredBounds = targetBounds
+            let estimate = motionFilter.update(
+                rect: measuredBounds,
+                confidence: measurementConfidence,
+                timestamp: timestamp,
+                isDetectorMeasurement: isDetectorMeasurement
+            )
+            targetBounds = estimate.filteredRect
+            rawTriangle = transformedTriangle(
+                rawTriangle,
+                from: measuredBounds,
+                to: targetBounds
+            )
             let publishedPoints = smoothedTriangle(rawTriangle)
             lastTrackingBounds = targetBounds
-            var measuredX: CGFloat = 0
-            var measuredY: CGFloat = 0
-            for point in publishedPoints {
-                measuredX += point.x
-                measuredY += point.y
-            }
-            let measuredCount = CGFloat(max(1, publishedPoints.count))
-            let measuredCenter = CGPoint(
-                x: measuredX / measuredCount,
-                y: measuredY / measuredCount
-            )
-            if let previousTrackingCenter {
-                let measuredVelocity = CGVector(
-                    dx: measuredCenter.x - previousTrackingCenter.x,
-                    dy: measuredCenter.y - previousTrackingCenter.y
-                )
-                let smoothedDX = smoothedTrackingVelocity.dx * CGFloat(0.70)
-                    + measuredVelocity.dx * CGFloat(0.30)
-                let smoothedDY = smoothedTrackingVelocity.dy * CGFloat(0.70)
-                    + measuredVelocity.dy * CGFloat(0.30)
-                smoothedTrackingVelocity = CGVector(
-                    dx: smoothedDX,
-                    dy: smoothedDY
-                )
-            }
-            previousTrackingCenter = measuredCenter
+            previousTrackingCenter = CGPoint(x: targetBounds.midX, y: targetBounds.midY)
+            smoothedTrackingVelocity = estimate.velocity
 
-            let speed = hypot(smoothedTrackingVelocity.dx, smoothedTrackingVelocity.dy)
-            let leadFrames: CGFloat = min(12, 5 + speed * 180)
-            let predictedPoint = CGPoint(
-                x: max(0.02, min(0.98, measuredCenter.x + smoothedTrackingVelocity.dx * leadFrames)),
-                y: max(0.02, min(0.98, measuredCenter.y + smoothedTrackingVelocity.dy * leadFrames))
-            )
-            let confidence = Double(result.confidence)
-            let direction = directionLabel(for: smoothedTrackingVelocity)
+            let predictedPoint = estimate.predictedPoint
+            let confidence = max(0, min(1, measurementConfidence))
+            let direction = directionLabel(for: estimate.velocity)
 
             var appearanceText: String?
             if trackingFrameCounter % 12 == 0 {
                 appearanceText = String(
-                    format: "Tam giác AI • %@ • tin cậy %.0f%%",
+                    format: "%@ • Kalman %@ • tin cậy %.0f%%",
+                    aiDetector.isAvailable ? "YOLO AI" : "Vision dự phòng",
                     direction,
                     confidence * 100
                 )
             }
 
-            // Ở 60 fps, gửi tâm mục tiêu về ESP32 khoảng 20 lần/giây.
-            // Dùng điểm dự đoán thay vì tâm hiện tại để bù trễ cho tên lửa bay nhanh.
+            // Ở 60 fps, gửi tâm dự đoán về ESP32 khoảng 20 lần/giây.
             let telemetry: String? = trackingFrameCounter % 3 == 0
                 ? String(
                     format: "T,%03d,%03d,%02d",
@@ -2549,6 +2724,9 @@ final class CameraController: NSObject, ObservableObject {
         segmentationMissFrames = 0
         previousTrackingCenter = nil
         smoothedTrackingVelocity = .zero
+        motionFilter.clear()
+        aiDetectionMisses = 0
+        clearPendingAIDetection()
         sequenceHandler = VNSequenceRequestHandler()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -2557,7 +2735,9 @@ final class CameraController: NSObject, ObservableObject {
             self.trackingPoints = []
             self.predictedTargetPoint = nil
             self.trackingConfidence = 0
-            self.matchText = "Mất mục tiêu • đang tự tìm lại mô hình đa góc"
+            self.matchText = self.aiDetector.isAvailable
+                ? "Mất mục tiêu • YOLO đang quét toàn khung để bắt lại"
+                : "Mất mục tiêu • đang tự tìm lại mô hình đa góc"
             self.statusText = "Servo đang quét góc nhỏ; app tự khóa lại ngay khi nhận ra vật"
             self.returnToUltraWide()
             self.announce("Mất mục tiêu. Đang tự tìm lại.", kind: .warning)
@@ -3302,10 +3482,14 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             }
 
         case .verifying:
-            // Tách nền toàn khung khá nặng. Quét cách vài frame để camera vẫn mượt,
-            // nhưng tiếp tục tìm cho đến khi thấy vật hoặc người dùng hủy.
             featureFrameCounter += 1
-            if featureFrameCounter % 6 == 1 {
+            if aiDetector.isAvailable {
+                // Model Core ML chạy thường xuyên hơn và tự nhận lại mục tiêu.
+                if featureFrameCounter % 2 == 1 {
+                    verifyWithAIDetector(pixelBuffer: pixelBuffer)
+                }
+            } else if featureFrameCounter % 6 == 1 {
+                // Chưa có model đã huấn luyện: dùng chế độ đa góc cũ làm dự phòng.
                 verifyAndLock(pixelBuffer: pixelBuffer)
             }
 
