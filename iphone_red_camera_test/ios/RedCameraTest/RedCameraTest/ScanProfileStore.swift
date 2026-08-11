@@ -6,6 +6,9 @@ struct SavedScanProfile: Codable, Equatable, Identifiable {
     let createdAt: Date
     let subjectKind: ScanSubjectKind
     let referenceImages: [Data]
+    /// Ảnh crop thật của cùng năm góc, giữ lại nền gần vật. Dùng cho nhánh
+    /// tìm cá nhân khi detector tổng quát không vẽ được hộp quanh chai PET.
+    let contextImages: [Data]?
     let surfacePointCount: Int
     let voxelOccupancy: [Bool]?
     let classificationLabel: String?
@@ -74,6 +77,7 @@ final class ScanProfileStore {
                 createdAt: profile.createdAt,
                 subjectKind: profile.subjectKind,
                 referenceImages: profile.referenceImages,
+                contextImages: profile.contextImages,
                 surfacePointCount: profile.surfacePointCount,
                 voxelOccupancy: profile.voxelOccupancy,
                 classificationLabel: profile.classificationLabel

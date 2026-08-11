@@ -179,6 +179,10 @@ final class CameraController: NSObject, ObservableObject {
     private var processingMode: ProcessingMode = .idle
     private var processingRect = CGRect(x: 0.29, y: 0.15, width: 0.42, height: 0.70)
     private var featureSamples: [VNFeaturePrintObservation] = []
+    private var contextFeatureSamples: [VNFeaturePrintObservation] = []
+    private var freshScanSeedRect: CGRect?
+    private var freshScanSeedTimestamp: TimeInterval = 0
+    private var pendingFreshScanSeedRect: CGRect?
     private var stageStartingSampleCount = 0
     private var shapeScanCoverage = 0.0
     private var crystalBaseCells: [Int] = []
@@ -213,6 +217,7 @@ final class CameraController: NSObject, ObservableObject {
     private var capturedAzimuthBins: Set<Int> = []
     private var accumulatedSurfacePoints: [SIMD3<Float>] = []
     private var scanReferenceImages: [Data] = []
+    private var scanContextImages: [Data] = []
     private var targetCandidateCells: Set<Int> = []
     private var confirmedTargetCells: Set<Int> = []
     private var targetStableFrameCount = 0
@@ -309,7 +314,12 @@ final class CameraController: NSObject, ObservableObject {
             guard let self else { return }
             self.processingMode = .idle
             self.featureSamples.removeAll()
+            self.contextFeatureSamples.removeAll()
             self.scanReferenceImages.removeAll()
+            self.scanContextImages.removeAll()
+            self.freshScanSeedRect = nil
+            self.freshScanSeedTimestamp = 0
+            self.pendingFreshScanSeedRect = nil
             self.targetCandidateCells.removeAll()
             self.confirmedTargetCells.removeAll()
             self.targetIsConfirmed = false
@@ -372,6 +382,10 @@ final class CameraController: NSObject, ObservableObject {
             self.processingMode = .idle
             self.activeARScanKind = nil
             self.scanReferenceImages.removeAll()
+            self.scanContextImages.removeAll()
+            self.freshScanSeedRect = nil
+            self.freshScanSeedTimestamp = 0
+            self.pendingFreshScanSeedRect = nil
             self.targetCandidateCells.removeAll()
             self.confirmedTargetCells.removeAll()
             self.targetIsConfirmed = false
@@ -449,6 +463,9 @@ final class CameraController: NSObject, ObservableObject {
             let observations = profile.referenceImages.compactMap {
                 self.featurePrint(fromJPEGData: $0)
             }
+            let contextObservations = (profile.contextImages ?? []).compactMap {
+                self.featurePrint(fromJPEGData: $0)
+            }
             guard !observations.isEmpty else {
                 DispatchQueue.main.async {
                     self.statusText = "Mẫu này không còn dữ liệu ảnh hợp lệ"
@@ -457,6 +474,11 @@ final class CameraController: NSObject, ObservableObject {
             }
 
             self.featureSamples = observations
+            self.contextFeatureSamples = contextObservations
+            self.scanContextImages = profile.contextImages ?? []
+            self.freshScanSeedRect = nil
+            self.freshScanSeedTimestamp = 0
+            self.pendingFreshScanSeedRect = nil
             if let storedVoxels = profile.voxelOccupancy,
                storedVoxels.count == self.voxelColumns * self.voxelRows * self.voxelDepthLayers {
                 self.voxelOccupancy = storedVoxels
@@ -492,6 +514,7 @@ final class CameraController: NSObject, ObservableObject {
                 self.scanSampleTarget = 80
                 self.scanIsSufficient = true
                 self.scanNeedsNewAngle = false
+                self.selectedSubjectRect = nil
                 self.stage = .ready
                 self.matchText = "Đã mở \(profile.name) • \(observations.count) góc"
                 self.statusText = "Mẫu đã sẵn sàng để khóa, bám và quay"
@@ -540,6 +563,12 @@ final class CameraController: NSObject, ObservableObject {
             self.featureFrameCounter = 0
             self.aiDetectionMisses = 0
             self.identityGateStatus = ""
+            // Mẫu vừa chụp đã có tọa độ đáng tin cậy. Giữ tọa độ đó cho frame
+            // xác nhận đầu tiên thay vì vứt bỏ rồi bắt YOLO tìm lại từ số 0.
+            let seedAge = CACurrentMediaTime() - self.freshScanSeedTimestamp
+            self.pendingFreshScanSeedRect = (0...15).contains(seedAge)
+                ? self.freshScanSeedRect
+                : nil
             self.clearPendingAIDetection()
             self.clearRecoveryState()
             self.shouldRecordAfterVerification = recordAfterLock
@@ -562,6 +591,7 @@ final class CameraController: NSObject, ObservableObject {
             self.featureFrameCounter = 0
             self.aiDetectionMisses = 0
             self.identityGateStatus = ""
+            self.pendingFreshScanSeedRect = nil
             self.clearPendingAIDetection()
             self.shouldRecordAfterVerification = false
             self.processingMode = .verifying
@@ -650,6 +680,7 @@ final class CameraController: NSObject, ObservableObject {
             guard let self else { return }
             if resetProfile {
                 self.featureSamples.removeAll()
+                self.contextFeatureSamples.removeAll()
                 self.sequenceHandler = VNSequenceRequestHandler()
                 self.trackingObservation = nil
                 self.trackingAnchorObservations.removeAll()
@@ -668,6 +699,10 @@ final class CameraController: NSObject, ObservableObject {
             self.capturedAzimuthBins.removeAll()
             self.accumulatedSurfacePoints.removeAll()
             self.scanReferenceImages.removeAll()
+            self.scanContextImages.removeAll()
+            self.freshScanSeedRect = nil
+            self.freshScanSeedTimestamp = 0
+            self.pendingFreshScanSeedRect = nil
             self.targetCandidateCells.removeAll()
             self.confirmedTargetCells.removeAll()
             self.targetStableFrameCount = 0
@@ -709,6 +744,7 @@ final class CameraController: NSObject, ObservableObject {
                     createdAt: Date(),
                     subjectKind: self.scanSubjectKind,
                     referenceImages: self.scanReferenceImages,
+                    contextImages: self.scanContextImages,
                     surfacePointCount: self.scanReferenceImages.count,
                     voxelOccupancy: nil,
                     classificationLabel: self.detectedSubjectLabel
@@ -1501,6 +1537,16 @@ final class CameraController: NSObject, ObservableObject {
         featureSamples.append(feature)
         acceptedViewMasks.append(selection.cells)
         scanReferenceImages.append(selection.referenceJPEG)
+        if let contextJPEG = referenceJPEG(
+            from: pixelBuffer,
+            normalizedTopLeftRect: selection.boundingRect,
+            orientation: .up
+        ) {
+            scanContextImages.append(contextJPEG)
+            if let contextFeature = featurePrint(fromJPEGData: contextJPEG) {
+                contextFeatureSamples.append(contextFeature)
+            }
+        }
         confirmedTargetCells = selection.cells
 
         let count = min(manualPhotoTarget, scanReferenceImages.count)
@@ -1510,6 +1556,10 @@ final class CameraController: NSObject, ObservableObject {
         )
         let coveragePercent = Int((shapeScanCoverage * 100).rounded())
         let sufficient = count >= manualPhotoTarget
+        if sufficient {
+            freshScanSeedRect = selection.boundingRect
+            freshScanSeedTimestamp = CACurrentMediaTime()
+        }
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -2040,8 +2090,15 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func multiViewMatch(to candidate: VNFeaturePrintObservation) -> MultiViewMatch? {
+        multiViewMatch(to: candidate, among: featureSamples)
+    }
+
+    private func multiViewMatch(
+        to candidate: VNFeaturePrintObservation,
+        among samples: [VNFeaturePrintObservation]
+    ) -> MultiViewMatch? {
         var distances: [Float] = []
-        for sample in featureSamples {
+        for sample in samples {
             var distance: Float = 0
             if (try? candidate.computeDistance(&distance, to: sample)) != nil {
                 distances.append(distance)
@@ -2544,7 +2601,12 @@ final class CameraController: NSObject, ObservableObject {
                     from: pixelBuffer,
                     normalizedTopLeftRect: crop
                 ),
-                let match = multiViewMatch(to: feature),
+                let match = multiViewMatch(
+                    to: feature,
+                    among: contextFeatureSamples.isEmpty
+                        ? featureSamples
+                        : contextFeatureSamples
+                ),
                 match.isAccepted,
                 match.bestDistance <= 31,
                 match.votes >= match.requiredVotes else { continue }
@@ -2675,6 +2737,9 @@ final class CameraController: NSObject, ObservableObject {
         segmentationMissFrames = 0
         aiDetectionMisses = 0
         identityGateStatus = ""
+        freshScanSeedRect = nil
+        freshScanSeedTimestamp = 0
+        pendingFreshScanSeedRect = nil
         clearPendingAIDetection()
         sequenceHandler = VNSequenceRequestHandler()
         trackingFrameCounter = 0
@@ -2782,7 +2847,49 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    /// Chuyển thẳng vùng vật ở ảnh mẫu thứ năm sang tracker. Đây là một khóa
+    /// một lần, chỉ hợp lệ trong 15 giây, và vẫn kiểm tra feature của crop hiện
+    /// tại để tránh khóa vào nền nếu người dùng đã đưa vật ra khỏi chỗ cũ.
+    @discardableResult
+    private func verifyFreshScanSeed(pixelBuffer: CVPixelBuffer) -> Bool {
+        guard let seed = pendingFreshScanSeedRect else { return false }
+        pendingFreshScanSeedRect = nil
+        freshScanSeedRect = nil
+        freshScanSeedTimestamp = 0
+
+        let padded = seed
+            .insetBy(
+                dx: -max(0.01, seed.width * 0.04),
+                dy: -max(0.01, seed.height * 0.035)
+            )
+            .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard let currentFeature = featurePrint(
+            from: pixelBuffer,
+            normalizedTopLeftRect: padded
+        ) else { return false }
+
+        if !contextFeatureSamples.isEmpty {
+            guard let match = multiViewMatch(
+                to: currentFeature,
+                among: contextFeatureSamples
+            ), match.bestDistance <= 38 else {
+                identityGateStatus = "Vật đã rời vị trí chụp • đang tìm lại toàn màn hình"
+                return false
+            }
+        }
+
+        lockTarget(
+            rect: seed,
+            trianglePoints: representativeTrackingPoints(in: seed),
+            confidence: 0.98,
+            matchDescription: "5 ảnh → tracker • khóa trực tiếp vật vừa chụp",
+            statusDescription: "Đã nhận đúng vật vừa tạo mẫu — bắt đầu bám liên tục"
+        )
+        return true
+    }
+
     private func verifyAndLock(pixelBuffer: CVPixelBuffer) {
+        guard case .verifying = processingMode else { return }
         guard !featureSamples.isEmpty else {
             return
         }
@@ -2799,6 +2906,45 @@ final class CameraController: NSObject, ObservableObject {
             if bestMatch == nil || match.score < bestMatch!.score {
                 bestMatch = match
                 bestCandidate = candidate
+            }
+        }
+
+        // Nhánh cá nhân không phụ thuộc YOLO hay tách nền. Mỗi lần chỉ thử hai
+        // cửa sổ để giữ 60 fps; sau vài frame sẽ phủ vùng giữa, trái và phải.
+        // Các feature ở đây được so với crop thật của đúng năm ảnh người dùng.
+        if bestCandidate == nil, !contextFeatureSamples.isEmpty {
+            let searchWindows = [
+                CGRect(x: 0.04, y: 0.02, width: 0.92, height: 0.96),
+                CGRect(x: 0.12, y: 0.06, width: 0.76, height: 0.88),
+                CGRect(x: 0.22, y: 0.10, width: 0.56, height: 0.80),
+                CGRect(x: 0.30, y: 0.15, width: 0.40, height: 0.70),
+                CGRect(x: 0.03, y: 0.10, width: 0.62, height: 0.82),
+                CGRect(x: 0.35, y: 0.10, width: 0.62, height: 0.82)
+            ]
+            let start = ((featureFrameCounter / 12) * 2) % searchWindows.count
+            for offset in 0..<2 {
+                let rect = searchWindows[(start + offset) % searchWindows.count]
+                guard let feature = featurePrint(
+                    from: pixelBuffer,
+                    normalizedTopLeftRect: rect
+                ), let match = multiViewMatch(
+                    to: feature,
+                    among: contextFeatureSamples
+                ) else { continue }
+                if closestRejected == nil || match.score < closestRejected!.score {
+                    closestRejected = match
+                }
+                let strongPersonalMatch = match.isAccepted
+                    || (match.bestDistance <= 28 && match.votes >= 2)
+                guard strongPersonalMatch else { continue }
+                if bestMatch == nil || match.score < bestMatch!.score {
+                    bestMatch = match
+                    bestCandidate = ForegroundCandidate(
+                        rect: rect,
+                        feature: feature,
+                        trianglePoints: representativeTrackingPoints(in: rect)
+                    )
+                }
             }
         }
         guard let candidate = bestCandidate, let match = bestMatch else {
@@ -3869,13 +4015,20 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         case .verifying:
             featureFrameCounter += 1
+            if verifyFreshScanSeed(pixelBuffer: pixelBuffer) {
+                return
+            }
             if aiDetector.isAvailable {
-                // Model Core ML chạy thường xuyên hơn và tự nhận lại mục tiêu.
+                // YOLO tìm lớp tên lửa; nhánh mẫu cá nhân vẫn chạy song song ở
+                // nhịp thấp hơn, nên YOLO hụt vật gần hoặc chai trong suốt cũng
+                // không còn chặn toàn bộ năm ảnh người dùng.
                 if featureFrameCounter % 2 == 1 {
                     verifyWithAIDetector(pixelBuffer: pixelBuffer)
                 }
+                if featureFrameCounter % 12 == 1 {
+                    verifyAndLock(pixelBuffer: pixelBuffer)
+                }
             } else if featureFrameCounter % 6 == 1 {
-                // Chưa có model đã huấn luyện: dùng chế độ đa góc cũ làm dự phòng.
                 verifyAndLock(pixelBuffer: pixelBuffer)
             }
 
