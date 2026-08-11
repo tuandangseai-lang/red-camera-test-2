@@ -4,9 +4,9 @@
 
 ## App làm được gì?
 
-1. Quét gần 5 giây để ghi nhớ chi tiết thân tên lửa.
-2. Quét xa 5 giây để lấy mẫu khi tên lửa nhỏ hơn trong ảnh.
-3. Quét xung quanh 8 giây để lấy thêm nhiều góc nhìn.
+1. Quét gần không giới hạn thời gian để ghi nhớ chi tiết thân tên lửa.
+2. Quét xa không giới hạn thời gian để lấy mẫu khi tên lửa nhỏ hơn trong ảnh.
+3. Quét xung quanh theo từng chỉ dẫn để lấy thêm nhiều góc nhìn.
 4. So hình trong khung với các mẫu đã quét rồi khóa đúng mục tiêu.
 5. Dùng `VNTrackObjectRequest` để cập nhật khung và tâm mục tiêu theo từng frame.
 6. Ưu tiên quay 4K 60 fps bằng camera siêu rộng 0,5×; zoom số mượt tới tối đa 0,98× nhưng không vượt ngưỡng đổi sang camera thường.
@@ -20,14 +20,16 @@ Giọng báo được bật mặc định. Có thể tắt bằng công tắc **
 
 Bản 1.1 (build 3) kiểm tra phiên bản trước khi dùng `displayVideoZoomFactorMultiplier`, nhờ đó biên dịch được với deployment target iOS 17 và vẫn tận dụng hệ số zoom hệ thống trên iOS 18 trở lên.
 
-## Vòng báo quét đủ (bản 1.2)
+## Quét có chỉ dẫn, không hết giờ (bản 1.5)
 
-- Quét gần cần 8 góc khác nhau, quét xa cần 8 góc và quét xung quanh cần 12 góc.
+- Quét gần cần 5 góc tương đối khác nhau, quét xa cần 5 góc và quét xung quanh cần 6 góc.
+- Không còn bộ đếm thời gian. App tiếp tục chờ cho tới khi đủ mẫu rồi tự chuyển bước.
+- Dòng hướng dẫn lần lượt yêu cầu đưa gần/xa, xoay trái/phải và nghiêng lên/xuống.
 - Vòng vàng hiển thị phần trăm và chữ **CHƯA ĐỦ** trong lúc lấy mẫu.
 - Khi đạt yêu cầu, vòng chuyển xanh, hiện dấu kiểm và chữ **ĐÃ ĐỦ**.
 - Giao diện trên/dưới đã được rút gọn để dành phần lớn màn hình cho hình camera.
 
-Bản 1.4 không còn cộng mẫu chỉ vì thời gian trôi qua. Mỗi ảnh mới được so bằng `VNFeaturePrintObservation` với những ảnh vừa lưu; nếu quá giống nhau, vòng đứng yên, chuyển cam và hiện **GÓC TRÙNG**. Người dùng phải xoay tên lửa hoặc đổi góc nhìn thì tiến độ mới tiếp tục.
+Bản 1.5 vẫn dùng `VNFeaturePrintObservation` để tránh cộng liên tục một hình đứng yên, nhưng ngưỡng khác biệt đã được nới vừa phải. Khi ảnh còn quá giống, app giữ nguyên tiến độ và chỉ rõ hướng nên di chuyển tiếp; không còn báo hết thời gian.
 
 ## Zoom mượt và chất lượng hình (bản 1.3)
 
@@ -39,9 +41,9 @@ Bản 1.4 không còn cộng mẫu chỉ vì thời gian trôi qua. Mỗi ảnh 
 ## Cách học một tên lửa
 
 1. Mở app, chờ camera sẵn sàng.
-2. Đặt tên lửa gần camera, kéo thanh chỉnh để khung vàng ôm sát thân tên lửa, bấm **Quét gần 5 giây** và xoay nhẹ.
-3. Lùi tên lửa ra xa, chỉnh khung nhỏ lại cho ôm sát tên lửa, bấm **Quét xa 5 giây**.
-4. Thay đổi góc nhìn hoặc xoay chậm tên lửa, bấm **Quét xung quanh 8 giây**.
+2. Đặt tên lửa gần camera, kéo thanh chỉnh để khung vàng ôm sát thân tên lửa, bấm **Bắt đầu quét gần** và làm theo chỉ dẫn.
+3. Lùi tên lửa ra xa, chỉnh khung nhỏ lại cho ôm sát tên lửa, bấm **Bắt đầu quét xa** và làm theo chỉ dẫn.
+4. Bấm **Quét các mặt xung quanh**, rồi xoay chậm theo từng hướng hiện trên màn hình.
 5. Trước khi phóng, đặt tên lửa vừa trong khung và bấm **Khóa, bám và bắt đầu quay**. ESP32 cũng có thể gửi lệnh `ARM` để làm bước này.
 6. Khi quay xong, bấm **Dừng và lưu video**.
 

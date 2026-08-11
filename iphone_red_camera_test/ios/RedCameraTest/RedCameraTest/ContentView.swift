@@ -212,7 +212,8 @@ struct ContentView: View {
                     .foregroundStyle(scanStatusColor)
                     Text(camera.scanGuidanceText)
                         .font(.footnote.weight(.semibold))
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.78)
                     Spacer(minLength: 4)
                     Text("\(camera.scanSampleCount)/\(camera.scanSampleTarget)")
                         .font(.caption.monospacedDigit().bold())
@@ -252,18 +253,18 @@ struct ContentView: View {
     private var actionButtons: some View {
         switch camera.stage {
         case .idle:
-            primaryButton("Quét gần 5s", systemImage: "viewfinder") {
+            primaryButton("Bắt đầu quét gần", systemImage: "viewfinder") {
                 camera.startNearScan()
             }
             .disabled(!camera.isReady)
 
         case .waitingFar:
-            primaryButton("Quét xa 5s", systemImage: "arrow.up.left.and.arrow.down.right") {
+            primaryButton("Bắt đầu quét xa", systemImage: "arrow.up.left.and.arrow.down.right") {
                 camera.startFarScan()
             }
 
         case .waitingAround:
-            primaryButton("Quét xung quanh 8s", systemImage: "rotate.3d") {
+            primaryButton("Quét các mặt xung quanh", systemImage: "rotate.3d") {
                 camera.startAroundScan()
             }
 

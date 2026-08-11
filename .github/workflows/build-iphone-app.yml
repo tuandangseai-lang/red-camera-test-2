@@ -1,4 +1,4 @@
-name: Tao IPA Rocket Tracker v8 - mau khong trung
+name: Tao IPA Rocket Tracker v9 - quet khong het gio
 
 on:
   workflow_dispatch:
@@ -49,6 +49,12 @@ jobs:
           grep -q "hd4K3840x2160" "RedCameraTest/CameraController.swift"
           grep -q "noveltyThreshold" "RedCameraTest/CameraController.swift"
           grep -q "scanNeedsNewAngle" "RedCameraTest/ContentView.swift"
+          grep -q "case .near: return 5" "RedCameraTest/CameraController.swift"
+          grep -q "case .around: return 6" "RedCameraTest/CameraController.swift"
+          if grep -q "scanFinishWorkItem" "RedCameraTest/CameraController.swift"; then
+            echo "Van con gioi han thoi gian quet"
+            exit 1
+          fi
 
       - name: Bien dich app iPhone (chua ky)
         working-directory: iphone_red_camera_test/ios/RedCameraTest

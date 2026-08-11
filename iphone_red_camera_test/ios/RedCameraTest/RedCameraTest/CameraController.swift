@@ -119,7 +119,6 @@ final class CameraController: NSObject, ObservableObject {
     private var sequenceHandler = VNSequenceRequestHandler()
     private var shouldRecordAfterVerification = true
 
-    private var scanFinishWorkItem: DispatchWorkItem?
     private var zoomInWorkItem: DispatchWorkItem?
     private var zoomFinishedWorkItem: DispatchWorkItem?
 
@@ -164,23 +163,22 @@ final class CameraController: NSObject, ObservableObject {
 
     func startNearScan() {
         guard isReady, !isRecording else { return }
-        startScan(kind: .near, duration: 5.0, resetProfile: true)
+        startScan(kind: .near, resetProfile: true)
     }
 
     func startFarScan() {
         guard stage == .waitingFar, !isRecording else { return }
-        startScan(kind: .far, duration: 5.0, resetProfile: false)
+        startScan(kind: .far, resetProfile: false)
     }
 
     func startAroundScan() {
         guard (stage == .waitingAround || stage == .ready), !isRecording else { return }
-        startScan(kind: .around, duration: 8.0, resetProfile: false)
+        startScan(kind: .around, resetProfile: false)
     }
 
     func resetProfile() {
         guard !isRecording else { return }
         voiceNotifier.stop()
-        scanFinishWorkItem?.cancel()
         videoQueue.async { [weak self] in
             guard let self else { return }
             self.processingMode = .idle
@@ -251,21 +249,20 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
-    private func startScan(kind: ScanKind, duration: Double, resetProfile: Bool) {
-        scanFinishWorkItem?.cancel()
+    private func startScan(kind: ScanKind, resetProfile: Bool) {
         let rect = scanRect
         let requiredSamples = sampleTarget(for: kind)
 
         switch kind {
         case .near:
             stage = .scanningNear
-            statusText = "Quét gần: giữ tên lửa đầy khung và xoay nhẹ"
+            statusText = "Quét gần không giới hạn thời gian • làm theo mũi chỉ dẫn"
         case .far:
             stage = .scanningFar
-            statusText = "Quét xa: lùi ra, thu nhỏ khung cho vừa tên lửa"
+            statusText = "Quét xa không giới hạn thời gian • làm theo mũi chỉ dẫn"
         case .around:
             stage = .scanningAround
-            statusText = "Quét xung quanh: đổi góc hoặc xoay tên lửa chậm"
+            statusText = "Quét xung quanh không giới hạn thời gian • làm theo mũi chỉ dẫn"
         }
 
         scanProgress = 0
@@ -273,9 +270,9 @@ final class CameraController: NSObject, ObservableObject {
         scanSampleTarget = requiredSamples
         scanIsSufficient = false
         scanNeedsNewAngle = false
-        scanGuidanceText = "Giữ tên lửa trong khung và xoay chậm"
+        scanGuidanceText = scanGuidance(for: kind, collected: 0)
         targetRect = rect
-        matchText = "CHƯA ĐỦ • 0/\(requiredSamples) góc mới"
+        matchText = "0/\(requiredSamples) • cứ quét từ từ, không hết giờ"
 
         videoQueue.async { [weak self] in
             guard let self else { return }
@@ -294,11 +291,6 @@ final class CameraController: NSObject, ObservableObject {
             self.processingMode = .scanning(kind)
         }
 
-        let finish = DispatchWorkItem { [weak self] in
-            self?.finishScan(kind: kind)
-        }
-        scanFinishWorkItem = finish
-        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: finish)
         onEvent?("SCAN_\(scanName(kind))_STARTED")
     }
 
@@ -366,17 +358,49 @@ final class CameraController: NSObject, ObservableObject {
 
     private func sampleTarget(for kind: ScanKind) -> Int {
         switch kind {
-        case .near: return 8
-        case .far: return 8
-        case .around: return 12
+        case .near: return 5
+        case .far: return 5
+        case .around: return 6
         }
     }
 
     private func noveltyThreshold(for kind: ScanKind) -> Float {
         switch kind {
-        case .near, .far: return 2.0
-        case .around: return 3.0
+        case .near, .far: return 0.75
+        case .around: return 1.0
         }
+    }
+
+    private func scanGuidance(for kind: ScanKind, collected: Int) -> String {
+        let steps: [String]
+        switch kind {
+        case .near:
+            steps = [
+                "① Đưa tên lửa gần, nằm đầy trong khung",
+                "② Xoay nhẹ sang trái ↖",
+                "③ Xoay nhẹ sang phải ↗",
+                "④ Nghiêng đầu tên lửa lên ↑",
+                "⑤ Nghiêng đầu tên lửa xuống ↓"
+            ]
+        case .far:
+            steps = [
+                "① Lùi ra để thấy trọn tên lửa",
+                "② Dịch nhẹ sang trái ←",
+                "③ Dịch nhẹ sang phải →",
+                "④ Nâng góc nhìn lên ↑",
+                "⑤ Hạ góc nhìn xuống ↓"
+            ]
+        case .around:
+            steps = [
+                "① Cho camera thấy mặt trước",
+                "② Xoay tên lửa 1/4 vòng trái ↶",
+                "③ Xoay tên lửa 1/4 vòng phải ↷",
+                "④ Cho camera thấy mặt bên",
+                "⑤ Cho camera thấy mặt sau",
+                "⑥ Nghiêng chéo thêm một góc"
+            ]
+        }
+        return steps[min(max(0, collected), steps.count - 1)]
     }
 
     private func configureSession(includeAudio: Bool) {
@@ -956,11 +980,14 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
                             self.scanIsSufficient = sufficient
                             self.scanNeedsNewAngle = false
                             self.scanGuidanceText = sufficient
-                                ? "Đã đủ góc nhìn — giữ ổn định"
-                                : "Đã nhận góc mới — tiếp tục xoay"
+                                ? "Đã đủ • tự chuyển sang bước tiếp theo"
+                                : self.scanGuidance(for: kind, collected: stageCount)
                             self.matchText = sufficient
                                 ? "ĐÃ ĐỦ • \(stageCount) góc khác nhau"
-                                : "CHƯA ĐỦ • \(stageCount)/\(target) góc mới"
+                                : "ĐÃ NHẬN • \(stageCount)/\(target) góc"
+                        }
+                        if sufficient {
+                            finishScan(kind: kind)
                         }
                     } else {
                         let stageCount = featureSamples.count - stageStartingSampleCount
@@ -968,8 +995,8 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
                         DispatchQueue.main.async { [weak self] in
                             guard let self else { return }
                             self.scanNeedsNewAngle = true
-                            self.scanGuidanceText = "Góc đang trùng — hãy xoay hoặc đổi vị trí"
-                            self.matchText = "GÓC TRÙNG • \(stageCount)/\(target) góc mới"
+                            self.scanGuidanceText = "Đổi nhẹ góc • \(self.scanGuidance(for: kind, collected: stageCount))"
+                            self.matchText = "CHỜ GÓC KHÁC • \(stageCount)/\(target) • không hết giờ"
                         }
                     }
                 }
