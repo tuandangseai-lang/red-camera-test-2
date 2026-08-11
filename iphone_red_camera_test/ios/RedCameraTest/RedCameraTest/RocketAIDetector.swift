@@ -18,12 +18,25 @@ struct WaterRocketDetection {
 final class RocketAIDetector {
     private let visionModel: VNCoreMLModel?
     private let modelInputSize: CGSize
+    private let acceptedLabels: Set<String>
+    private let acceptedClassIndices: Set<Int>
+    private let resultLabel: String
     private(set) var loadMessage = "Chưa có WaterRocketDetector.mlpackage"
 
     var isAvailable: Bool { visionModel != nil }
 
-    init(bundle: Bundle = .main) {
-        let modelNames = ["WaterRocketDetector", "water_rocket", "best"]
+    init(
+        bundle: Bundle = .main,
+        modelNames: [String] = ["WaterRocketDetector", "water_rocket", "best"],
+        acceptedLabels: Set<String> = [
+            "water_rocket", "waterrocket", "rocket", "ten_lua_nuoc"
+        ],
+        acceptedClassIndices: Set<Int> = [0],
+        resultLabel: String = "water_rocket"
+    ) {
+        self.acceptedLabels = acceptedLabels
+        self.acceptedClassIndices = acceptedClassIndices
+        self.resultLabel = resultLabel
         var loadedModel: VNCoreMLModel?
         var loadedInputSize = CGSize(width: 640, height: 640)
 
@@ -106,12 +119,12 @@ final class RocketAIDetector {
                 .lowercased()
                 .replacingOccurrences(of: "-", with: "_")
                 .replacingOccurrences(of: " ", with: "_")
-            let acceptedNames: Set<String> = [
-                "water_rocket", "waterrocket", "rocket", "ten_lua_nuoc"
-            ]
             // Model một lớp đôi lúc xuất nhãn "0". Chấp nhận nhãn này nhưng
             // không nhận các lớp COCO ngẫu nhiên từ model chưa huấn luyện.
-            guard acceptedNames.contains(normalizedLabel) || normalizedLabel == "0" else {
+            guard acceptedLabels.contains(normalizedLabel)
+                    || (acceptedClassIndices.count == 1
+                        && acceptedClassIndices.contains(0)
+                        && normalizedLabel == "0") else {
                 return nil
             }
 
@@ -233,6 +246,9 @@ final class RocketAIDetector {
         for row in 0..<rowCount {
             let confidence = value(row: row, field: 4)
             guard confidence >= minimumConfidence else { continue }
+            let classIndex = Int(value(row: row, field: 5).rounded())
+            guard acceptedClassIndices.isEmpty
+                    || acceptedClassIndices.contains(classIndex) else { continue }
             var x1 = value(row: row, field: 0)
             var y1 = value(row: row, field: 1)
             var x2 = value(row: row, field: 2)
@@ -253,7 +269,7 @@ final class RocketAIDetector {
             detections.append(WaterRocketDetection(
                 rect: rect,
                 confidence: confidence,
-                label: "water_rocket"
+                label: resultLabel
             ))
         }
         return detections.sorted { $0.confidence > $1.confidence }
@@ -292,7 +308,10 @@ final class RocketAIDetector {
         var detections: [WaterRocketDetection] = []
         for box in 0..<boxCount {
             var bestConfidence = 0.0
-            for classIndex in 0..<classCount {
+            let classIndices: [Int] = acceptedClassIndices.isEmpty
+                ? Array(0..<classCount)
+                : Array(acceptedClassIndices.filter { $0 >= 0 && $0 < classCount })
+            for classIndex in classIndices {
                 bestConfidence = max(bestConfidence, classConfidence(box, classIndex))
             }
             guard bestConfidence >= minimumConfidence else { continue }
@@ -310,7 +329,7 @@ final class RocketAIDetector {
             detections.append(WaterRocketDetection(
                 rect: rect,
                 confidence: bestConfidence,
-                label: "water_rocket"
+                label: resultLabel
             ))
         }
         return detections.sorted { $0.confidence > $1.confidence }

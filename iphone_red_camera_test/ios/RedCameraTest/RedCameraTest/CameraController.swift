@@ -158,6 +158,14 @@ final class CameraController: NSObject, ObservableObject {
     private let voiceNotifier = VoiceNotifier()
     private let profileStore = ScanProfileStore()
     private let aiDetector = RocketAIDetector()
+    // COCO đã học rất nhiều dạng chai ở nhiều góc và khoảng cách. Model này
+    // chỉ sinh ứng viên; khóa cuối vẫn phải khớp năm ảnh cá nhân.
+    private let bottleDetector = RocketAIDetector(
+        modelNames: ["BottleDetector"],
+        acceptedLabels: ["bottle", "water_bottle"],
+        acceptedClassIndices: [39],
+        resultLabel: "bottle"
+    )
     /// A full-screen candidate must be strong because sky highlights, people,
     /// and launch hardware can look rocket-like for one frame.  Once a target
     /// is locked, a weaker detector result is accepted only near the predicted
@@ -440,13 +448,8 @@ final class CameraController: NSObject, ObservableObject {
 
     func captureManualReferencePhoto() {
         guard stage.isScanning, !isRecording else { return }
-        guard hasSelectedSubject else {
-            statusText = "Hãy chạm vào vật trên màn hình trước"
-            scanGuidanceText = "CHẠM VÀO VẬT CẦN CHỤP"
-            return
-        }
         scanNeedsNewAngle = false
-        scanGuidanceText = "Đang kiểm tra ảnh..."
+        scanGuidanceText = "AI đang tìm chai trong ảnh..."
         videoQueue.async { [weak self] in
             guard let self, !self.manualCaptureRequested else { return }
             self.manualCaptureRequested = true
@@ -645,7 +648,7 @@ final class CameraController: NSObject, ObservableObject {
         switch kind {
         case .near:
             stage = .scanningNear
-            statusText = "Chạm trực tiếp vào vật cần chụp trên màn hình"
+            statusText = "Đặt chai tên lửa nổi bật trong ảnh rồi bấm chụp"
         case .far:
             stage = .scanningFar
             statusText = "Quét xa không giới hạn thời gian • làm theo mũi chỉ dẫn"
@@ -659,7 +662,7 @@ final class CameraController: NSObject, ObservableObject {
         scanSampleTarget = requiredSamples
         scanIsSufficient = false
         scanNeedsNewAngle = false
-        scanGuidanceText = "CHẠM VÀO VẬT CẦN CHỤP"
+        scanGuidanceText = "AI TỰ TÌM CHAI • BẤM CHỤP ẢNH 1/5"
         crystalCells = []
         crystalDepths = [:]
         crystalFacets3D = []
@@ -668,13 +671,13 @@ final class CameraController: NSObject, ObservableObject {
         surfacePointCount = 0
         scanHasConfirmedTarget = false
         targetConfirmationProgress = 0
-        hasSelectedSubject = false
+        hasSelectedSubject = true
         selectedSubjectMaskImage = nil
         selectedSubjectRect = nil
         detectedSubjectLabel = "Chưa phân loại"
         detectedSubjectConfidence = 0
         targetRect = rect
-        matchText = "CHƯA CHỌN VẬT • cần 5 ảnh đa góc"
+        matchText = "CHỤP BÌNH THƯỜNG • AI TỰ CHỌN VẬT NHẤT QUÁN"
 
         videoQueue.async { [weak self] in
             guard let self else { return }
@@ -803,6 +806,95 @@ final class CameraController: NSObject, ObservableObject {
         let removedHand: Bool
         let isCentered: Bool
         let contourPoints: [CGPoint]
+    }
+
+    private func rawSubjectSelection(
+        from pixelBuffer: CVPixelBuffer,
+        rect proposedRect: CGRect
+    ) -> ManualSubjectMask? {
+        let frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let rect = proposedRect.intersection(frame)
+        guard rect.width >= 0.08, rect.height >= 0.10,
+              let jpeg = referenceJPEG(
+                from: pixelBuffer,
+                normalizedTopLeftRect: rect,
+                orientation: .up
+              ) else { return nil }
+
+        var cells = Set<Int>()
+        for row in 0..<selectionGridRows {
+            for column in 0..<selectionGridColumns {
+                let point = CGPoint(
+                    x: (CGFloat(column) + 0.5) / CGFloat(selectionGridColumns),
+                    y: (CGFloat(row) + 0.5) / CGFloat(selectionGridRows)
+                )
+                if rect.contains(point) {
+                    cells.insert(row * selectionGridColumns + column)
+                }
+            }
+        }
+        let contour = [
+            CGPoint(x: rect.minX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.maxY),
+            CGPoint(x: rect.minX, y: rect.maxY)
+        ]
+        return ManualSubjectMask(
+            cells: cells,
+            boundingRect: rect,
+            image: UIImage(),
+            referenceJPEG: jpeg,
+            removedHand: false,
+            isCentered: true,
+            contourPoints: contour
+        )
+    }
+
+    /// Người dùng chỉ cần đặt chai tên lửa nổi bật trong ảnh. Hai detector tìm
+    /// hộp chai/tên lửa; nếu cả hai hụt vì chai trong suốt, crop trung tâm lớn
+    /// vẫn được lưu và tính nhất quán giữa năm ảnh sẽ loại cảnh sai.
+    private func automaticReferenceSelection(
+        from pixelBuffer: CVPixelBuffer
+    ) -> ManualSubjectMask? {
+        let detections = detectRocketOrBottle(
+            in: pixelBuffer,
+            minimumConfidence: 0.08
+        ).filter {
+            $0.rect.width * $0.rect.height >= 0.012
+        }
+        let center = CGPoint(x: 0.5, y: 0.5)
+        let selected = detections.max { lhs, rhs in
+            func score(_ detection: WaterRocketDetection) -> CGFloat {
+                let distance = hypot(
+                    detection.rect.midX - center.x,
+                    detection.rect.midY - center.y
+                )
+                let area = min(0.55, detection.rect.width * detection.rect.height)
+                let bottleBoost: CGFloat = detection.label
+                    .lowercased().contains("bottle") ? 0.16 : 0.24
+                return CGFloat(detection.confidence) * 0.55
+                    + area * 0.85
+                    + bottleBoost
+                    - distance * 0.72
+            }
+            return score(lhs) < score(rhs)
+        }
+
+        if let detection = selected {
+            let padX = max(0.025, detection.rect.width * 0.10)
+            let padY = max(0.030, detection.rect.height * 0.08)
+            return rawSubjectSelection(
+                from: pixelBuffer,
+                rect: detection.rect.insetBy(dx: -padX, dy: -padY)
+            )
+        }
+
+        // Fallback dành cho chai PET trong suốt bị mất biên: người dùng chỉ cần
+        // đặt vật chính ở giữa và cho nó chiếm phần lớn ảnh.
+        return rawSubjectSelection(
+            from: pixelBuffer,
+            rect: CGRect(x: 0.08, y: 0.035, width: 0.84, height: 0.93)
+        )
     }
 
     private func instanceLabel(
@@ -1472,11 +1564,11 @@ final class CameraController: NSObject, ObservableObject {
 
     private func nextReferenceGuidance(after capturedCount: Int) -> String {
         let instructions = [
-            "mặt trước chính diện",
-            "xoay phải khoảng 60°",
-            "mặt sau chính diện",
-            "xoay trái khoảng 60°",
-            "nghiêng nhẹ để thấy mũi và cánh"
+            "chụp trọn phần chai chính",
+            "xoay chai sang phải khoảng 60°",
+            "chụp mặt đối diện",
+            "xoay chai sang trái khoảng 60°",
+            "nghiêng chai để thấy dáng dài và đáy"
         ]
         guard capturedCount < instructions.count else { return "Đã đủ 5 góc" }
         return "Ảnh \(capturedCount + 1)/5 • \(instructions[capturedCount])"
@@ -1486,20 +1578,10 @@ final class CameraController: NSObject, ObservableObject {
         from pixelBuffer: CVPixelBuffer,
         kind: ScanKind
     ) {
-        guard let selection = manualSubjectMask(
-            from: pixelBuffer,
-            at: selectedSubjectPoint
-        ) else {
+        guard let selection = automaticReferenceSelection(from: pixelBuffer) else {
             DispatchQueue.main.async { [weak self] in
                 self?.scanNeedsNewAngle = true
-                self?.scanGuidanceText = "Không thấy vật đã chọn • chạm lại vào vật"
-            }
-            return
-        }
-        guard selection.isCentered else {
-            DispatchQueue.main.async { [weak self] in
-                self?.scanNeedsNewAngle = true
-                self?.scanGuidanceText = "Đưa vật đi qua tâm vòng tròn rồi chụp"
+                self?.scanGuidanceText = "Chưa tìm thấy chai • đưa vật lớn hơn vào giữa ảnh"
             }
             return
         }
@@ -1564,11 +1646,14 @@ final class CameraController: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.hasSelectedSubject = true
-            self.selectedSubjectMaskImage = selection.image
+            self.selectedSubjectMaskImage = nil
             self.selectedSubjectRect = selection.boundingRect
-            self.subjectContourPoints = selection.contourPoints
+            self.subjectContourPoints = []
             self.scanHasConfirmedTarget = true
             self.targetConfirmationProgress = 1
+            self.scanSubjectKind = .object
+            self.detectedSubjectLabel = "tên lửa nước dạng chai"
+            self.detectedSubjectConfidence = 1
             self.learnedSamples = count
             self.scanViewpointCount = count
             self.scanSampleCount = coveragePercent
@@ -1581,8 +1666,8 @@ final class CameraController: NSObject, ObservableObject {
                 ? "Đã đủ 5 góc nhận diện"
                 : self.nextReferenceGuidance(after: count)
             self.statusText = sufficient
-                ? "Đang ghép năm ảnh với detector AI đã học sẵn..."
-                : "Giữ tâm vật ổn định; thay đổi góc theo hướng dẫn"
+                ? "Đang ghép năm ảnh chai với hai detector AI..."
+                : "Đổi góc chai; không cần chạm hay tách sáng tối"
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             self.onEvent?("REFERENCE_PHOTO_\(count)")
         }
@@ -2624,6 +2709,43 @@ final class CameraController: NSObject, ObservableObject {
         return best
     }
 
+    private func detectRocketOrBottle(
+        in pixelBuffer: CVPixelBuffer,
+        minimumConfidence: Double,
+        regionOfInterest: CGRect? = nil
+    ) -> [WaterRocketDetection] {
+        var detections = aiDetector.detect(
+            in: pixelBuffer,
+            minimumConfidence: minimumConfidence,
+            regionOfInterest: regionOfInterest
+        )
+        // Chỉ gọi model chai khi model chuyên tên lửa hụt để không chạy hai
+        // mạng 640×640 ở mọi frame lúc tên lửa đang bay nhanh.
+        if detections.isEmpty, bottleDetector.isAvailable {
+            detections.append(contentsOf: bottleDetector.detect(
+                in: pixelBuffer,
+                minimumConfidence: max(0.10, minimumConfidence * 0.72),
+                regionOfInterest: regionOfInterest
+            ))
+        }
+
+        // Hai model có thể cùng khoanh một chai. Giữ hộp tin cậy nhất để bộ
+        // xác nhận nhiều frame không đếm trùng một vật hai lần.
+        var merged: [WaterRocketDetection] = []
+        for detection in detections.sorted(by: { $0.confidence > $1.confidence }) {
+            if let index = merged.firstIndex(where: {
+                intersectionOverUnion($0.rect, detection.rect) >= 0.62
+            }) {
+                if detection.confidence > merged[index].confidence {
+                    merged[index] = detection
+                }
+            } else {
+                merged.append(detection)
+            }
+        }
+        return merged.sorted { $0.confidence > $1.confidence }
+    }
+
     private func bestAIDetection(
         in pixelBuffer: CVPixelBuffer,
         near expectedRect: CGRect?
@@ -2641,7 +2763,7 @@ final class CameraController: NSObject, ObservableObject {
             let roi = searchROI(around: expectedRect)
             // Nhánh toàn khung giữ được dù/parachute lớn. Nếu nhánh này hụt mục tiêu
             // gần quỹ đạo, nhánh ROI mới phóng to vùng 3–6 px để cứu frame đó.
-            let global = aiDetector.detect(
+            let global = detectRocketOrBottle(
                 in: pixelBuffer,
                 minimumConfidence: isTinyContinuation ? 0.07 : minimumConfidence
             )
@@ -2656,7 +2778,7 @@ final class CameraController: NSObject, ObservableObject {
             if hasGlobalNearTrajectory {
                 detections = global
             } else {
-                let focused = aiDetector.detect(
+                let focused = detectRocketOrBottle(
                     in: pixelBuffer,
                     minimumConfidence: minimumConfidence,
                     regionOfInterest: roi
@@ -2664,7 +2786,7 @@ final class CameraController: NSObject, ObservableObject {
                 detections = focused + global
             }
         } else {
-            detections = aiDetector.detect(
+            detections = detectRocketOrBottle(
                 in: pixelBuffer,
                 minimumConfidence: minimumConfidence
             )

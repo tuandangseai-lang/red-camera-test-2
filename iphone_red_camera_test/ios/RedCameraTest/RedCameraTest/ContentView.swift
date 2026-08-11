@@ -21,11 +21,6 @@ struct ContentView: View {
             trackingOverlay
                 .ignoresSafeArea()
 
-            if camera.stage.isScanning {
-                subjectTapLayer
-                    .ignoresSafeArea()
-            }
-
             VStack(spacing: 12) {
                 statusPanel
                 Spacer()
@@ -68,20 +63,7 @@ struct ContentView: View {
     private var trackingOverlay: some View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
-                if camera.stage.isScanning,
-                   let maskImage = camera.selectedSubjectMaskImage {
-                    subjectSpotlight(maskImage: maskImage, in: geometry.size)
-                }
-
-                if camera.stage.isScanning,
-                   camera.subjectContourPoints.count >= 3 {
-                    subjectContourOverlay(
-                        points: camera.subjectContourPoints,
-                        in: geometry.size
-                    )
-                }
-
-                if camera.stage.showsGuide {
+                if camera.stage.showsGuide, !camera.stage.isScanning {
                     let rect = mappedRect(camera.scanRect, in: geometry.size)
                     let guideColor: Color = camera.stage.isScanning
                         ? scanStatusColor
@@ -535,11 +517,7 @@ struct ContentView: View {
                         } label: {
                             ZStack {
                                 Circle()
-                                    .fill(
-                                        camera.hasSelectedSubject
-                                            ? Color.white
-                                            : Color.gray
-                                    )
+                                    .fill(Color.white)
                                     .frame(width: 76, height: 76)
                                 Circle()
                                     .stroke(.black.opacity(0.70), lineWidth: 3)
@@ -548,14 +526,13 @@ struct ContentView: View {
                             .shadow(color: .black.opacity(0.35), radius: 5, y: 2)
                         }
                         .buttonStyle(.plain)
-                        .disabled(!camera.hasSelectedSubject)
                         .accessibilityLabel("Chụp ảnh mẫu")
 
                         Spacer()
 
-                        Image(systemName: "hand.tap.fill")
+                        Image(systemName: "waterbottle.fill")
                             .font(.title3)
-                            .foregroundStyle(camera.hasSelectedSubject ? .cyan : .yellow)
+                            .foregroundStyle(.cyan)
                             .frame(width: 42, height: 42)
                     }
                 }

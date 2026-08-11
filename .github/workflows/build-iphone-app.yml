@@ -43,6 +43,7 @@ jobs:
           root = Path.cwd()
           weights = root / "iphone_red_camera_test" / "ai_training" / "weights" / "water_rocket_yolo11n_v3.pt"
           target = root / "iphone_red_camera_test" / "ios" / "RedCameraTest" / "RedCameraTest" / "WaterRocketDetector.mlpackage"
+          bottle_target = root / "iphone_red_camera_test" / "ios" / "RedCameraTest" / "RedCameraTest" / "BottleDetector.mlpackage"
           if not weights.is_file():
               raise SystemExit(f"Missing trained weights: {weights}")
           exported = Path(YOLO(str(weights)).export(format="coreml", imgsz=640, nms=True))
@@ -50,8 +51,18 @@ jobs:
               shutil.rmtree(target)
           shutil.move(str(exported), str(target))
           print(f"Core ML package: {target}")
+
+          # Detector COCO tổng quát giữ kiến thức về nhiều kiểu chai: chai trơn,
+          # chai trong suốt, chai không có mũi/cánh. 5 ảnh cá nhân trong app vẫn
+          # là cổng xác nhận cuối, nên model này không tự khóa nhầm chai khác.
+          bottle_export = Path(YOLO("yolo11n.pt").export(format="coreml", imgsz=640, nms=True))
+          if bottle_target.exists():
+              shutil.rmtree(bottle_target)
+          shutil.move(str(bottle_export), str(bottle_target))
+          print(f"Bottle Core ML package: {bottle_target}")
           PY
           test -d "iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/WaterRocketDetector.mlpackage"
+          test -d "iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/BottleDetector.mlpackage"
 
       - name: Cai XcodeGen
         run: brew install xcodegen
@@ -79,11 +90,13 @@ jobs:
           grep -q "maximumSmoothDisplayZoom: CGFloat = 0.98" "RedCameraTest/CameraController.swift"
           grep -q "hd4K3840x2160" "RedCameraTest/CameraController.swift"
           grep -q "WaterRocketDetector" "RedCameraTest/RocketAIDetector.swift"
+          grep -q "BottleDetector" "RedCameraTest/CameraController.swift"
           grep -q "final class RocketAIDetector" "RedCameraTest/RocketAIDetector.swift"
           grep -q "RocketMotionFilter" "RedCameraTest/RocketMotionFilter.swift"
           grep -q "verifyWithAIDetector" "RedCameraTest/CameraController.swift"
           grep -q "aiAcquisitionConfidence = 0.42" "RedCameraTest/CameraController.swift"
           test -d "RedCameraTest/WaterRocketDetector.mlpackage"
+          test -d "RedCameraTest/BottleDetector.mlpackage"
           grep -q "VNGenerateForegroundInstanceMaskRequest" "RedCameraTest/CameraController.swift"
           grep -q "connectedCrystalCells" "RedCameraTest/CameraController.swift"
           grep -q "crystalMesh" "RedCameraTest/ContentView.swift"
@@ -136,6 +149,7 @@ jobs:
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
           test -d "$APP_PATH/WaterRocketDetector.mlmodelc"
+          test -d "$APP_PATH/BottleDetector.mlmodelc"
           /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP_PATH/Info.plist"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
