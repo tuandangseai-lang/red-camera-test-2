@@ -79,7 +79,8 @@ final class WaterRocketDetector {
         }
 
         let observations = request.results as? [VNRecognizedObjectObservation] ?? []
-        let recognized = observations.compactMap { observation in
+        let recognized: [WaterRocketDetection] = observations.compactMap {
+            (observation: VNRecognizedObjectObservation) -> WaterRocketDetection? in
             guard let label = observation.labels.first else { return nil }
             let confidence = Double(min(observation.confidence, label.confidence))
             guard confidence >= minimumConfidence else { return nil }
@@ -113,7 +114,10 @@ final class WaterRocketDetector {
                 label: label.identifier
             )
         }
-        .sorted { $0.confidence > $1.confidence }
+        .sorted {
+            (lhs: WaterRocketDetection, rhs: WaterRocketDetection) -> Bool in
+            lhs.confidence > rhs.confidence
+        }
         if !recognized.isEmpty { return recognized }
 
         // YOLO26 end-to-end mặc định xuất MultiArray [1, 300, 6] thay vì
