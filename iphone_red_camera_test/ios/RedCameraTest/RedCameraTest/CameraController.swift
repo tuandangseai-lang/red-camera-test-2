@@ -201,6 +201,9 @@ final class CameraController: NSObject, ObservableObject {
     private var pendingAIDetectionRect: CGRect?
     private var pendingAIDetectionCount = 0
     private var parachuteDetected = false
+    private var recoverySeedEstimate: RocketMotionEstimate?
+    private var recoveryStartedAt: TimeInterval = 0
+    private var isRecoveringLostTarget = false
 
     // Quét 3D gần đúng trên iPhone không LiDAR: ARKit cung cấp vị trí camera và
     // điểm đặc trưng 3D, Vision giữ lại các điểm nằm trên mặt nạ chủ thể.
@@ -324,6 +327,7 @@ final class CameraController: NSObject, ObservableObject {
             self.motionFilter.clear()
             self.aiDetectionMisses = 0
             self.clearPendingAIDetection()
+            self.clearRecoveryState()
             self.sequenceHandler = VNSequenceRequestHandler()
         }
         stage = .idle
@@ -470,6 +474,7 @@ final class CameraController: NSObject, ObservableObject {
             self.motionFilter.clear()
             self.aiDetectionMisses = 0
             self.clearPendingAIDetection()
+            self.clearRecoveryState()
             self.sequenceHandler = VNSequenceRequestHandler()
 
             DispatchQueue.main.async {
@@ -534,6 +539,7 @@ final class CameraController: NSObject, ObservableObject {
             self.featureFrameCounter = 0
             self.aiDetectionMisses = 0
             self.clearPendingAIDetection()
+            self.clearRecoveryState()
             self.shouldRecordAfterVerification = recordAfterLock
             self.processingMode = .verifying
         }
@@ -586,6 +592,7 @@ final class CameraController: NSObject, ObservableObject {
             self?.motionFilter.clear()
             self?.aiDetectionMisses = 0
             self?.clearPendingAIDetection()
+            self?.clearRecoveryState()
         }
         targetRect = nil
         trackingPoints = []
@@ -2386,6 +2393,107 @@ final class CameraController: NSObject, ObservableObject {
         pendingAIDetectionCount = 0
     }
 
+    private func clearRecoveryState() {
+        recoverySeedEstimate = nil
+        recoveryStartedAt = 0
+        isRecoveringLostTarget = false
+    }
+
+    private func recoveryExpectedRect(at timestamp: TimeInterval) -> CGRect? {
+        guard isRecoveringLostTarget, let seed = recoverySeedEstimate else { return nil }
+        // Quỹ đạo chỉ được ngoại suy mạnh trong khoảng đầu sau khi mất. Sau đó vùng ROI
+        // tự nới rộng, vì servo đã có thể làm thay đổi vị trí mục tiêu trong khung hình.
+        let recoveryAge = CGFloat(max(0, min(4.0, timestamp - recoveryStartedAt)))
+        let elapsed = min(1.2, recoveryAge)
+        let seedCenter = CGPoint(
+            x: seed.filteredRect.midX,
+            y: seed.filteredRect.midY
+        )
+        let ballisticCenter = CGPoint(
+            x: max(0.015, min(0.985, seedCenter.x + seed.velocity.dx * elapsed)),
+            y: max(0.015, min(0.985, seedCenter.y + seed.velocity.dy * elapsed))
+        )
+        // Sau khoảng 1,5 giây ESP32 bắt đầu quét pan/tilt. Khi camera quay, vật được
+        // tìm lại thường đi vào gần tâm khung, nên dịch trọng tâm ROI dần về giữa.
+        let servoSearchBlend = min(1, max(0, (recoveryAge - 1.5) / 0.9))
+        let predictedCenter = CGPoint(
+            x: ballisticCenter.x * (1 - servoSearchBlend) + 0.5 * servoSearchBlend,
+            y: ballisticCenter.y * (1 - servoSearchBlend) + 0.5 * servoSearchBlend
+        )
+        let uncertainty = min(2.2, 1.0 + elapsed * 0.9)
+        let width = max(0.008, min(0.20, seed.filteredRect.width * uncertainty))
+        let height = max(0.008, min(0.20, seed.filteredRect.height * uncertainty))
+        return CGRect(
+            x: predictedCenter.x - width / 2,
+            y: predictedCenter.y - height / 2,
+            width: width,
+            height: height
+        ).intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+    }
+
+    private func searchROI(around expectedRect: CGRect) -> CGRect {
+        let elapsed = isRecoveringLostTarget
+            ? CGFloat(max(0, min(2.0, CACurrentMediaTime() - recoveryStartedAt)))
+            : 0
+        let side = min(
+            0.58,
+            max(
+                0.28 + elapsed * 0.08,
+                max(expectedRect.width, expectedRect.height) * 9.0
+            )
+        )
+        let center = CGPoint(x: expectedRect.midX, y: expectedRect.midY)
+        var originX = center.x - side / 2
+        var originY = center.y - side / 2
+        originX = max(0, min(1 - side, originX))
+        originY = max(0, min(1 - side, originY))
+        return CGRect(x: originX, y: originY, width: side, height: side)
+    }
+
+    private func bestIdentityAlignedDetection(
+        among detections: [WaterRocketDetection],
+        in pixelBuffer: CVPixelBuffer
+    ) -> WaterRocketDetection? {
+        guard !featureSamples.isEmpty else { return detections.first }
+
+        let candidates = foregroundCandidates(from: pixelBuffer)
+        var best: WaterRocketDetection?
+        var bestScore = Float.greatestFiniteMagnitude
+        for candidate in candidates {
+            guard let feature = candidate.feature,
+                  let match = multiViewMatch(to: feature),
+                  match.isAccepted else { continue }
+            for detection in detections.prefix(5) {
+                let centerDistance = hypot(
+                    candidate.rect.midX - detection.rect.midX,
+                    candidate.rect.midY - detection.rect.midY
+                )
+                let overlap = intersectionOverUnion(candidate.rect, detection.rect)
+                let allowedDistance = max(
+                    0.10,
+                    max(candidate.rect.width, candidate.rect.height) * 0.65
+                )
+                guard overlap >= 0.035 || centerDistance <= allowedDistance else { continue }
+                let score = match.score
+                    + Float(centerDistance * 34)
+                    - Float(detection.confidence * 8)
+                if score < bestScore {
+                    bestScore = score
+                    best = detection
+                }
+            }
+        }
+
+        // Ảnh mẫu cá nhân là lớp xác nhận chính lúc khóa ban đầu. Chỉ sau khoảng hai
+        // giây mới cho detector rất chắc chắn tự khóa để app không bị kẹt vì chai trong.
+        if best == nil,
+           featureFrameCounter >= 60,
+           let veryStrong = detections.first(where: { $0.confidence >= 0.62 }) {
+            return veryStrong
+        }
+        return best
+    }
+
     private func bestAIDetection(
         in pixelBuffer: CVPixelBuffer,
         near expectedRect: CGRect?
@@ -2397,20 +2505,53 @@ final class CameraController: NSObject, ObservableObject {
         // cây và cờ không thể tự biến thành mục tiêu.
         let minimumConfidence = expectedRect == nil
             ? aiAcquisitionConfidence
-            : (isTinyContinuation ? 0.07 : aiContinuationConfidence)
-        let detections = aiDetector.detect(
-            in: pixelBuffer,
-            minimumConfidence: minimumConfidence
-        )
+            : (isTinyContinuation ? 0.05 : aiContinuationConfidence)
+        let detections: [WaterRocketDetection]
+        if let expectedRect, isTinyContinuation || isRecoveringLostTarget {
+            let roi = searchROI(around: expectedRect)
+            // Nhánh toàn khung giữ được dù/parachute lớn. Nếu nhánh này hụt mục tiêu
+            // gần quỹ đạo, nhánh ROI mới phóng to vùng 3–6 px để cứu frame đó.
+            let global = aiDetector.detect(
+                in: pixelBuffer,
+                minimumConfidence: isTinyContinuation ? 0.07 : minimumConfidence
+            )
+            let hasGlobalNearTrajectory = global.contains { detection in
+                let center = CGPoint(x: detection.rect.midX, y: detection.rect.midY)
+                return roi.contains(center)
+                    && hypot(
+                        center.x - expectedRect.midX,
+                        center.y - expectedRect.midY
+                    ) <= max(0.13, max(expectedRect.width, expectedRect.height) * 3.5)
+            }
+            if hasGlobalNearTrajectory {
+                detections = global
+            } else {
+                let focused = aiDetector.detect(
+                    in: pixelBuffer,
+                    minimumConfidence: minimumConfidence,
+                    regionOfInterest: roi
+                )
+                detections = focused + global
+            }
+        } else {
+            detections = aiDetector.detect(
+                in: pixelBuffer,
+                minimumConfidence: minimumConfidence
+            )
+        }
         guard let expectedRect else {
             // Most false positives from the held-out launch videos enter from a
             // single image edge.  A real scan target may be larger than the old
             // guide circle, but its centre must still be on-screen.
-            return detections.first(where: { detection in
+            let onScreen = detections.filter { detection in
                 let centre = CGPoint(x: detection.rect.midX, y: detection.rect.midY)
                 return (0.055...0.945).contains(centre.x)
                     && (0.045...0.955).contains(centre.y)
-            })
+            }
+            return bestIdentityAlignedDetection(
+                among: onScreen,
+                in: pixelBuffer
+            )
         }
 
         var best: WaterRocketDetection?
@@ -2424,8 +2565,14 @@ final class CameraController: NSObject, ObservableObject {
             let detectedArea = max(0.00001, detection.rect.width * detection.rect.height)
             let expectedArea = max(0.00001, expectedRect.width * expectedRect.height)
             let areaRatio = max(detectedArea, expectedArea) / min(detectedArea, expectedArea)
+            let recoveryAllowance: CGFloat = isRecoveringLostTarget
+                ? min(
+                    0.28,
+                    0.13 + CGFloat(CACurrentMediaTime() - recoveryStartedAt) * 0.055
+                )
+                : 0
             let allowedDistance = max(
-                isTinyContinuation ? 0.105 : 0.22,
+                isTinyContinuation ? max(0.105, recoveryAllowance) : max(0.22, recoveryAllowance),
                 max(expectedRect.width, expectedRect.height) * 3.2
             )
             guard centerDistance <= allowedDistance || overlap > 0 else { continue }
@@ -2467,6 +2614,7 @@ final class CameraController: NSObject, ObservableObject {
         smoothedTrackingVelocity = .zero
         motionFilter.reset(rect: clippedRect, timestamp: CACurrentMediaTime())
         parachuteDetected = false
+        clearRecoveryState()
         processingMode = .tracking
 
         let shouldStartRecording = shouldRecordAfterVerification
@@ -2494,25 +2642,41 @@ final class CameraController: NSObject, ObservableObject {
     @discardableResult
     private func verifyWithAIDetector(pixelBuffer: CVPixelBuffer) -> Bool {
         guard aiDetector.isAvailable else { return false }
-        guard let detection = bestAIDetection(in: pixelBuffer, near: nil) else {
+        let expectedRect = recoveryExpectedRect(at: CACurrentMediaTime())
+        guard let detection = bestAIDetection(
+            in: pixelBuffer,
+            near: expectedRect
+        ) else {
             pendingAIDetectionCount = max(0, pendingAIDetectionCount - 1)
-            publishSearchProgress(message: "AI đang tìm tên lửa nước trên toàn khung...")
+            let message = isRecoveringLostTarget
+                ? "AI đang phóng to vùng quỹ đạo để bắt lại mục tiêu nhỏ..."
+                : "AI thấy loại tên lửa và đang đối chiếu với 5 ảnh của bạn..."
+            publishSearchProgress(message: message)
             return true
         }
 
-        guard confirmsAIDetection(detection.rect, requiredCount: 3) else {
+        let confirmationCount = isRecoveringLostTarget ? 2 : 3
+        guard confirmsAIDetection(
+            detection.rect,
+            requiredCount: confirmationCount
+        ) else {
             publishSearchProgress(
-                message: "AI xác nhận mục tiêu \(pendingAIDetectionCount)/3 • \(Int(detection.confidence * 100))%"
+                message: "AI xác nhận mục tiêu \(pendingAIDetectionCount)/\(confirmationCount) • \(Int(detection.confidence * 100))%"
             )
             return true
         }
 
+        let wasRecovery = isRecoveringLostTarget
         lockTarget(
             rect: pendingAIDetectionRect ?? detection.rect,
             trianglePoints: representativeTrackingPoints(in: detection.rect),
             confidence: detection.confidence,
-            matchDescription: "YOLO Core ML • đã xác nhận 3 frame • \(Int(detection.confidence * 100))%",
-            statusDescription: "AI đã khóa đúng tên lửa nước — đang bám và dự đoán quỹ đạo"
+            matchDescription: wasRecovery
+                ? "AI ROI • đã bắt lại theo quỹ đạo • \(Int(detection.confidence * 100))%"
+                : "YOLO + 5 ảnh mẫu • đã xác nhận \(confirmationCount) frame • \(Int(detection.confidence * 100))%",
+            statusDescription: wasRecovery
+                ? "Đã bắt lại tên lửa nhỏ — tiếp tục bám liên tục"
+                : "AI đã khóa đúng tên lửa của bạn — đang bám và dự đoán quỹ đạo"
         )
         return true
     }
@@ -2639,7 +2803,7 @@ final class CameraController: NSObject, ObservableObject {
             if aiDetector.isAvailable {
                 // Detector chạy khoảng 15 lần/giây ở camera 60 fps. Tracker chạy
                 // các frame xen giữa; khi tracker yếu, detector được gọi ngay.
-                let shouldRunDetector = isTinyTarget
+                let shouldRunDetector = (isTinyTarget && trackingFrameCounter % 2 == 0)
                     || trackingFrameCounter % 4 == 0
                     || lowConfidenceFrames > 0
                 if shouldRunDetector {
@@ -2824,6 +2988,21 @@ final class CameraController: NSObject, ObservableObject {
     private func markTargetLost() {
         // Chuyển thẳng sang tìm lại tự động. Không yêu cầu người dùng bấm nút
         // hoặc đưa vật vào vòng tròn lần nữa.
+        let lostAt = CACurrentMediaTime()
+        if motionFilter.isInitialized {
+            recoverySeedEstimate = motionFilter.estimate(at: lostAt)
+        } else if let lastTrackingBounds {
+            recoverySeedEstimate = RocketMotionEstimate(
+                filteredRect: lastTrackingBounds,
+                predictedPoint: CGPoint(
+                    x: lastTrackingBounds.midX,
+                    y: lastTrackingBounds.midY
+                ),
+                velocity: smoothedTrackingVelocity
+            )
+        }
+        recoveryStartedAt = lostAt
+        isRecoveringLostTarget = recoverySeedEstimate != nil
         processingMode = .verifying
         featureFrameCounter = 0
         shouldRecordAfterVerification = false
@@ -2847,9 +3026,9 @@ final class CameraController: NSObject, ObservableObject {
             self.predictedTargetPoint = nil
             self.trackingConfidence = 0
             self.matchText = self.aiDetector.isAvailable
-                ? "Mất mục tiêu • YOLO đang quét toàn khung để bắt lại"
+                ? "Mất mục tiêu • AI phóng to vùng quỹ đạo để bắt lại"
                 : "Mất mục tiêu • đang tự tìm lại mô hình đa góc"
-            self.statusText = "Servo đang quét góc nhỏ; app tự khóa lại ngay khi nhận ra vật"
+            self.statusText = "Giữ quỹ đạo cũ, mở dần vùng tìm; chỉ khóa mục tiêu ổn định 2 frame"
             self.returnToUltraWide()
             self.announce("Mất mục tiêu. Đang tự tìm lại.", kind: .warning)
             self.onEvent?("SEARCH_START")

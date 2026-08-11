@@ -61,12 +61,29 @@ final class RocketAIDetector {
     func detect(
         in pixelBuffer: CVPixelBuffer,
         orientation: CGImagePropertyOrientation = .up,
-        minimumConfidence: Double = 0.24
+        minimumConfidence: Double = 0.24,
+        regionOfInterest: CGRect? = nil
     ) -> [WaterRocketDetection] {
         guard let visionModel else { return [] }
 
         let request = VNCoreMLRequest(model: visionModel)
         request.imageCropAndScaleOption = .scaleFill
+        let normalizedROI = regionOfInterest?
+            .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        if let roi = normalizedROI,
+           !roi.isNull,
+           roi.width >= 0.08,
+           roi.height >= 0.08 {
+            // App dùng gốc trên-trái, còn Vision nhận ROI với gốc dưới-trái.
+            // Bounding box Vision trả về tương đối với chính ROI; remapToFullFrame
+            // sẽ đưa kết quả về lại hệ tọa độ toàn khung.
+            request.regionOfInterest = CGRect(
+                x: roi.minX,
+                y: 1.0 - roi.maxY,
+                width: roi.width,
+                height: roi.height
+            )
+        }
         let handler = VNImageRequestHandler(
             cvPixelBuffer: pixelBuffer,
             orientation: orientation,
@@ -118,7 +135,9 @@ final class RocketAIDetector {
             (lhs: WaterRocketDetection, rhs: WaterRocketDetection) -> Bool in
             lhs.confidence > rhs.confidence
         }
-        if !recognized.isEmpty { return recognized }
+        if !recognized.isEmpty {
+            return remapToFullFrame(recognized, regionOfInterest: normalizedROI)
+        }
 
         // YOLO26 end-to-end mặc định xuất MultiArray [1, 300, 6] thay vì
         // VNRecognizedObjectObservation. Parser này giữ app tương thích cả hai
@@ -126,7 +145,37 @@ final class RocketAIDetector {
         let featureResults = (request.results ?? []).compactMap {
             $0 as? VNCoreMLFeatureValueObservation
         }
-        return parseFeatureArrays(featureResults, minimumConfidence: minimumConfidence)
+        let decoded = parseFeatureArrays(
+            featureResults,
+            minimumConfidence: minimumConfidence
+        )
+        return remapToFullFrame(decoded, regionOfInterest: normalizedROI)
+    }
+
+    private func remapToFullFrame(
+        _ detections: [WaterRocketDetection],
+        regionOfInterest: CGRect?
+    ) -> [WaterRocketDetection] {
+        guard let roi = regionOfInterest,
+              !roi.isNull,
+              roi.width >= 0.08,
+              roi.height >= 0.08 else { return detections }
+
+        return detections.compactMap { detection in
+            let rect = CGRect(
+                x: roi.minX + detection.rect.minX * roi.width,
+                y: roi.minY + detection.rect.minY * roi.height,
+                width: detection.rect.width * roi.width,
+                height: detection.rect.height * roi.height
+            ).intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+            guard rect.width > 0.002, rect.height > 0.002 else { return nil }
+            return WaterRocketDetection(
+                rect: rect,
+                confidence: detection.confidence,
+                label: detection.label
+            )
+        }
+        .sorted { $0.confidence > $1.confidence }
     }
 
     private func parseFeatureArrays(
