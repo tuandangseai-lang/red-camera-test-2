@@ -33,6 +33,15 @@ enum ScanSubjectKind: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+struct CrystalFacet3D: Equatable, Identifiable {
+    let id: Int
+    let a: CGPoint
+    let b: CGPoint
+    let c: CGPoint
+    let depth: Double
+    let light: Double
+}
+
 enum RocketLearningStage: Equatable {
     case idle
     case scanningNear
@@ -83,9 +92,12 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var scanGuidanceText = "Đưa tên lửa vào khung"
     @Published private(set) var crystalCells: [Int] = []
     @Published private(set) var crystalDepths: [Int: Double] = [:]
+    @Published private(set) var crystalFacets3D: [CrystalFacet3D] = []
     @Published private(set) var crystalCoverage = 0.0
     @Published private(set) var scanViewpointCount = 0
     @Published private(set) var surfacePointCount = 0
+    @Published private(set) var scanHasConfirmedTarget = false
+    @Published private(set) var targetConfirmationProgress = 0.0
     @Published private(set) var isARScanning = false
     @Published private(set) var targetRect: CGRect?
     @Published private(set) var trackingConfidence = 0.0
@@ -168,9 +180,19 @@ final class CameraController: NSObject, ObservableObject {
     private var capturedAzimuthBins: Set<Int> = []
     private var accumulatedSurfacePoints: [SIMD3<Float>] = []
     private var scanReferenceImages: [Data] = []
+    private var targetCandidateCells: Set<Int> = []
+    private var confirmedTargetCells: Set<Int> = []
+    private var targetStableFrameCount = 0
+    private var targetIsConfirmed = false
+    private var acceptedViewMasks: [Set<Int>] = []
+    private var lastAcceptedFeature: VNFeaturePrintObservation?
+    private var voxelOccupancy: [Bool] = []
     private var lastARScanAt = 0.0
     private let requiredAzimuthBins = 8
     private let totalAzimuthBins = 10
+    private let voxelColumns = 16
+    private let voxelRows = 24
+    private let voxelDepthLayers = 12
 
     private var zoomInWorkItem: DispatchWorkItem?
     private var zoomFinishedWorkItem: DispatchWorkItem?
@@ -245,6 +267,12 @@ final class CameraController: NSObject, ObservableObject {
             self.processingMode = .idle
             self.featureSamples.removeAll()
             self.scanReferenceImages.removeAll()
+            self.targetCandidateCells.removeAll()
+            self.confirmedTargetCells.removeAll()
+            self.targetIsConfirmed = false
+            self.acceptedViewMasks.removeAll()
+            self.lastAcceptedFeature = nil
+            self.voxelOccupancy.removeAll()
             self.trackingObservation = nil
             self.sequenceHandler = VNSequenceRequestHandler()
         }
@@ -258,9 +286,12 @@ final class CameraController: NSObject, ObservableObject {
         scanGuidanceText = "Đưa tên lửa vào khung"
         crystalCells = []
         crystalDepths = [:]
+        crystalFacets3D = []
         crystalCoverage = 0
         scanViewpointCount = 0
         surfacePointCount = 0
+        scanHasConfirmedTarget = false
+        targetConfirmationProgress = 0
         targetRect = nil
         trackingConfidence = 0
         matchText = "Chưa có mẫu"
@@ -277,6 +308,12 @@ final class CameraController: NSObject, ObservableObject {
             self.processingMode = .idle
             self.activeARScanKind = nil
             self.scanReferenceImages.removeAll()
+            self.targetCandidateCells.removeAll()
+            self.confirmedTargetCells.removeAll()
+            self.targetIsConfirmed = false
+            self.acceptedViewMasks.removeAll()
+            self.lastAcceptedFeature = nil
+            self.voxelOccupancy.removeAll()
         }
         stage = .idle
         scanProgress = 0
@@ -287,9 +324,12 @@ final class CameraController: NSObject, ObservableObject {
         scanGuidanceText = "Đã dừng quét"
         crystalCells = []
         crystalDepths = [:]
+        crystalFacets3D = []
         crystalCoverage = 0
         scanViewpointCount = 0
         surfacePointCount = 0
+        scanHasConfirmedTarget = false
+        targetConfirmationProgress = 0
         targetRect = nil
         statusText = "Đã dừng quét 3D gần đúng"
         onEvent?("SCAN_CANCELLED")
@@ -313,6 +353,13 @@ final class CameraController: NSObject, ObservableObject {
             }
 
             self.featureSamples = observations
+            if let storedVoxels = profile.voxelOccupancy,
+               storedVoxels.count == self.voxelColumns * self.voxelRows * self.voxelDepthLayers {
+                self.voxelOccupancy = storedVoxels
+            } else {
+                self.voxelOccupancy.removeAll()
+            }
+            let storedFacets = self.makeCrystalFacets(viewIndex: 0)
             self.processingMode = .idle
             self.trackingObservation = nil
             self.sequenceHandler = VNSequenceRequestHandler()
@@ -321,6 +368,9 @@ final class CameraController: NSObject, ObservableObject {
                 self.activeProfileID = profile.id
                 self.learnedSamples = observations.count
                 self.surfacePointCount = profile.surfacePointCount
+                self.crystalFacets3D = storedFacets
+                self.scanHasConfirmedTarget = true
+                self.targetConfirmationProgress = 1
                 self.scanProgress = 0.8
                 self.scanSampleCount = 80
                 self.scanSampleTarget = 80
@@ -402,7 +452,7 @@ final class CameraController: NSObject, ObservableObject {
         switch kind {
         case .near:
             stage = .scanningNear
-            statusText = "Đi chậm vòng quanh chủ thể • giữ chủ thể đứng yên trong khung"
+            statusText = "Giữ vật và iPhone đứng yên một chút để xác nhận đúng chủ thể"
         case .far:
             stage = .scanningFar
             statusText = "Quét xa không giới hạn thời gian • làm theo mũi chỉ dẫn"
@@ -416,12 +466,15 @@ final class CameraController: NSObject, ObservableObject {
         scanSampleTarget = requiredSamples
         scanIsSufficient = false
         scanNeedsNewAngle = false
-        scanGuidanceText = "Giữ đúng chủ thể trong khung để lấy góc 3D đầu tiên"
+        scanGuidanceText = "Đưa đúng chủ thể vào khung • đang xác nhận 0%"
         crystalCells = []
         crystalDepths = [:]
+        crystalFacets3D = []
         crystalCoverage = 0
         scanViewpointCount = 0
         surfacePointCount = 0
+        scanHasConfirmedTarget = false
+        targetConfirmationProgress = 0
         targetRect = rect
         matchText = "3D AR 0% • 0/8 góc"
 
@@ -441,6 +494,16 @@ final class CameraController: NSObject, ObservableObject {
             self.capturedAzimuthBins.removeAll()
             self.accumulatedSurfacePoints.removeAll()
             self.scanReferenceImages.removeAll()
+            self.targetCandidateCells.removeAll()
+            self.confirmedTargetCells.removeAll()
+            self.targetStableFrameCount = 0
+            self.targetIsConfirmed = false
+            self.acceptedViewMasks.removeAll()
+            self.lastAcceptedFeature = nil
+            self.voxelOccupancy = [Bool](
+                repeating: true,
+                count: self.voxelColumns * self.voxelRows * self.voxelDepthLayers
+            )
             self.estimatedObjectCenter = nil
             self.featureFrameCounter = 0
             self.lastShapeScanAt = 0
@@ -474,7 +537,8 @@ final class CameraController: NSObject, ObservableObject {
                     createdAt: Date(),
                     subjectKind: self.scanSubjectKind,
                     referenceImages: self.scanReferenceImages,
-                    surfacePointCount: self.accumulatedSurfacePoints.count
+                    surfacePointCount: self.voxelOccupancy.filter { $0 }.count,
+                    voxelOccupancy: self.voxelOccupancy
                 )
                 updatedProfiles = self.profileStore.save(profile)
                 savedProfile = profile
@@ -1441,6 +1505,268 @@ final class CameraController: NSObject, ObservableObject {
         return normalizedDepths
     }
 
+    private func maskOverlap(_ first: Set<Int>, _ second: Set<Int>) -> Double {
+        guard !first.isEmpty, !second.isEmpty else { return 0 }
+        let intersection = first.intersection(second).count
+        let union = first.union(second).count
+        return union == 0 ? 0 : Double(intersection) / Double(union)
+    }
+
+    private func voxelIndex(x: Int, y: Int, z: Int) -> Int {
+        (z * voxelRows + y) * voxelColumns + x
+    }
+
+    private func voxelIsOccupied(x: Int, y: Int, z: Int) -> Bool {
+        guard x >= 0, x < voxelColumns,
+              y >= 0, y < voxelRows,
+              z >= 0, z < voxelDepthLayers else { return false }
+        let index = voxelIndex(x: x, y: y, z: z)
+        return index < voxelOccupancy.count && voxelOccupancy[index]
+    }
+
+    private func carveVisualHull(with mask: Set<Int>, viewIndex: Int) {
+        guard voxelOccupancy.count == voxelColumns * voxelRows * voxelDepthLayers else {
+            return
+        }
+        let angle = Float(viewIndex) * 2 * .pi / Float(requiredAzimuthBins)
+        let cosine = cos(angle)
+        let sine = sin(angle)
+
+        for z in 0..<voxelDepthLayers {
+            let normalizedZ = (
+                (Float(z) + 0.5) / Float(voxelDepthLayers) - 0.5
+            ) * 1.55
+            for y in 0..<voxelRows {
+                for x in 0..<voxelColumns {
+                    let index = voxelIndex(x: x, y: y, z: z)
+                    guard voxelOccupancy[index] else { continue }
+                    let normalizedX = (
+                        (Float(x) + 0.5) / Float(voxelColumns) - 0.5
+                    ) * 2.0
+                    let projectedX = cosine * normalizedX + sine * normalizedZ
+                    let projectedColumn = Int(
+                        ((projectedX + 1.0) * 0.5 * Float(crystalGridColumns)).rounded(.down)
+                    )
+                    guard projectedColumn >= 0, projectedColumn < crystalGridColumns,
+                          mask.contains(y * crystalGridColumns + projectedColumn) else {
+                        voxelOccupancy[index] = false
+                        continue
+                    }
+                }
+            }
+        }
+    }
+
+    private func makeCrystalFacets(viewIndex: Int) -> [CrystalFacet3D] {
+        guard !voxelOccupancy.isEmpty else { return [] }
+        let angle = Float(viewIndex) * 2 * .pi / Float(requiredAzimuthBins)
+        let cosine = cos(angle)
+        let sine = sin(angle)
+        let directions = [
+            (dx: -1, dy: 0, dz: 0), (dx: 1, dy: 0, dz: 0),
+            (dx: 0, dy: -1, dz: 0), (dx: 0, dy: 1, dz: 0),
+            (dx: 0, dy: 0, dz: -1), (dx: 0, dy: 0, dz: 1)
+        ]
+
+        func worldVertex(_ x: Int, _ y: Int, _ z: Int) -> SIMD3<Float> {
+            SIMD3<Float>(
+                Float(x) / Float(voxelColumns) * 2.0 - 1.0,
+                Float(y) / Float(voxelRows) * 2.0 - 1.0,
+                (Float(z) / Float(voxelDepthLayers) - 0.5) * 1.55
+            )
+        }
+
+        func rotate(_ point: SIMD3<Float>) -> SIMD3<Float> {
+            SIMD3<Float>(
+                cosine * point.x + sine * point.z,
+                point.y,
+                -sine * point.x + cosine * point.z
+            )
+        }
+
+        func project(_ point: SIMD3<Float>) -> CGPoint {
+            let rotated = rotate(point)
+            let perspective = 1.0 + Double(rotated.z) * 0.075
+            return CGPoint(
+                x: 0.5 + Double(rotated.x) * 0.48 * perspective,
+                y: 0.5 + Double(rotated.y) * 0.48 * perspective
+            )
+        }
+
+        var facets: [CrystalFacet3D] = []
+        var nextID = 0
+        for z in 0..<voxelDepthLayers {
+            for y in 0..<voxelRows {
+                for x in 0..<voxelColumns where voxelIsOccupied(x: x, y: y, z: z) {
+                    let cubeCorners = [
+                        worldVertex(x, y, z),
+                        worldVertex(x + 1, y, z),
+                        worldVertex(x + 1, y + 1, z),
+                        worldVertex(x, y + 1, z),
+                        worldVertex(x, y, z + 1),
+                        worldVertex(x + 1, y, z + 1),
+                        worldVertex(x + 1, y + 1, z + 1),
+                        worldVertex(x, y + 1, z + 1)
+                    ]
+                    let faceCornerIndices = [
+                        [0, 4, 7, 3], [1, 2, 6, 5],
+                        [0, 1, 5, 4], [3, 7, 6, 2],
+                        [0, 3, 2, 1], [4, 5, 6, 7]
+                    ]
+
+                    for face in 0..<directions.count {
+                        let direction = directions[face]
+                        guard !voxelIsOccupied(
+                            x: x + direction.dx,
+                            y: y + direction.dy,
+                            z: z + direction.dz
+                        ) else { continue }
+
+                        let normal = rotate(SIMD3<Float>(
+                            Float(direction.dx),
+                            Float(direction.dy),
+                            Float(direction.dz)
+                        ))
+                        guard normal.z >= -0.08 else { continue }
+                        let corners = faceCornerIndices[face].map { cubeCorners[$0] }
+                        let projected = corners.map(project)
+                        let averageDepth = corners.map { Double(rotate($0).z) }
+                            .reduce(0, +) / 4.0
+                        let light = min(
+                            1.0,
+                            max(0.18, 0.40 + Double(normal.z) * 0.42 - Double(normal.y) * 0.18)
+                        )
+                        facets.append(CrystalFacet3D(
+                            id: nextID,
+                            a: projected[0],
+                            b: projected[1],
+                            c: projected[2],
+                            depth: averageDepth,
+                            light: light
+                        ))
+                        nextID += 1
+                        facets.append(CrystalFacet3D(
+                            id: nextID,
+                            a: projected[0],
+                            b: projected[2],
+                            c: projected[3],
+                            depth: averageDepth,
+                            light: light * 0.92
+                        ))
+                        nextID += 1
+                    }
+                }
+            }
+        }
+
+        let sorted = facets.sorted { $0.depth < $1.depth }
+        guard sorted.count > 1_800 else { return sorted }
+        let stride = Int(ceil(Double(sorted.count) / 1_800.0))
+        return sorted.enumerated().compactMap { offset, facet in
+            offset.isMultiple(of: stride) ? facet : nil
+        }
+    }
+
+    private func confirmTargetIfStable(
+        mask: Set<Int>,
+        pixelBuffer: CVPixelBuffer,
+        orientation: CGImagePropertyOrientation,
+        frame: ARFrame,
+        kind: ScanKind
+    ) -> Bool {
+        guard !targetIsConfirmed else { return true }
+        let usableSize = mask.count >= 18
+            && mask.count <= Int(Double(crystalGridColumns * crystalGridRows) * 0.88)
+        guard usableSize else {
+            targetStableFrameCount = 0
+            targetCandidateCells = mask
+            DispatchQueue.main.async { [weak self] in
+                self?.targetConfirmationProgress = 0
+                self?.scanGuidanceText = "Đưa trọn chủ thể vào khung, không chạm mép"
+            }
+            return false
+        }
+
+        let overlap = maskOverlap(mask, targetCandidateCells)
+        if targetCandidateCells.isEmpty || overlap < 0.78 {
+            targetCandidateCells = mask
+            targetStableFrameCount = 1
+        } else {
+            targetStableFrameCount = min(3, targetStableFrameCount + 1)
+            targetCandidateCells = mask
+        }
+        let confirmation = Double(targetStableFrameCount) / 3.0
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.targetConfirmationProgress = confirmation
+            self.crystalCells = self.connectedCrystalCells(
+                from: Array(mask),
+                coverage: max(0.10, confirmation * 0.28)
+            )
+            self.scanGuidanceText = "Đang xác nhận đúng \(self.scanSubjectKind.title.lowercased()) • \(Int(confirmation * 100))%"
+            self.matchText = "GIỮ YÊN ĐỂ XÁC NHẬN • \(Int(confirmation * 100))%"
+        }
+
+        guard targetStableFrameCount >= 3,
+              let feature = featurePrint(
+                from: pixelBuffer,
+                normalizedTopLeftRect: processingRect,
+                orientation: orientation
+              ) else { return false }
+
+        targetIsConfirmed = true
+        confirmedTargetCells = mask
+        lastAcceptedFeature = feature
+        featureSamples.append(feature)
+        acceptedViewMasks.append(mask)
+        carveVisualHull(with: mask, viewIndex: 0)
+        if let imageData = referenceJPEG(
+            from: pixelBuffer,
+            normalizedTopLeftRect: processingRect,
+            orientation: orientation
+        ) {
+            scanReferenceImages.append(imageData)
+        }
+
+        let transform = frame.camera.transform
+        let position = cameraPosition(from: transform)
+        let distance = estimatedDistanceToSubject(in: frame, allowedCells: mask)
+        estimatedObjectCenter = position + cameraForward(from: transform) * distance
+        if let objectCenter = estimatedObjectCenter {
+            let relative = position - objectCenter
+            var azimuth = atan2(relative.x, relative.z)
+            if azimuth < 0 { azimuth += 2 * .pi }
+            let bin = min(
+                totalAzimuthBins - 1,
+                Int(azimuth / (2 * .pi) * Float(totalAzimuthBins))
+            )
+            capturedAzimuthBins.insert(bin)
+        }
+
+        shapeScanCoverage = 0.10
+        let facets = makeCrystalFacets(viewIndex: 0)
+        let voxelCount = voxelOccupancy.filter { $0 }.count
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.scanHasConfirmedTarget = true
+            self.targetConfirmationProgress = 1
+            self.scanProgress = 0.10
+            self.scanSampleCount = 10
+            self.scanViewpointCount = 1
+            self.crystalCoverage = 0.10
+            self.crystalFacets3D = facets
+            self.surfacePointCount = voxelCount
+            self.learnedSamples = self.featureSamples.count
+            self.scanNeedsNewAngle = false
+            self.scanGuidanceText = "Đã xác nhận • giữ iPhone cố định và xoay vật chậm"
+            self.matchText = "ĐÃ KHÓA CHỦ THỂ • bắt đầu dựng khối 3D"
+            self.announce("Đã xác nhận đúng chủ thể. Hãy xoay vật chậm.", kind: .success)
+            self.onEvent?("SCAN_TARGET_CONFIRMED")
+        }
+        return true
+    }
+
     private func processARScanFrame(_ frame: ARFrame, kind: ScanKind) {
         guard shapeScanCoverage < 0.8 else { return }
         guard frame.timestamp - lastARScanAt >= 0.45 else { return }
@@ -1449,7 +1775,7 @@ final class CameraController: NSObject, ObservableObject {
         guard case .normal = frame.camera.trackingState else {
             DispatchQueue.main.async { [weak self] in
                 self?.scanNeedsNewAngle = true
-                self?.scanGuidanceText = "Di chuyển chậm hơn để AR ổn định"
+                self?.scanGuidanceText = "Giữ máy ổn định để camera lấy lại vị trí"
             }
             return
         }
@@ -1472,48 +1798,19 @@ final class CameraController: NSObject, ObservableObject {
         ) else {
             DispatchQueue.main.async { [weak self] in
                 self?.scanNeedsNewAngle = true
-                self?.scanGuidanceText = "Đổi nền hoặc ánh sáng để tách rõ bề mặt"
+                self?.scanGuidanceText = "Đổi nền hoặc ánh sáng để tách rõ chủ thể"
             }
             return
         }
-
-        let allowedCells = Set(detectedCells)
-        let transform = frame.camera.transform
-        let position = cameraPosition(from: transform)
-        if estimatedObjectCenter == nil {
-            let distance = estimatedDistanceToSubject(
-                in: frame,
-                allowedCells: allowedCells
-            )
-            estimatedObjectCenter = position + cameraForward(from: transform) * distance
-        }
-        guard let objectCenter = estimatedObjectCenter else { return }
-
-        let relative = position - objectCenter
-        var azimuth = atan2(relative.x, relative.z)
-        if azimuth < 0 { azimuth += 2 * .pi }
-        let bin = min(
-            totalAzimuthBins - 1,
-            Int(azimuth / (2 * .pi) * Float(totalAzimuthBins))
-        )
-
-        let depthMap = collectSurfacePoints(from: frame, allowedCells: allowedCells)
-        let currentVisibleCells = connectedCrystalCells(
-            from: detectedCells,
-            coverage: max(0.10, shapeScanCoverage)
-        )
-
-        guard !capturedAzimuthBins.contains(bin) else {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.crystalCells = currentVisibleCells
-                self.crystalDepths = depthMap
-                self.surfacePointCount = self.accumulatedSurfacePoints.count
-                self.scanNeedsNewAngle = true
-                self.scanGuidanceText = "Góc này đã quét • hãy đi vòng sang bên quanh chủ thể"
-            }
-            return
-        }
+        let mask = Set(detectedCells)
+        guard confirmTargetIfStable(
+            mask: mask,
+            pixelBuffer: pixelBuffer,
+            orientation: orientation,
+            frame: frame,
+            kind: kind
+        ) else { return }
+        guard acceptedViewMasks.count < requiredAzimuthBins else { return }
 
         guard let feature = featurePrint(
             from: pixelBuffer,
@@ -1521,12 +1818,54 @@ final class CameraController: NSObject, ObservableObject {
             orientation: orientation
         ) else {
             DispatchQueue.main.async { [weak self] in
-                self?.scanGuidanceText = "Giữ máy chắc để ghi nhận chi tiết bề mặt"
+                self?.scanGuidanceText = "Giữ hình rõ một chút rồi tiếp tục xoay"
             }
             return
         }
 
-        capturedAzimuthBins.insert(bin)
+        let lastDistance: Float
+        if let lastAcceptedFeature {
+            var measured: Float = 0
+            do {
+                try feature.computeDistance(&measured, to: lastAcceptedFeature)
+                lastDistance = measured
+            } catch {
+                lastDistance = 0
+            }
+        } else {
+            lastDistance = 99
+        }
+        let minimumPreviousDistance = minimumDistance(to: feature) ?? 99
+        let lastMask = acceptedViewMasks.last ?? confirmedTargetCells
+        let overlap = maskOverlap(mask, lastMask)
+
+        var cameraMovedToNewAngle = false
+        if let objectCenter = estimatedObjectCenter {
+            let relative = cameraPosition(from: frame.camera.transform) - objectCenter
+            var azimuth = atan2(relative.x, relative.z)
+            if azimuth < 0 { azimuth += 2 * .pi }
+            let bin = min(
+                totalAzimuthBins - 1,
+                Int(azimuth / (2 * .pi) * Float(totalAzimuthBins))
+            )
+            cameraMovedToNewAngle = capturedAzimuthBins.insert(bin).inserted
+        }
+
+        let appearanceChanged = lastDistance >= 2.2
+            && (minimumPreviousDistance >= 1.15 || overlap <= 0.86)
+        guard appearanceChanged || cameraMovedToNewAngle else {
+            let changePercent = Int(min(99, max(0, Double(lastDistance / 2.2) * 100)))
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.scanNeedsNewAngle = true
+                self.scanGuidanceText = "Xoay vật thêm một chút • thay đổi \(changePercent)%"
+            }
+            return
+        }
+
+        let viewIndex = acceptedViewMasks.count
+        acceptedViewMasks.append(mask)
+        lastAcceptedFeature = feature
         featureSamples.append(feature)
         if let imageData = referenceJPEG(
             from: pixelBuffer,
@@ -1535,20 +1874,18 @@ final class CameraController: NSObject, ObservableObject {
         ) {
             scanReferenceImages.append(imageData)
         }
-        crystalBaseCells = detectedCells
-        let acceptedViews = min(requiredAzimuthBins, capturedAzimuthBins.count)
+        carveVisualHull(with: mask, viewIndex: viewIndex)
+
+        let acceptedViews = acceptedViewMasks.count
         shapeScanCoverage = min(
             0.8,
             Double(acceptedViews) / Double(requiredAzimuthBins) * 0.8
         )
-        let visibleCells = connectedCrystalCells(
-            from: detectedCells,
-            coverage: shapeScanCoverage
-        )
+        let facets = makeCrystalFacets(viewIndex: viewIndex)
+        let voxelCount = voxelOccupancy.filter { $0 }.count
         let coveragePercent = Int((shapeScanCoverage * 100).rounded())
-        let pointCount = accumulatedSurfacePoints.count
-        let totalSamples = featureSamples.count
         let sufficient = acceptedViews >= requiredAzimuthBins
+        let totalSamples = featureSamples.count
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -1557,16 +1894,16 @@ final class CameraController: NSObject, ObservableObject {
             self.scanSampleTarget = 80
             self.scanProgress = self.shapeScanCoverage
             self.crystalCoverage = self.shapeScanCoverage
-            self.crystalCells = visibleCells
-            self.crystalDepths = depthMap
+            self.crystalCells = detectedCells
+            self.crystalFacets3D = facets
             self.scanViewpointCount = acceptedViews
-            self.surfacePointCount = pointCount
+            self.surfacePointCount = voxelCount
             self.scanIsSufficient = sufficient
             self.scanNeedsNewAngle = false
             self.scanGuidanceText = sufficient
-                ? "Đã đủ các mặt 3D cần thiết"
-                : "Đã nhận góc \(acceptedViews)/8 • tiếp tục đi vòng quanh chủ thể"
-            self.matchText = "3D AR \(coveragePercent)% • \(acceptedViews)/8 góc • \(pointCount) điểm"
+                ? "Đã dựng đủ khối 3D cần thiết"
+                : "Đã nhận mặt \(acceptedViews)/8 • tiếp tục xoay vật"
+            self.matchText = "KHỐI 3D \(coveragePercent)% • \(voxelCount) voxel bề mặt"
         }
 
         onEvent?("SCAN_3D_VIEW_\(acceptedViews)")

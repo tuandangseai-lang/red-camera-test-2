@@ -56,9 +56,12 @@ struct ContentView: View {
                         .frame(width: rect.width, height: rect.height)
                         .position(x: rect.midX, y: rect.midY)
 
-                    if !camera.crystalCells.isEmpty,
-                       camera.stage.isScanning || camera.stage == .ready {
-                        crystalMesh(in: rect)
+                    if camera.stage.isScanning || camera.stage == .ready {
+                        if !camera.crystalFacets3D.isEmpty {
+                            crystalVolumeMesh(in: rect)
+                        } else if !camera.crystalCells.isEmpty {
+                            crystalMesh(in: rect)
+                        }
                     }
 
                     Text(guideLabel)
@@ -96,7 +99,10 @@ struct ContentView: View {
     }
 
     private var scanProgressRing: some View {
-        let progress = max(0, min(camera.scanProgress, 1))
+        let displayedProgress = camera.scanHasConfirmedTarget
+            ? camera.scanProgress
+            : camera.targetConfirmationProgress
+        let progress = max(0, min(displayedProgress, 1))
         let color = scanStatusColor
 
         return ZStack {
@@ -120,7 +126,7 @@ struct ContentView: View {
                 Text(
                     camera.scanIsSufficient
                         ? "ĐÃ PHỦ"
-                        : "ĐANG GHÉP"
+                        : (camera.scanHasConfirmedTarget ? "DỰNG 3D" : "XÁC NHẬN")
                 )
                     .font(.system(size: 9, weight: .bold))
             }
@@ -133,6 +139,7 @@ struct ContentView: View {
     private var scanStatusColor: Color {
         if camera.scanIsSufficient { return .green }
         if camera.scanNeedsNewAngle { return .orange }
+        if camera.scanHasConfirmedTarget { return .cyan }
         return .yellow
     }
 
@@ -187,12 +194,52 @@ struct ContentView: View {
         .allowsHitTesting(false)
     }
 
+    private func crystalVolumeMesh(in rect: CGRect) -> some View {
+        Canvas { context, _ in
+            context.addFilter(.shadow(color: .cyan.opacity(0.50), radius: 2.5))
+            for facet in camera.crystalFacets3D {
+                func mapped(_ point: CGPoint) -> CGPoint {
+                    CGPoint(
+                        x: rect.minX + point.x * rect.width,
+                        y: rect.minY + point.y * rect.height
+                    )
+                }
+
+                var triangle = Path()
+                triangle.move(to: mapped(facet.a))
+                triangle.addLine(to: mapped(facet.b))
+                triangle.addLine(to: mapped(facet.c))
+                triangle.closeSubpath()
+
+                let light = max(0.15, min(1.0, facet.light))
+                let depthTint = max(0, min(1, (facet.depth + 0.8) / 1.6))
+                let color = Color(
+                    hue: 0.48 + depthTint * 0.10,
+                    saturation: 0.78,
+                    brightness: 0.42 + light * 0.52
+                )
+                context.fill(triangle, with: .color(color.opacity(0.52 + light * 0.30)))
+                context.stroke(
+                    triangle,
+                    with: .color(.white.opacity(0.20 + light * 0.48)),
+                    lineWidth: 0.55
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.easeInOut(duration: 0.34), value: camera.crystalFacets3D.count)
+        .allowsHitTesting(false)
+    }
+
     private var guideLabel: String {
         switch camera.stage {
         case .idle, .scanningNear, .waitingFar, .scanningFar, .waitingAround, .scanningAround:
-            return camera.stage.isScanning
-                ? "QUÉT 3D AR • \(camera.scanViewpointCount)/8 GÓC"
-                : "CHỌN LOẠI • QUÉT 3D GẦN ĐÚNG"
+            if camera.stage.isScanning {
+                return camera.scanHasConfirmedTarget
+                    ? "KHỐI 3D • \(camera.scanViewpointCount)/8 MẶT"
+                    : "ĐANG XÁC NHẬN CHỦ THỂ"
+            }
+            return "CHỌN LOẠI • QUÉT 3D GẦN ĐÚNG"
         case .ready, .verifying, .lost:
             return "ĐẶT TÊN LỬA VÀO ĐÂY"
         case .tracking:
@@ -280,7 +327,11 @@ struct ContentView: View {
                             .lineLimit(2)
                             .minimumScaleFactor(0.78)
                         Spacer(minLength: 4)
-                        Text("\(camera.scanSampleCount)%")
+                        Text(
+                            camera.scanHasConfirmedTarget
+                                ? "\(camera.scanSampleCount)%"
+                                : "\(Int(camera.targetConfirmationProgress * 100))%"
+                        )
                             .font(.caption.monospacedDigit().bold())
                     }
                     Button(role: .cancel) {

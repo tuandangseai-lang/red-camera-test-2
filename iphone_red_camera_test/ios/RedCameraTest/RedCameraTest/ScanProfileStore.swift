@@ -7,6 +7,7 @@ struct SavedScanProfile: Codable, Equatable, Identifiable {
     let subjectKind: ScanSubjectKind
     let referenceImages: [Data]
     let surfacePointCount: Int
+    let voxelOccupancy: [Bool]?
 
     var shortName: String {
         name
