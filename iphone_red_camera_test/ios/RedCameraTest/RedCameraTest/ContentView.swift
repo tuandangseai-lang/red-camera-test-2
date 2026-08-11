@@ -109,7 +109,7 @@ struct ContentView: View {
                 }
 
                 if camera.stage == .tracking,
-                   camera.trackingPoints.count >= 2 {
+                   camera.targetRect != nil {
                     aiTrackingOverlay(in: geometry.size)
                 }
             }
@@ -182,52 +182,64 @@ struct ContentView: View {
     }
 
     private func aiTrackingOverlay(in size: CGSize) -> some View {
-        Canvas { context, _ in
-            let points = camera.trackingPoints.map { mappedPoint($0, in: size) }
-            guard points.count >= 2 else { return }
-            context.addFilter(.shadow(color: .cyan.opacity(0.9), radius: 6))
+        let rawRect = mappedRect(camera.targetRect ?? .zero, in: size)
+        // Cho vật nhỏ một vùng nhìn rõ tối thiểu, nhưng tâm và kích thước thực
+        // vẫn do detector/tracker quyết định chứ không còn tam giác đứng sai chỗ.
+        let box = CGRect(
+            x: rawRect.midX - max(20, rawRect.width / 2),
+            y: rawRect.midY - max(20, rawRect.height / 2),
+            width: max(40, rawRect.width),
+            height: max(40, rawRect.height)
+        ).insetBy(dx: -5, dy: -5)
+        let confidence = Int(max(0, min(1, camera.trackingConfidence)) * 100)
 
-            var links = Path()
-            links.move(to: points[0])
-            for point in points.dropFirst() { links.addLine(to: point) }
-            if points.count == 3 { links.addLine(to: points[0]) }
-            context.stroke(
-                links,
-                with: .color(.cyan.opacity(0.90)),
-                style: StrokeStyle(lineWidth: 2.6, lineCap: .round, lineJoin: .round)
-            )
+        return ZStack(alignment: .topLeading) {
+            Canvas { context, _ in
+                context.addFilter(.shadow(color: .green.opacity(0.92), radius: 5))
+                let corner = min(22.0, max(10.0, min(box.width, box.height) * 0.23))
+                var path = Path()
+                path.move(to: CGPoint(x: box.minX, y: box.minY + corner))
+                path.addLine(to: CGPoint(x: box.minX, y: box.minY))
+                path.addLine(to: CGPoint(x: box.minX + corner, y: box.minY))
+                path.move(to: CGPoint(x: box.maxX - corner, y: box.minY))
+                path.addLine(to: CGPoint(x: box.maxX, y: box.minY))
+                path.addLine(to: CGPoint(x: box.maxX, y: box.minY + corner))
+                path.move(to: CGPoint(x: box.maxX, y: box.maxY - corner))
+                path.addLine(to: CGPoint(x: box.maxX, y: box.maxY))
+                path.addLine(to: CGPoint(x: box.maxX - corner, y: box.maxY))
+                path.move(to: CGPoint(x: box.minX + corner, y: box.maxY))
+                path.addLine(to: CGPoint(x: box.minX, y: box.maxY))
+                path.addLine(to: CGPoint(x: box.minX, y: box.maxY - corner))
+                context.stroke(
+                    path,
+                    with: .color(.green),
+                    style: StrokeStyle(lineWidth: 3, lineCap: .square, lineJoin: .miter)
+                )
 
-            for (index, point) in points.enumerated() {
-                context.fill(
-                    Path(ellipseIn: CGRect(x: point.x - 8, y: point.y - 8, width: 16, height: 16)),
-                    with: .color(.cyan.opacity(0.20))
-                )
-                context.fill(
-                    Path(ellipseIn: CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8)),
-                    with: .color(index == 1 ? .white : .cyan)
-                )
+                if let predicted = camera.predictedTargetPoint {
+                    let target = mappedPoint(predicted, in: size)
+                    let center = CGPoint(x: box.midX, y: box.midY)
+                    var direction = Path()
+                    direction.move(to: center)
+                    direction.addLine(to: target)
+                    context.stroke(
+                        direction,
+                        with: .color(.yellow.opacity(0.90)),
+                        style: StrokeStyle(lineWidth: 1.8, lineCap: .round, dash: [5, 4])
+                    )
+                }
             }
 
-            if let predicted = camera.predictedTargetPoint {
-                let target = mappedPoint(predicted, in: size)
-                let center = CGPoint(
-                    x: points.map(\.x).reduce(0, +) / CGFloat(points.count),
-                    y: points.map(\.y).reduce(0, +) / CGFloat(points.count)
+            Text("WATER ROCKET  \(confidence)%")
+                .font(.system(size: 11, weight: .black, design: .monospaced))
+                .foregroundStyle(.black)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(Color.green)
+                .position(
+                    x: max(74, min(size.width - 74, box.minX + 74)),
+                    y: max(14, box.minY - 12)
                 )
-                var direction = Path()
-                direction.move(to: center)
-                direction.addLine(to: target)
-                context.stroke(
-                    direction,
-                    with: .color(.yellow.opacity(0.95)),
-                    style: StrokeStyle(lineWidth: 2.2, lineCap: .round, dash: [6, 4])
-                )
-                context.stroke(
-                    Path(ellipseIn: CGRect(x: target.x - 7, y: target.y - 7, width: 14, height: 14)),
-                    with: .color(.yellow),
-                    lineWidth: 2.2
-                )
-            }
         }
         .allowsHitTesting(false)
     }
@@ -275,7 +287,7 @@ struct ContentView: View {
                 Text(
                     camera.scanIsSufficient
                         ? "ĐÃ ĐỦ"
-                        : (camera.scanHasConfirmedTarget ? "6 GÓC" : "XÁC NHẬN")
+                        : (camera.scanHasConfirmedTarget ? "5 GÓC" : "XÁC NHẬN")
                 )
                     .font(.system(size: 9, weight: .bold))
             }
@@ -388,7 +400,7 @@ struct ContentView: View {
                     ? "MÔ HÌNH ĐA GÓC • \(camera.scanViewpointCount)/\(camera.referencePhotoTarget)"
                     : "CHẠM VÀO VẬT CẦN CHỤP"
             }
-            return "CHỌN LOẠI • TẠO MẪU 6 ẢNH"
+            return "CHỌN LOẠI • TẠO MẪU 5 ẢNH"
         case .ready, .verifying, .lost:
             return "ĐẶT TÊN LỬA VÀO ĐÂY"
         case .tracking:
@@ -680,18 +692,18 @@ struct ContentView: View {
     private var actionButtons: some View {
         switch camera.stage {
         case .idle:
-            primaryButton("Tạo mô hình 10 góc", systemImage: "camera.on.rectangle") {
+            primaryButton("Tạo mô hình 5 góc", systemImage: "camera.on.rectangle") {
                 camera.startShapeScan()
             }
             .disabled(!camera.isReady)
 
         case .waitingFar:
-            primaryButton("Tạo mô hình 10 góc", systemImage: "camera.on.rectangle") {
+            primaryButton("Tạo mô hình 5 góc", systemImage: "camera.on.rectangle") {
                 camera.startShapeScan()
             }
 
         case .waitingAround:
-            primaryButton("Tạo mô hình 10 góc", systemImage: "camera.on.rectangle") {
+            primaryButton("Tạo mô hình 5 góc", systemImage: "camera.on.rectangle") {
                 camera.startShapeScan()
             }
 
@@ -699,7 +711,7 @@ struct ContentView: View {
             primaryButton("Khóa, bám & quay", systemImage: "scope") {
                 camera.startTrackingAndRecording()
             }
-            secondaryButton("Tạo lại mô hình 10 góc", systemImage: "trash") {
+            secondaryButton("Tạo lại mô hình 5 góc", systemImage: "trash") {
                 camera.resetProfile()
             }
 

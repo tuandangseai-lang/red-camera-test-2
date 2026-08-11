@@ -224,7 +224,10 @@ final class CameraController: NSObject, ObservableObject {
     private let voxelColumns = 16
     private let voxelRows = 24
     private let voxelDepthLayers = 12
-    private let manualPhotoTarget = 10
+    // Model AI trong app đã biết hình dáng chung của tên lửa nước. Năm góc cá
+    // nhân chỉ dùng để nhận ra đúng chiếc tên lửa của người dùng, không bắt họ
+    // chụp lại quá nhiều ảnh của một lớp mà detector đã được huấn luyện sẵn.
+    private let manualPhotoTarget = 5
     // Lưới đủ mịn để viền không bị vuông nhưng vẫn nhẹ cho iPhone 15.
     private let selectionGridColumns = 48
     private let selectionGridRows = 84
@@ -272,7 +275,7 @@ final class CameraController: NSObject, ObservableObject {
             return
         }
         guard stage == .ready || stage == .lost else {
-            statusText = "Hãy tạo mẫu đủ 10 ảnh đa góc trước"
+            statusText = "Hãy tạo mẫu đủ 5 ảnh đa góc trước"
             return
         }
         startTrackingAndRecording()
@@ -351,7 +354,7 @@ final class CameraController: NSObject, ObservableObject {
         trackingConfidence = 0
         matchText = "Chưa có mẫu"
         activeProfileID = nil
-        statusText = "Chọn loại rồi bấm Tạo mẫu từ 10 ảnh"
+        statusText = "Chọn loại rồi bấm Tạo mẫu từ 5 ảnh"
         onEvent?("PROFILE_RESET")
     }
 
@@ -630,7 +633,7 @@ final class CameraController: NSObject, ObservableObject {
         detectedSubjectLabel = "Chưa phân loại"
         detectedSubjectConfidence = 0
         targetRect = rect
-        matchText = "CHƯA CHỌN VẬT • cần 10 ảnh đa góc"
+        matchText = "CHƯA CHỌN VẬT • cần 5 ảnh đa góc"
 
         videoQueue.async { [weak self] in
             guard let self else { return }
@@ -717,17 +720,17 @@ final class CameraController: NSObject, ObservableObject {
 
                 guard isComplete else {
                     self.stage = .idle
-                    self.matchText = "ĐÃ CHỤP \(self.scanReferenceImages.count)/10 ẢNH"
-                    self.statusText = "Chưa đủ mười góc nhìn; hãy chụp bổ sung"
+                    self.matchText = "ĐÃ CHỤP \(self.scanReferenceImages.count)/5 ẢNH"
+                    self.statusText = "Chưa đủ năm góc nhìn; hãy chụp bổ sung"
                     return
                 }
 
                 self.scanProgress = 0.8
                 self.scanIsSufficient = true
                 self.stage = .ready
-                self.matchText = "ĐÃ LƯU 6 GÓC • mẫu \(self.savedProfiles.count)/5"
-                self.statusText = "Đã ghép 10 ảnh thành mô hình đa góc. Có thể khóa và quay"
-                self.announce("Đã chụp đủ mười góc. Mô hình nhận diện đã sẵn sàng.", kind: .success)
+                self.matchText = "ĐÃ LƯU 5 GÓC • mẫu \(self.savedProfiles.count)/5"
+                self.statusText = "Đã ghép 5 ảnh với AI tên lửa nước. Có thể khóa và quay"
+                self.announce("Đã chụp đủ năm góc. Mô hình nhận diện đã sẵn sàng.", kind: .success)
                 self.onEvent?("SHAPE_SCAN_DONE")
             }
         }
@@ -948,6 +951,23 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    private func gridCells(in normalizedRect: CGRect) -> Set<Int> {
+        let clipped = normalizedRect.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard !clipped.isNull, clipped.width > 0, clipped.height > 0 else { return [] }
+        var result = Set<Int>()
+        for row in 0..<selectionGridRows {
+            let y = (CGFloat(row) + 0.5) / CGFloat(selectionGridRows)
+            guard y >= clipped.minY, y <= clipped.maxY else { continue }
+            for column in 0..<selectionGridColumns {
+                let x = (CGFloat(column) + 0.5) / CGFloat(selectionGridColumns)
+                if x >= clipped.minX, x <= clipped.maxX {
+                    result.insert(row * selectionGridColumns + column)
+                }
+            }
+        }
+        return result
+    }
+
     private func contourPoints(from cells: Set<Int>) -> [CGPoint] {
         guard cells.count >= 8 else { return [] }
         let locations = cells.map { index -> CGPoint in
@@ -1042,6 +1062,16 @@ final class CameraController: NSObject, ObservableObject {
         rect: CGRect,
         referenceJPEG: Data
     ) -> (kind: ScanSubjectKind, label: String, confidence: Double) {
+        // Hỏi detector chuyên dụng trước bộ phân loại chung. Nếu không làm vậy,
+        // bàn tay đang cầm chai rất dễ khiến Vision gọi cả vùng là "người".
+        if let rocket = aiDetector.detect(
+            in: pixelBuffer,
+            orientation: .up,
+            minimumConfidence: 0.12
+        ).first(where: { intersectionOverUnion($0.rect, rect) >= 0.12 }) {
+            return (.object, "tên lửa nước", rocket.confidence)
+        }
+
         let visionRect = CGRect(
             x: rect.minX,
             y: 1.0 - rect.maxY,
@@ -1152,6 +1182,32 @@ final class CameraController: NSObject, ObservableObject {
                     if bitmap[maskRow * selectionGridColumns + column] > 48 {
                         cells.insert(visualRow * selectionGridColumns + column)
                     }
+                }
+            }
+
+            // Với lớp tên lửa nước đã học sẵn, dùng hộp AI để cắt bớt tay và
+            // nền ngay từ lúc người dùng chọn mẫu. Vision vẫn cung cấp viền mềm,
+            // còn AI chỉ giới hạn đúng vùng của tên lửa ở tâm.
+            let centeredRocket = aiDetector.detect(
+                in: pixelBuffer,
+                orientation: .up,
+                minimumConfidence: 0.12
+            ).first { detection in
+                let expanded = detection.rect.insetBy(dx: -0.035, dy: -0.035)
+                let containsTap = expanded.contains(point)
+                let centerDistance = hypot(
+                    detection.rect.midX - 0.5,
+                    detection.rect.midY - 0.5
+                )
+                return containsTap || centerDistance < 0.23
+            }
+            if let centeredRocket {
+                let rocketArea = gridCells(
+                    in: centeredRocket.rect.insetBy(dx: -0.025, dy: -0.025)
+                )
+                let focusedRocket = cells.intersection(rocketArea)
+                if focusedRocket.count >= 18 {
+                    cells = focusedRocket
                 }
             }
 
@@ -1352,18 +1408,13 @@ final class CameraController: NSObject, ObservableObject {
     private func nextReferenceGuidance(after capturedCount: Int) -> String {
         let instructions = [
             "mặt trước chính diện",
-            "xoay phải khoảng 45°",
-            "mặt bên phải",
-            "xoay sau-phải",
+            "xoay phải khoảng 60°",
             "mặt sau chính diện",
-            "xoay sau-trái",
-            "mặt bên trái",
-            "xoay trước-trái",
-            "nghiêng nhẹ nhìn từ trên",
-            "nghiêng nhẹ nhìn từ dưới"
+            "xoay trái khoảng 60°",
+            "nghiêng nhẹ để thấy mũi và cánh"
         ]
-        guard capturedCount < instructions.count else { return "Đã đủ 10 góc" }
-        return "Ảnh \(capturedCount + 1)/10 • \(instructions[capturedCount])"
+        guard capturedCount < instructions.count else { return "Đã đủ 5 góc" }
+        return "Ảnh \(capturedCount + 1)/5 • \(instructions[capturedCount])"
     }
 
     private func captureManualPhoto(
@@ -1446,12 +1497,12 @@ final class CameraController: NSObject, ObservableObject {
             self.scanProgress = self.shapeScanCoverage
             self.scanIsSufficient = sufficient
             self.scanNeedsNewAngle = false
-            self.matchText = "MÔ HÌNH ĐA GÓC • ĐÃ CHỤP \(count)/10"
+            self.matchText = "MÔ HÌNH ĐA GÓC • ĐÃ CHỤP \(count)/5"
             self.scanGuidanceText = sufficient
-                ? "Đã đủ 10 góc nhận diện"
+                ? "Đã đủ 5 góc nhận diện"
                 : self.nextReferenceGuidance(after: count)
             self.statusText = sufficient
-                ? "Đang ghép mười ảnh và tạo bộ bỏ phiếu đa góc..."
+                ? "Đang ghép năm ảnh với detector AI đã học sẵn..."
                 : "Giữ tâm vật ổn định; thay đổi góc theo hướng dẫn"
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             self.onEvent?("REFERENCE_PHOTO_\(count)")
@@ -2544,7 +2595,12 @@ final class CameraController: NSObject, ObservableObject {
         }
 
         let request = VNTrackObjectRequest(detectedObjectObservation: observation)
-        request.trackingLevel = .fast
+        // Khi tên lửa chỉ còn là một chấm nhỏ trên trời, tracker nhanh dễ bỏ
+        // qua vài pixel chuyển động. Chuyển sang mức chính xác và cho detector
+        // kiểm tra dày hơn; vật lớn vẫn giữ chế độ nhanh để đảm bảo 60 fps.
+        let observedArea = observation.boundingBox.width * observation.boundingBox.height
+        let isTinyTarget = observedArea < 0.0045
+        request.trackingLevel = (isTinyTarget || lowConfidenceFrames > 0) ? .accurate : .fast
 
         do {
             try sequenceHandler.perform([request], on: pixelBuffer, orientation: .up)
@@ -2573,7 +2629,9 @@ final class CameraController: NSObject, ObservableObject {
             if aiDetector.isAvailable {
                 // Detector chạy khoảng 15 lần/giây ở camera 60 fps. Tracker chạy
                 // các frame xen giữa; khi tracker yếu, detector được gọi ngay.
-                let shouldRunDetector = trackingFrameCounter % 4 == 0 || lowConfidenceFrames > 0
+                let shouldRunDetector = isTinyTarget
+                    || trackingFrameCounter % 4 == 0
+                    || lowConfidenceFrames > 0
                 if shouldRunDetector {
                     let expectedRect = motionFilter.isInitialized
                         ? motionFilter.estimate(at: CACurrentMediaTime()).filteredRect
@@ -2614,7 +2672,9 @@ final class CameraController: NSObject, ObservableObject {
                     trackingObservation = result
                 }
 
-                if lowConfidenceFrames >= 5 && aiDetectionMisses >= 2 {
+                // Cho Kalman/Vision gần 0,25 giây để vượt qua nhòe chuyển động,
+                // cột/cành cây hoặc thời điểm dù vừa bung rồi mới tuyên bố mất.
+                if lowConfidenceFrames >= 14 && aiDetectionMisses >= 6 {
                     markTargetLost()
                     return
                 }
