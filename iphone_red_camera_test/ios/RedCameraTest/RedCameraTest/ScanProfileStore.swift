@@ -6,7 +6,7 @@ struct SavedScanProfile: Codable, Equatable, Identifiable {
     let createdAt: Date
     let subjectKind: ScanSubjectKind
     let referenceImages: [Data]
-    /// Ảnh crop thật từ 7 góc và các khung đại diện của video 5 giây. Dùng cho
+    /// Ảnh crop thật từ 7 góc và các khung đại diện của video 10 giây. Dùng cho
     /// nhánh nhận diện cá nhân cùng với model tên lửa/chai có sẵn.
     let contextImages: [Data]?
     let surfacePointCount: Int

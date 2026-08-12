@@ -627,7 +627,7 @@ struct ContentView: View {
                         .disabled(camera.isCapturingReferenceVideo)
                         .accessibilityLabel(
                             camera.scanViewpointCount >= camera.referencePhotoTarget
-                                ? "Quay video mẫu 5 giây"
+                                ? "Quay video mẫu 10 giây"
                                 : "Chụp ảnh mẫu"
                         )
 

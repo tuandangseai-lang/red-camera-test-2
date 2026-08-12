@@ -185,10 +185,10 @@ final class CameraController: NSObject, ObservableObject {
     private let aiAcquisitionConfidence = 0.42
     private let aiReacquisitionConfidence = 0.16
     private let aiContinuationConfidence = 0.12
-    /// Một ngưỡng thống nhất cho cả bám và bắt lại. Dưới ngưỡng: ESP32 tìm ngay.
-    /// Từ ngưỡng trở lên: khóa ngay và phát TARGET_LOCKED để servo dừng trong frame đó.
-    private let hardTrackingConfidence = 0.75
-    private let immediateReacquisitionSimilarity = 0.75
+    /// Một ngưỡng thống nhất cho cả bám và bắt lại. Dưới 60%: ESP32 tìm ngay.
+    /// Từ 60% trở lên: tiếp tục bám hoặc khóa lại nếu đã qua cổng chống phản chiếu.
+    private let hardTrackingConfidence = 0.60
+    private let immediateReacquisitionSimilarity = 0.60
 
     private var videoDevice: AVCaptureDevice?
     private var ultraWideDeviceZoomFactor: CGFloat = 1.0
@@ -196,6 +196,8 @@ final class CameraController: NSObject, ObservableObject {
     private var ultraWideDisplayZoomFactor: CGFloat = 0.5
     private var mainDisplayZoomFactor: CGFloat = 0.98
     private var isZoomedIn = false
+    private var hasCompletedOneTimeZoom = false
+    private var activeTrackingPreparationID = UUID()
     private var didRequestStart = false
     private var configured = false
     private var pendingArm = false
@@ -270,8 +272,8 @@ final class CameraController: NSObject, ObservableObject {
     // nhân dùng để nhận ra đúng chiếc tên lửa của người dùng ở sáu hướng và xa.
     // Sáu hướng quanh vật cộng thêm một ảnh xa để nhận lại khi tên lửa nhỏ.
     private let manualPhotoTarget = 7
-    private let referenceVideoDuration: TimeInterval = 5.0
-    private let referenceVideoTargetFrames = 12
+    private let referenceVideoDuration: TimeInterval = 10.0
+    private let referenceVideoTargetFrames = 24
     // Lưới đủ mịn để viền không bị vuông nhưng vẫn nhẹ cho iPhone 15.
     private let selectionGridColumns = 96
     private let selectionGridRows = 168
@@ -525,9 +527,9 @@ final class CameraController: NSObject, ObservableObject {
         referenceVideoFrameCount = 0
         scanIsSufficient = false
         scanNeedsNewAngle = false
-        scanGuidanceText = "Quay vật từ từ quanh vòng tròn trong 5 giây"
-        matchText = "VIDEO MẪU 0,0/5,0 GIÂY"
-        statusText = "AI sẽ tự lấy nhiều khung chai và ghép với 7 ảnh đã chụp"
+        scanGuidanceText = "Quay vật từ từ quanh vòng tròn trong 10 giây"
+        matchText = "VIDEO MẪU 0,0/10,0 GIÂY"
+        statusText = "AI sẽ lấy 24 khung và ghép với 7 ảnh đã chụp"
         videoQueue.async { [weak self] in
             guard let self else { return }
             self.referenceVideoStartedAt = CACurrentMediaTime()
@@ -535,7 +537,7 @@ final class CameraController: NSObject, ObservableObject {
             self.capturedReferenceVideoFrames = 0
             self.lastReferenceVideoRect = nil
         }
-        announce("Bắt đầu video mẫu. Hãy quay vật từ từ trong năm giây.", kind: .start)
+        announce("Bắt đầu video mẫu. Hãy quay vật từ từ trong mười giây.", kind: .start)
         onEvent?("REFERENCE_VIDEO_START")
     }
 
@@ -630,23 +632,38 @@ final class CameraController: NSObject, ObservableObject {
     func startTrackingAndRecording() {
         guard isReady, !isRecording, (stage == .ready || stage == .lost) else { return }
         isStopRequested = false
-        onEvent?("TRACKING_STARTED")
+        hasCompletedOneTimeZoom = false
+        activeTrackingPreparationID = UUID()
+        let preparationID = activeTrackingPreparationID
         let fullFrame = CGRect(x: 0, y: 0, width: 1, height: 1)
         let recordAfterLock = !isRecording
+        let preparationReferenceImages = activeProfileID
+            .flatMap { id in savedProfiles.first(where: { $0.id == id })?.referenceImages }
+            ?? scanReferenceImages
+        let preparationContextImages = activeProfileID
+            .flatMap { id in savedProfiles.first(where: { $0.id == id })?.contextImages }
+            ?? scanContextImages
         stage = .verifying
         targetRect = nil
         trackingPoints = []
         predictedTargetPoint = nil
         trackingConfidence = 0
-        matchText = usesRocketSpecificDetector && aiDetector.isAvailable
-            ? "YOLO Core ML đang xác nhận tên lửa trên toàn màn hình..."
-            : "Vision đang đối chứng \(scanSubjectKind.title) + bộ ảnh/video cá nhân..."
-        statusText = usesRocketSpecificDetector && aiDetector.isAvailable
-            ? "AI tên lửa + tracker + dự đoán quỹ đạo đang hoạt động"
-            : "Đang phân loại đúng loại và đối chiếu đa góc trước khi khóa"
+        matchText = "ĐANG GHÉP ẢNH + VIDEO + AI • 3 GIÂY"
+        statusText = "Chờ 3 giây để hợp nhất dữ liệu nhận diện trước khi quay"
+        announce("Đang ghép dữ liệu nhận diện. Bắt đầu tìm mục tiêu sau ba giây.", kind: .start)
 
         videoQueue.async { [weak self] in
             guard let self else { return }
+            // Chủ động dựng lại kho đặc trưng từ toàn bộ ảnh + 24 khung video.
+            // Công việc này chạy trong khoảng chờ 3 giây trước khi mở detector.
+            let rebuiltFeatures = preparationReferenceImages.compactMap {
+                self.featurePrint(fromJPEGData: $0)
+            }
+            if !rebuiltFeatures.isEmpty { self.featureSamples = rebuiltFeatures }
+            let rebuiltContexts = preparationContextImages.compactMap {
+                self.featurePrint(fromJPEGData: $0)
+            }
+            if !rebuiltContexts.isEmpty { self.contextFeatureSamples = rebuiltContexts }
             self.processingRect = fullFrame
             self.featureFrameCounter = 0
             self.aiDetectionMisses = 0
@@ -660,7 +677,20 @@ final class CameraController: NSObject, ObservableObject {
             self.clearPendingAIDetection()
             self.clearRecoveryState()
             self.shouldRecordAfterVerification = recordAfterLock
-            self.processingMode = .verifying
+            self.processingMode = .idle
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            guard let self,
+                  !self.isStopRequested,
+                  self.activeTrackingPreparationID == preparationID else { return }
+            self.onEvent?("TRACKING_STARTED")
+            self.matchText = self.usesRocketSpecificDetector && self.aiDetector.isAvailable
+                ? "AI + ảnh/video cá nhân đang tìm tên lửa..."
+                : "Vision + ảnh/video cá nhân đang tìm \(self.scanSubjectKind.title.lowercased())..."
+            self.statusText = "Đã hợp nhất dữ liệu • đang khóa mục tiêu để bắt đầu quay"
+            self.videoQueue.async { [weak self] in
+                self?.processingMode = .verifying
+            }
         }
     }
 
@@ -706,6 +736,7 @@ final class CameraController: NSObject, ObservableObject {
     func stopRecording() {
         // Dừng UI và servo ngay khi chạm nút, không đợi movieOutput ghi xong file.
         isStopRequested = true
+        activeTrackingPreparationID = UUID()
         cancelZoomSequence()
         voiceNotifier.stop()
         stage = .ready
@@ -884,7 +915,7 @@ final class CameraController: NSObject, ObservableObject {
                 self.scanIsSufficient = true
                 self.stage = .ready
                 self.matchText = "7 ẢNH + VIDEO \(self.capturedReferenceVideoFrames) KHUNG • mẫu \(self.savedProfiles.count)/5"
-                self.statusText = "Đã liên kết AI có sẵn, bộ ảnh và video 5 giây. Có thể khóa và quay"
+                self.statusText = "Đã liên kết AI có sẵn, bộ ảnh và video 10 giây. Có thể khóa và quay"
                 self.announce("Đã ghép bộ ảnh và video mẫu. Mô hình nhận diện đã sẵn sàng.", kind: .success)
                 self.onEvent?("SHAPE_SCAN_DONE")
             }
@@ -1790,7 +1821,7 @@ final class CameraController: NSObject, ObservableObject {
             capturedReferencePhotoCount + 1
         )
         let count = capturedReferencePhotoCount
-        // 7 ảnh chiếm 70% tiến trình; video mẫu 5 giây hoàn tất 30% cuối.
+        // 7 ảnh chiếm 70% tiến trình; video mẫu 10 giây hoàn tất 30% cuối.
         shapeScanCoverage = Double(count) / Double(manualPhotoTarget) * 0.70
         let coveragePercent = Int((shapeScanCoverage * 100).rounded())
         let photosComplete = count >= manualPhotoTarget
@@ -1814,7 +1845,7 @@ final class CameraController: NSObject, ObservableObject {
             self.scanNeedsNewAngle = false
             self.matchText = "ĐÃ XÁC NHẬN \(reference.label.uppercased()) \(Int(reference.confidence * 100))% • \(count)/7"
             self.scanGuidanceText = photosComplete
-                ? "Đã đủ 7 ảnh • bấm nút video và quay quanh vật 5 giây"
+                ? "Đã đủ 7 ảnh • bấm nút video và quay quanh vật 10 giây"
                 : self.nextReferenceGuidance(after: count)
             self.statusText = photosComplete
                 ? "Bước cuối: video quanh vật sẽ bổ sung góc chuyển tiếp cho AI"
@@ -1834,7 +1865,7 @@ final class CameraController: NSObject, ObservableObject {
         let elapsed = max(0, now - startedAt)
         let progress = min(1, elapsed / referenceVideoDuration)
 
-        // Lấy tối đa khoảng 12 frame trong 5 giây. Mỗi frame phải đúng loại
+        // Lấy tối đa khoảng 24 frame trong 10 giây. Mỗi frame phải đúng loại
         // Người / Thú / Vật đã chọn; tên lửa dạng chai dùng model chuyên dụng.
         if now - lastReferenceVideoSampleAt >= 0.38,
            capturedReferenceVideoFrames < referenceVideoTargetFrames,
@@ -1876,7 +1907,7 @@ final class CameraController: NSObject, ObservableObject {
             self.scanProgress = self.shapeScanCoverage
             self.scanSampleCount = Int((self.shapeScanCoverage * 100).rounded())
             self.matchText = String(
-                format: "VIDEO MẪU %.1f/5,0 GIÂY • %d KHUNG AI",
+                format: "VIDEO MẪU %.1f/10,0 GIÂY • %d KHUNG AI",
                 min(self.referenceVideoDuration, elapsed),
                 frameCount
             )
@@ -1893,7 +1924,7 @@ final class CameraController: NSObject, ObservableObject {
             self.isCapturingReferenceVideo = false
             self.referenceVideoProgress = 1
             self.scanIsSufficient = true
-            self.scanGuidanceText = "Đã ghép 7 ảnh + video 5 giây"
+            self.scanGuidanceText = "Đã ghép 7 ảnh + video 10 giây"
             self.statusText = "AI đã liên kết model có sẵn, bộ ảnh và video vật mới"
             self.announce("Video mẫu hoàn tất. Mô hình nhận diện đã sẵn sàng.", kind: .success)
             self.onEvent?("REFERENCE_VIDEO_DONE")
@@ -2399,7 +2430,7 @@ final class CameraController: NSObject, ObservableObject {
 
         /// Quy đổi khoảng cách FeaturePrint về 0...1 để toàn bộ pipeline dùng
         /// chung một thang phần trăm. Nhiều góc cùng bỏ phiếu được cộng nhẹ,
-        /// nhưng không một ảnh đơn lẻ nào được phép đẩy kết quả vượt 75%.
+        /// nhưng không một ảnh đơn lẻ nào được phép tự quyết định kết quả.
         var similarity: Double {
             let distanceScore = max(0, min(1, 1 - Double(score / 100)))
             let bestScore = max(0, min(1, 1 - Double(bestDistance / 80)))
@@ -2630,6 +2661,39 @@ final class CameraController: NSObject, ObservableObject {
             return candidates
         } catch {
             return []
+        }
+    }
+
+    /// Ảnh phản chiếu trên bảng/màn hình thường có hộp YOLO nhưng không tạo ra
+    /// một khối tiền cảnh có kích thước tương ứng. Tên lửa rất nhỏ được miễn
+    /// cổng này vì Vision không thể tách ổn định vật chỉ vài pixel trên trời.
+    private func hasIndependentForegroundSupport(
+        for rect: CGRect,
+        in pixelBuffer: CVPixelBuffer,
+        candidates precomputedCandidates: [ForegroundCandidate]? = nil
+    ) -> Bool {
+        let area = rect.width * rect.height
+        if area < 0.0035 { return true }
+        let candidates = precomputedCandidates ?? foregroundCandidates(
+            from: pixelBuffer,
+            includeFeaturePrints: false
+        )
+        return candidates.contains { candidate in
+            let overlap = intersectionOverUnion(candidate.rect, rect)
+            let distance = hypot(
+                candidate.rect.midX - rect.midX,
+                candidate.rect.midY - rect.midY
+            )
+            let candidateArea = max(0.00001, candidate.rect.width * candidate.rect.height)
+            let targetArea = max(0.00001, area)
+            let areaRatio = max(candidateArea, targetArea) / min(candidateArea, targetArea)
+            let candidateAspect = candidate.rect.width / max(0.0001, candidate.rect.height)
+            let targetAspect = rect.width / max(0.0001, rect.height)
+            let aspectRatio = max(candidateAspect, targetAspect)
+                / max(0.0001, min(candidateAspect, targetAspect))
+            return (overlap >= 0.10 || distance <= max(0.06, max(rect.width, rect.height) * 0.55))
+                && areaRatio <= 3.0
+                && aspectRatio <= 2.3
         }
     }
 
@@ -3157,24 +3221,26 @@ final class CameraController: NSObject, ObservableObject {
                     && (0.045...0.955).contains(centre.y)
             }
             if isRecoveringLostTarget {
-                // Khi đã bám đúng mục tiêu trước đó, detector chuyên tên lửa là đường
-                // cứu nhanh. Không chạy feature-print đa góc nặng trên từng frame nữa.
-                // Nhãn tên lửa được ưu tiên hơn nhãn bottle chung của COCO.
-                return onScreen.max { lhs, rhs in
-                    func recoveryScore(_ detection: WaterRocketDetection) -> Double {
-                        let genericBottle = detection.label
-                            .lowercased()
-                            .contains("bottle")
-                        let rocketBoost = genericBottle ? 0.0 : 0.24
-                        let centre = CGPoint(
-                            x: detection.rect.midX,
-                            y: detection.rect.midY
-                        )
-                        let centrePenalty = hypot(centre.x - 0.5, centre.y - 0.5) * 0.04
-                        return detection.confidence + rocketBoost - centrePenalty
-                    }
-                    return recoveryScore(lhs) < recoveryScore(rhs)
+                // Không khóa lại chỉ bằng nhãn YOLO. Ứng viên phải giống bộ ảnh/video
+                // cá nhân và là vật tiền cảnh thật, nhờ vậy ảnh chai phản trên bảng bị loại.
+                let foreground = foregroundCandidates(
+                    from: pixelBuffer,
+                    includeFeaturePrints: false
+                )
+                let verified = onScreen.compactMap { detection -> (WaterRocketDetection, Double)? in
+                    let similarity = personalizedSimilarity(
+                        in: pixelBuffer,
+                        rect: detection.rect
+                    ) ?? 0
+                    guard similarity >= immediateReacquisitionSimilarity,
+                          hasIndependentForegroundSupport(
+                            for: detection.rect,
+                            in: pixelBuffer,
+                            candidates: foreground
+                          ) else { return nil }
+                    return (detection, similarity * 0.72 + detection.confidence * 0.28)
                 }
+                return verified.max { $0.1 < $1.1 }?.0
             }
             return bestIdentityAlignedDetection(
                 among: onScreen,
@@ -3269,7 +3335,7 @@ final class CameraController: NSObject, ObservableObject {
             if shouldStartRecording {
                 self.beginRecording()
             } else if self.isRecording {
-                self.scheduleZoomSequence(after: 2.0)
+                self.scheduleZoomSequence(after: 0.5)
             }
         }
     }
@@ -3305,16 +3371,19 @@ final class CameraController: NSObject, ObservableObject {
             for: detection.rect,
             in: pixelBuffer
         ) != nil
-        // Model chai chung bắt buộc phải giống bộ ảnh/video cá nhân. Model tên lửa
-        // chuyên dụng được lấy điểm cao hơn giữa model và bộ mẫu cá nhân.
-        let reacquisitionSimilarity = isGenericBottle
-            ? personalSimilarity
-            : max(detection.confidence, personalSimilarity)
+        // Khi bắt lại, mọi nhãn (kể cả tên lửa chuyên dụng) đều phải giống bộ
+        // ảnh/video cá nhân. Không cho ảnh phản chiếu đi đường tắt bằng điểm YOLO.
+        let reacquisitionSimilarity = personalSimilarity
         if isRecoveringLostTarget {
+            // Sau 0,3 giây bestAIDetection đã kiểm tra tiền cảnh một lần cho toàn
+            // bộ ứng viên; chỉ kiểm tra tại đây trong đoạn ưu tiên quỹ đạo ban đầu.
+            let foregroundSupported = expectedRect == nil
+                || hasIndependentForegroundSupport(for: detection.rect, in: pixelBuffer)
             guard categoryIsCorrect,
+                  foregroundSupported,
                   reacquisitionSimilarity >= immediateReacquisitionSimilarity else {
                 publishSearchProgress(
-                    message: "Đang đối chứng \(scanSubjectKind.title) • \(Int(reacquisitionSimilarity * 100))% / cần 75%"
+                    message: "Đang đối chứng vật thật • \(Int(reacquisitionSimilarity * 100))% / cần 60%"
                 )
                 return true
             }
@@ -3323,7 +3392,7 @@ final class CameraController: NSObject, ObservableObject {
                 trianglePoints: representativeTrackingPoints(in: detection.rect),
                 confidence: reacquisitionSimilarity,
                 matchDescription: "BẮT LẠI NGAY • KHỚP \(Int(reacquisitionSimilarity * 100))%",
-                statusDescription: "Đã đạt 75% — ESP32 dừng tìm và bám lại ngay"
+                statusDescription: "Đã đạt 60% và không phải ảnh phản chiếu — ESP32 bám lại"
             )
             return true
         }
@@ -3505,7 +3574,7 @@ final class CameraController: NSObject, ObservableObject {
            score < immediateReacquisitionSimilarity {
             publishSearchProgress(
                 message: String(
-                    format: "Đang đối chứng %@ • %.0f%% / cần 75%%",
+                    format: "Đang đối chứng %@ • %.0f%% / cần 60%%",
                     scanSubjectKind.title,
                     score * 100
                 )
@@ -3513,7 +3582,7 @@ final class CameraController: NSObject, ObservableObject {
             return
         }
 
-        // Khi đang cứu mục tiêu, một ứng viên khớp >=75% dừng servo ngay;
+        // Khi đang cứu mục tiêu, một ứng viên khớp >=60% dừng servo ngay;
         // không chờ bộ đếm nhiều frame khiến tên lửa đã đi qua vị trí đó.
         if isRecoveringLostTarget,
            score >= immediateReacquisitionSimilarity {
@@ -3522,7 +3591,7 @@ final class CameraController: NSObject, ObservableObject {
                 trianglePoints: candidate.trianglePoints,
                 confidence: score,
                 matchDescription: String(format: "BẮT LẠI NGAY • KHỚP %.0f%%", score * 100),
-                statusDescription: "Đã đạt 75% — ESP32 dừng tìm và bám lại ngay"
+                statusDescription: "Đã đạt 60% — ESP32 dừng tìm và bám lại ngay"
             )
             return
         }
@@ -3579,7 +3648,7 @@ final class CameraController: NSObject, ObservableObject {
             }
             trackingFrameCounter += 1
 
-            // Dưới 75% là tracker không còn đủ chắc để điều khiển servo theo vật.
+            // Dưới 60% là tracker không còn đủ chắc để điều khiển servo theo vật.
             // Chuyển sang tái tìm ngay và dùng Kalman cuối cho lệnh quỹ đạo.
             if Double(result.confidence) < hardTrackingConfidence {
                 markTargetLost()
@@ -3782,10 +3851,8 @@ final class CameraController: NSObject, ObservableObject {
                 let isNearEdge = !(0.12...0.88).contains(predictedPoint.x)
                     || !(0.10...0.90).contains(predictedPoint.y)
                 if self.isZoomedIn && isNearEdge {
+                    self.hasCompletedOneTimeZoom = true
                     self.returnToUltraWide()
-                    if self.isRecording {
-                        self.scheduleZoomSequence(after: 1.5)
-                    }
                 }
             }
         } catch {
@@ -3869,7 +3936,8 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
-    private func scheduleZoomSequence(after delay: TimeInterval = 5.0) {
+    private func scheduleZoomSequence(after delay: TimeInterval = 0.5) {
+        guard !hasCompletedOneTimeZoom else { return }
         cancelZoomSequence()
 
         let zoomIn = DispatchWorkItem { [weak self] in
@@ -3880,7 +3948,7 @@ final class CameraController: NSObject, ObservableObject {
                   (0.20...0.80).contains(target.midX),
                   (0.18...0.82).contains(target.midY) else {
                 self.zoomText = "0.5× • chờ mục tiêu vào giữa"
-                self.scheduleZoomSequence(after: 0.5)
+                self.scheduleZoomSequence(after: 0.35)
                 return
             }
 
@@ -3895,10 +3963,16 @@ final class CameraController: NSObject, ObservableObject {
 
             let finished = DispatchWorkItem { [weak self] in
                 guard let self, self.isRecording else { return }
-                self.zoomText = String(format: "%.2f×", self.mainDisplayZoomFactor)
+                self.hasCompletedOneTimeZoom = true
+                self.isZoomedIn = false
+                self.zoomText = String(format: "%.1f× • đã zoom xong", self.ultraWideDisplayZoomFactor)
+                self.onEvent?("CAMERA_ULTRAWIDE")
+                self.rampZoom(to: self.ultraWideDeviceZoomFactor, rate: 1.8)
             }
             self.zoomFinishedWorkItem = finished
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: finished)
+            // Khoảng 1,3 giây ramp đến 0,98×, giữ ổn định 3 giây, rồi trở về
+            // 0,5× và không zoom thêm lần nào trong video hiện tại.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.5, execute: finished)
         }
 
         zoomInWorkItem = zoomIn
@@ -4618,7 +4692,7 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
                 }
             } else {
                 // Người / Thú / Vật dùng Vision phân loại + bộ ảnh/video cá nhân.
-                // Khi đang tìm lại, chạy mỗi frame để ứng viên >=75% khóa tức thì.
+                // Khi đang tìm lại, chạy mỗi frame để ứng viên >=60% khóa tức thì.
                 let categoryStride = isRecoveringLostTarget ? 1 : 4
                 if featureFrameCounter % categoryStride == 0 {
                     verifyAndLock(pixelBuffer: pixelBuffer)
