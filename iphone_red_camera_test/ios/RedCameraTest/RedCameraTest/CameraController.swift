@@ -95,6 +95,9 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var crystalFacets3D: [CrystalFacet3D] = []
     @Published private(set) var crystalCoverage = 0.0
     @Published private(set) var scanViewpointCount = 0
+    @Published private(set) var isCapturingReferenceVideo = false
+    @Published private(set) var referenceVideoProgress = 0.0
+    @Published private(set) var referenceVideoFrameCount = 0
     @Published private(set) var surfacePointCount = 0
     @Published private(set) var scanHasConfirmedTarget = false
     @Published private(set) var targetConfirmationProgress = 0.0
@@ -239,6 +242,11 @@ final class CameraController: NSObject, ObservableObject {
     private var selectedSubjectPoint = CGPoint(x: 0.5, y: 0.5)
     private var manualSelectionRequested = false
     private var manualCaptureRequested = false
+    private var capturedReferencePhotoCount = 0
+    private var referenceVideoStartedAt: TimeInterval?
+    private var lastReferenceVideoSampleAt: TimeInterval = 0
+    private var capturedReferenceVideoFrames = 0
+    private var lastReferenceVideoRect: CGRect?
     private var lastARScanAt = 0.0
     private let requiredAzimuthBins = 8
     private let totalAzimuthBins = 10
@@ -249,6 +257,8 @@ final class CameraController: NSObject, ObservableObject {
     // nhân dùng để nhận ra đúng chiếc tên lửa của người dùng ở sáu hướng và xa.
     // Sáu hướng quanh vật cộng thêm một ảnh xa để nhận lại khi tên lửa nhỏ.
     private let manualPhotoTarget = 7
+    private let referenceVideoDuration: TimeInterval = 5.0
+    private let referenceVideoTargetFrames = 12
     // Lưới đủ mịn để viền không bị vuông nhưng vẫn nhẹ cho iPhone 15.
     private let selectionGridColumns = 96
     private let selectionGridRows = 168
@@ -365,6 +375,9 @@ final class CameraController: NSObject, ObservableObject {
         crystalFacets3D = []
         crystalCoverage = 0
         scanViewpointCount = 0
+        isCapturingReferenceVideo = false
+        referenceVideoProgress = 0
+        referenceVideoFrameCount = 0
         surfacePointCount = 0
         scanHasConfirmedTarget = false
         targetConfirmationProgress = 0
@@ -405,6 +418,11 @@ final class CameraController: NSObject, ObservableObject {
             self.voxelOccupancy.removeAll()
             self.manualSelectionRequested = false
             self.manualCaptureRequested = false
+            self.capturedReferencePhotoCount = 0
+            self.referenceVideoStartedAt = nil
+            self.lastReferenceVideoSampleAt = 0
+            self.capturedReferenceVideoFrames = 0
+            self.lastReferenceVideoRect = nil
         }
         stage = .idle
         scanProgress = 0
@@ -418,6 +436,9 @@ final class CameraController: NSObject, ObservableObject {
         crystalFacets3D = []
         crystalCoverage = 0
         scanViewpointCount = 0
+        isCapturingReferenceVideo = false
+        referenceVideoProgress = 0
+        referenceVideoFrameCount = 0
         surfacePointCount = 0
         scanHasConfirmedTarget = false
         targetConfirmationProgress = 0
@@ -451,12 +472,40 @@ final class CameraController: NSObject, ObservableObject {
 
     func captureManualReferencePhoto() {
         guard stage.isScanning, !isRecording else { return }
+        guard !isCapturingReferenceVideo else { return }
+        if scanViewpointCount >= manualPhotoTarget {
+            startReferenceVideoCapture()
+            return
+        }
         scanNeedsNewAngle = false
         scanGuidanceText = "AI đang tìm chai trong ảnh..."
         videoQueue.async { [weak self] in
             guard let self, !self.manualCaptureRequested else { return }
             self.manualCaptureRequested = true
         }
+    }
+
+    func startReferenceVideoCapture() {
+        guard stage.isScanning,
+              scanViewpointCount >= manualPhotoTarget,
+              !isCapturingReferenceVideo else { return }
+        isCapturingReferenceVideo = true
+        referenceVideoProgress = 0
+        referenceVideoFrameCount = 0
+        scanIsSufficient = false
+        scanNeedsNewAngle = false
+        scanGuidanceText = "Quay vật từ từ quanh vòng tròn trong 5 giây"
+        matchText = "VIDEO MẪU 0,0/5,0 GIÂY"
+        statusText = "AI sẽ tự lấy nhiều khung chai và ghép với 7 ảnh đã chụp"
+        videoQueue.async { [weak self] in
+            guard let self else { return }
+            self.referenceVideoStartedAt = CACurrentMediaTime()
+            self.lastReferenceVideoSampleAt = 0
+            self.capturedReferenceVideoFrames = 0
+            self.lastReferenceVideoRect = nil
+        }
+        announce("Bắt đầu video mẫu. Hãy quay vật từ từ trong năm giây.", kind: .start)
+        onEvent?("REFERENCE_VIDEO_START")
     }
 
     func activateProfile(_ profile: SavedScanProfile) {
@@ -718,6 +767,11 @@ final class CameraController: NSObject, ObservableObject {
             self.voxelOccupancy.removeAll()
             self.manualSelectionRequested = false
             self.manualCaptureRequested = false
+            self.capturedReferencePhotoCount = 0
+            self.referenceVideoStartedAt = nil
+            self.lastReferenceVideoSampleAt = 0
+            self.capturedReferenceVideoFrames = 0
+            self.lastReferenceVideoRect = nil
             self.estimatedObjectCenter = nil
             self.featureFrameCounter = 0
             self.lastShapeScanAt = 0
@@ -778,12 +832,12 @@ final class CameraController: NSObject, ObservableObject {
                     return
                 }
 
-                self.scanProgress = 0.8
+                self.scanProgress = 1.0
                 self.scanIsSufficient = true
                 self.stage = .ready
-                self.matchText = "ĐÃ LƯU 7 ẢNH • mẫu \(self.savedProfiles.count)/5"
-                self.statusText = "Đã ghép 6 hướng và một ảnh xa. Có thể khóa và quay"
-                self.announce("Đã chụp đủ bảy ảnh. Mô hình nhận diện đã sẵn sàng.", kind: .success)
+                self.matchText = "7 ẢNH + VIDEO \(self.capturedReferenceVideoFrames) KHUNG • mẫu \(self.savedProfiles.count)/5"
+                self.statusText = "Đã liên kết AI có sẵn, bộ ảnh và video 5 giây. Có thể khóa và quay"
+                self.announce("Đã ghép bộ ảnh và video mẫu. Mô hình nhận diện đã sẵn sàng.", kind: .success)
                 self.onEvent?("SHAPE_SCAN_DONE")
             }
         }
@@ -1628,17 +1682,15 @@ final class CameraController: NSObject, ObservableObject {
         }
         confirmedTargetCells = selection.cells
 
-        let count = min(manualPhotoTarget, scanReferenceImages.count)
-        shapeScanCoverage = min(
-            0.8,
-            Double(count) / Double(manualPhotoTarget) * 0.8
+        capturedReferencePhotoCount = min(
+            manualPhotoTarget,
+            capturedReferencePhotoCount + 1
         )
+        let count = capturedReferencePhotoCount
+        // 7 ảnh chiếm 70% tiến trình; video mẫu 5 giây hoàn tất 30% cuối.
+        shapeScanCoverage = Double(count) / Double(manualPhotoTarget) * 0.70
         let coveragePercent = Int((shapeScanCoverage * 100).rounded())
-        let sufficient = count >= manualPhotoTarget
-        if sufficient {
-            freshScanSeedRect = selection.boundingRect
-            freshScanSeedTimestamp = CACurrentMediaTime()
-        }
+        let photosComplete = count >= manualPhotoTarget
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -1656,22 +1708,91 @@ final class CameraController: NSObject, ObservableObject {
             self.scanSampleCount = coveragePercent
             self.scanSampleTarget = 80
             self.scanProgress = self.shapeScanCoverage
-            self.scanIsSufficient = sufficient
+            self.scanIsSufficient = false
             self.scanNeedsNewAngle = false
             self.matchText = "ĐÃ XÁC NHẬN CHAI \(Int(detection.confidence * 100))% • \(count)/7"
-            self.scanGuidanceText = sufficient
-                ? "Đã đủ 7 ảnh nhận diện"
+            self.scanGuidanceText = photosComplete
+                ? "Đã đủ 7 ảnh • bấm nút video và quay quanh vật 5 giây"
                 : self.nextReferenceGuidance(after: count)
-            self.statusText = sufficient
-                ? "Đang ghép 7 ảnh với hai detector AI..."
+            self.statusText = photosComplete
+                ? "Bước cuối: video quanh vật sẽ bổ sung góc chuyển tiếp cho AI"
                 : "Ảnh đã lưu • làm theo hướng chụp tiếp theo"
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             self.onEvent?("REFERENCE_PHOTO_\(count)")
         }
 
-        if sufficient {
-            finishScan(kind: kind)
+    }
+
+    private func processReferenceVideoFrame(
+        from pixelBuffer: CVPixelBuffer,
+        kind: ScanKind
+    ) {
+        guard let startedAt = referenceVideoStartedAt else { return }
+        let now = CACurrentMediaTime()
+        let elapsed = max(0, now - startedAt)
+        let progress = min(1, elapsed / referenceVideoDuration)
+
+        // Lấy tối đa khoảng 12 frame trong 5 giây. Mỗi frame vẫn phải được hai
+        // detector xác nhận là chai/tên lửa trong vòng tròn.
+        if now - lastReferenceVideoSampleAt >= 0.38,
+           capturedReferenceVideoFrames < referenceVideoTargetFrames,
+           let reference = automaticReferenceSelection(from: pixelBuffer) {
+            let selection = reference.selection
+            // Vật có thể xoay tại chỗ nên hộp detection gần như không di chuyển.
+            // Lấy theo thời gian; feature-print ghi hình dạng/bề mặt mới ở mỗi góc.
+            lastReferenceVideoSampleAt = now
+            lastReferenceVideoRect = selection.boundingRect
+            scanReferenceImages.append(selection.referenceJPEG)
+            if let feature = featurePrint(fromJPEGData: selection.referenceJPEG) {
+                featureSamples.append(feature)
+            }
+            if let contextJPEG = referenceJPEG(
+                from: pixelBuffer,
+                normalizedTopLeftRect: selection.boundingRect,
+                orientation: .up
+            ) {
+                scanContextImages.append(contextJPEG)
+                if let feature = featurePrint(fromJPEGData: contextJPEG) {
+                    contextFeatureSamples.append(feature)
+                }
+            }
+            capturedReferenceVideoFrames += 1
+            freshScanSeedRect = selection.boundingRect
+            freshScanSeedTimestamp = now
         }
+
+        let frameCount = capturedReferenceVideoFrames
+        shapeScanCoverage = min(1.0, 0.70 + progress * 0.30)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.referenceVideoProgress = progress
+            self.referenceVideoFrameCount = frameCount
+            self.scanProgress = self.shapeScanCoverage
+            self.scanSampleCount = Int((self.shapeScanCoverage * 100).rounded())
+            self.matchText = String(
+                format: "VIDEO MẪU %.1f/5,0 GIÂY • %d KHUNG AI",
+                min(self.referenceVideoDuration, elapsed),
+                frameCount
+            )
+            self.scanGuidanceText = frameCount > 0
+                ? "Tiếp tục quay vật từ từ quanh vòng tròn"
+                : "Giữ thân chai trong vòng tròn để AI lấy khung video"
+        }
+
+        guard elapsed >= referenceVideoDuration else { return }
+        referenceVideoStartedAt = nil
+        shapeScanCoverage = 1.0
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isCapturingReferenceVideo = false
+            self.referenceVideoProgress = 1
+            self.scanIsSufficient = true
+            self.scanGuidanceText = "Đã ghép 7 ảnh + video 5 giây"
+            self.statusText = "AI đã liên kết model có sẵn, bộ ảnh và video vật mới"
+            self.announce("Video mẫu hoàn tất. Mô hình nhận diện đã sẵn sàng.", kind: .success)
+            self.onEvent?("REFERENCE_VIDEO_DONE")
+        }
+        finishScan(kind: kind)
     }
 
     private func beginARScan() {
@@ -3170,11 +3291,13 @@ final class CameraController: NSObject, ObservableObject {
             }
             trackingFrameCounter += 1
 
-            if result.confidence < 0.10 {
-                lowConfidenceFrames += 1
-            } else {
-                lowConfidenceFrames = 0
+            // Dưới 40% là tracker không còn đủ chắc để điều khiển servo theo vật.
+            // Chuyển sang tái tìm ngay và dùng Kalman cuối cho lệnh quỹ đạo.
+            if result.confidence < 0.40 {
+                markTargetLost()
+                return
             }
+            lowConfidenceFrames = 0
 
             var targetBounds = topLeftRect(from: result)
             let previousBounds = lastTrackingBounds ?? targetBounds
@@ -4162,6 +4285,10 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             return
 
         case .scanning(let kind):
+            if referenceVideoStartedAt != nil {
+                processReferenceVideoFrame(from: pixelBuffer, kind: kind)
+                return
+            }
             if manualSelectionRequested {
                 manualSelectionRequested = false
                 updateManualSubjectSelection(from: pixelBuffer)

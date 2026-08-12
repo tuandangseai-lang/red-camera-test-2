@@ -513,20 +513,40 @@ struct ContentView: View {
                         Spacer()
 
                         Button {
-                            camera.captureManualReferencePhoto()
+                            if camera.scanViewpointCount >= camera.referencePhotoTarget {
+                                camera.startReferenceVideoCapture()
+                            } else {
+                                camera.captureManualReferencePhoto()
+                            }
                         } label: {
                             ZStack {
                                 Circle()
-                                    .fill(Color.white)
+                                    .fill(
+                                        camera.scanViewpointCount >= camera.referencePhotoTarget
+                                            ? Color.red
+                                            : Color.white
+                                    )
                                     .frame(width: 76, height: 76)
                                 Circle()
                                     .stroke(.black.opacity(0.70), lineWidth: 3)
                                     .frame(width: 64, height: 64)
+                                if camera.scanViewpointCount >= camera.referencePhotoTarget {
+                                    Image(systemName: camera.isCapturingReferenceVideo
+                                          ? "record.circle.fill"
+                                          : "video.fill")
+                                        .font(.title2.bold())
+                                        .foregroundStyle(.white)
+                                }
                             }
                             .shadow(color: .black.opacity(0.35), radius: 5, y: 2)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("Chụp ảnh mẫu")
+                        .disabled(camera.isCapturingReferenceVideo)
+                        .accessibilityLabel(
+                            camera.scanViewpointCount >= camera.referencePhotoTarget
+                                ? "Quay video mẫu 5 giây"
+                                : "Chụp ảnh mẫu"
+                        )
 
                         Spacer()
 

@@ -6,8 +6,8 @@ struct SavedScanProfile: Codable, Equatable, Identifiable {
     let createdAt: Date
     let subjectKind: ScanSubjectKind
     let referenceImages: [Data]
-    /// Ảnh crop thật của cùng năm góc, giữ lại nền gần vật. Dùng cho nhánh
-    /// tìm cá nhân khi detector tổng quát không vẽ được hộp quanh chai PET.
+    /// Ảnh crop thật từ 7 góc và các khung đại diện của video 5 giây. Dùng cho
+    /// nhánh nhận diện cá nhân cùng với model tên lửa/chai có sẵn.
     let contextImages: [Data]?
     let surfacePointCount: Int
     let voxelOccupancy: [Bool]?
