@@ -284,7 +284,7 @@ struct ContentView: View {
                 }
             }
 
-            Text("WATER ROCKET  \(confidence)%")
+            Text("\(camera.detectedSubjectLabel.uppercased())  \(confidence)%")
                 .font(.system(size: 11, weight: .black, design: .monospaced))
                 .foregroundStyle(.black)
                 .padding(.horizontal, 7)

@@ -620,12 +620,12 @@ final class CameraController: NSObject, ObservableObject {
         trackingPoints = []
         predictedTargetPoint = nil
         trackingConfidence = 0
-        matchText = aiDetector.isAvailable
+        matchText = usesRocketSpecificDetector && aiDetector.isAvailable
             ? "YOLO Core ML đang xác nhận tên lửa trên toàn màn hình..."
-            : "Chế độ dự phòng đa góc • chờ model YOLO đã huấn luyện"
-        statusText = aiDetector.isAvailable
-            ? "AI detector + tracker + dự đoán quỹ đạo đang hoạt động"
-            : "Chưa có model dữ liệu thật; app dùng nhận diện đa góc ổn định hơn"
+            : "Vision đang đối chứng \(scanSubjectKind.title) + bộ ảnh/video cá nhân..."
+        statusText = usesRocketSpecificDetector && aiDetector.isAvailable
+            ? "AI tên lửa + tracker + dự đoán quỹ đạo đang hoạt động"
+            : "Đang phân loại đúng loại và đối chiếu đa góc trước khi khóa"
 
         videoQueue.async { [weak self] in
             guard let self else { return }
@@ -721,7 +721,7 @@ final class CameraController: NSObject, ObservableObject {
         switch kind {
         case .near:
             stage = .scanningNear
-            statusText = "Đặt chai tên lửa nổi bật trong ảnh rồi bấm chụp"
+            statusText = "Đặt đúng \(scanSubjectKind.title.lowercased()) vào giữa vòng rồi bấm chụp"
         case .far:
             stage = .scanningFar
             statusText = "Quét xa không giới hạn thời gian • làm theo mũi chỉ dẫn"
@@ -1671,6 +1671,18 @@ final class CameraController: NSObject, ObservableObject {
             rect: selection.boundingRect,
             referenceJPEG: selection.referenceJPEG
         )
+        guard classification.kind == scanSubjectKind else {
+            let requested = scanSubjectKind.title
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.hasSelectedSubject = false
+                self.scanHasConfirmedTarget = false
+                self.scanNeedsNewAngle = true
+                self.scanGuidanceText = "Bạn chọn \(requested) nhưng AI thấy \(classification.kind.title)"
+                self.statusText = "Chạm lại đúng chủ thể hoặc đổi loại Người / Thú / Vật"
+            }
+            return
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.hasSelectedSubject = true
@@ -1679,7 +1691,6 @@ final class CameraController: NSObject, ObservableObject {
             self.subjectContourPoints = selection.contourPoints
             self.scanHasConfirmedTarget = true
             self.targetConfirmationProgress = 1
-            self.scanSubjectKind = classification.kind
             self.detectedSubjectLabel = classification.label
             self.detectedSubjectConfidence = classification.confidence
             self.scanNeedsNewAngle = false
@@ -1702,7 +1713,7 @@ final class CameraController: NSObject, ObservableObject {
             "chụp mặt sau",
             "chụp từ trên xuống",
             "chụp từ dưới lên",
-            "đưa tên lửa ra xa rồi chụp"
+            "đưa chủ thể ra xa rồi chụp"
         ]
         guard capturedCount < instructions.count else { return "Đã đủ 7 ảnh" }
         return "Ảnh \(capturedCount + 1)/7 • \(instructions[capturedCount])"
@@ -3724,7 +3735,7 @@ final class CameraController: NSObject, ObservableObject {
                     format: "T,%03d,%03d,%02d",
                     Int(max(0, min(999, predictedPoint.x * 999))),
                     Int(max(0, min(999, predictedPoint.y * 999))),
-                    Int(max(0, min(99, confidence * 99)))
+                    Int(max(0, min(99, (confidence * 100).rounded())))
                 )
                 : nil
 
