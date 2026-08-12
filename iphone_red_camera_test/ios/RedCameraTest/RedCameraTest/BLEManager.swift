@@ -44,6 +44,10 @@ final class BLEManager: NSObject, ObservableObject {
             connectionText = "ESP32 đang tìm theo quỹ đạo cuối"
         } else if message == "TARGET_LOCKED" {
             connectionText = "ESP32 đang bám mục tiêu"
+        } else if message == "SEARCH_STOP" || message == "RECORDING_STOPPED" {
+            connectionText = "ESP32 đã dừng tìm và giữ nguyên góc"
+        } else if message == "TRACKING_STARTED" {
+            connectionText = "ESP32 sẵn sàng nhận dữ liệu bám"
         }
     }
 

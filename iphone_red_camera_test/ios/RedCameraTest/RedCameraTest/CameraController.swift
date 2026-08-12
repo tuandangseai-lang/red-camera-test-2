@@ -125,6 +125,10 @@ final class CameraController: NSObject, ObservableObject {
     @Published var scanSubjectKind: ScanSubjectKind = .object
     @Published var voiceAnnouncementsEnabled = true
 
+    /// Khóa ngay khi người dùng bấm dừng. Kết quả AI cũ đang chờ trên hàng đợi
+    /// không được phép bật lại giao diện hoặc servo tìm mục tiêu.
+    private var isStopRequested = false
+
     let crystalGridColumns = 16
     let crystalGridRows = 24
 
@@ -324,6 +328,18 @@ final class CameraController: NSObject, ObservableObject {
     func startShapeScan() {
         guard isReady, !isRecording else { return }
         startScan(kind: .near, resetProfile: true)
+    }
+
+    func selectSubjectKind(_ kind: ScanSubjectKind) {
+        guard !isRecording, !stage.isScanning else { return }
+        guard kind != scanSubjectKind else { return }
+        // Không dùng chéo bộ ảnh Người / Thú / Vật.
+        resetProfile()
+        scanSubjectKind = kind
+        detectedSubjectLabel = kind.title
+        matchText = "ĐÃ CHỌN \(kind.title.uppercased())"
+        statusText = "Loại đã khóa: \(kind.title) • hãy tạo bộ ảnh riêng cho loại này"
+        onEvent?("SUBJECT_KIND_\(kind.rawValue.uppercased())")
     }
 
     func startFarScan() {
@@ -613,6 +629,8 @@ final class CameraController: NSObject, ObservableObject {
 
     func startTrackingAndRecording() {
         guard isReady, !isRecording, (stage == .ready || stage == .lost) else { return }
+        isStopRequested = false
+        onEvent?("TRACKING_STARTED")
         let fullFrame = CGRect(x: 0, y: 0, width: 1, height: 1)
         let recordAfterLock = !isRecording
         stage = .verifying
@@ -670,6 +688,7 @@ final class CameraController: NSObject, ObservableObject {
 
     func cancelTargetSearch() {
         guard stage == .verifying else { return }
+        isStopRequested = true
         videoQueue.async { [weak self] in
             self?.processingMode = .idle
         }
@@ -685,7 +704,15 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     func stopRecording() {
+        // Dừng UI và servo ngay khi chạm nút, không đợi movieOutput ghi xong file.
+        isStopRequested = true
         cancelZoomSequence()
+        voiceNotifier.stop()
+        stage = .ready
+        matchText = "ĐÃ DỪNG BÁM MỤC TIÊU"
+        statusText = "Đang dừng và lưu video..."
+        onEvent?("SEARCH_STOP")
+        onEvent?("RECORDING_STOPPED")
         videoQueue.async { [weak self] in
             self?.processingMode = .idle
             self?.trackingObservation = nil
@@ -1341,16 +1368,6 @@ final class CameraController: NSObject, ObservableObject {
         rect: CGRect,
         referenceJPEG: Data
     ) -> (kind: ScanSubjectKind, label: String, confidence: Double) {
-        // Hỏi detector chuyên dụng trước bộ phân loại chung. Nếu không làm vậy,
-        // bàn tay đang cầm chai rất dễ khiến Vision gọi cả vùng là "người".
-        if let rocket = aiDetector.detect(
-            in: pixelBuffer,
-            orientation: .up,
-            minimumConfidence: 0.12
-        ).first(where: { intersectionOverUnion($0.rect, rect) >= 0.12 }) {
-            return (.object, "tên lửa nước", rocket.confidence)
-        }
-
         let visionRect = CGRect(
             x: rect.minX,
             y: 1.0 - rect.maxY,
@@ -1365,18 +1382,41 @@ final class CameraController: NSObject, ObservableObject {
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
         try? handler.perform([personRequest, animalRequest])
 
-        if let person = personRequest.results?.max(by: { $0.confidence < $1.confidence }),
-           person.confidence >= 0.48 {
-            return (.person, "người", Double(person.confidence))
-        }
-        if let animal = animalRequest.results?.max(by: { $0.confidence < $1.confidence }),
-           let label = animal.labels.first,
-           animal.confidence >= 0.30 {
-            return (
-                .animal,
-                friendlyClassificationName(label.identifier),
-                Double(animal.confidence)
-            )
+        // Tab người dùng chọn là nguồn sự thật. AI chỉ đặt tên chi tiết bên
+        // trong tab đó, không tự đổi Vật thành Người vì thấy bàn tay đang cầm.
+        switch scanSubjectKind {
+        case .person:
+            let confidence = personRequest.results?
+                .map { Double($0.confidence) }
+                .max() ?? 0.10
+            return (.person, "người", confidence)
+
+        case .animal:
+            if let animal = animalRequest.results?.max(by: { $0.confidence < $1.confidence }),
+               let label = animal.labels.first {
+                return (
+                    .animal,
+                    friendlyClassificationName(label.identifier),
+                    Double(animal.confidence)
+                )
+            }
+            return (.animal, "thú", 0.10)
+
+        case .object:
+            if let rocket = detectRocketOrBottle(
+                in: pixelBuffer,
+                minimumConfidence: 0.08,
+                regionOfInterest: rect
+                    .insetBy(dx: -0.04, dy: -0.04)
+                    .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+            ).max(by: { $0.confidence < $1.confidence }) {
+                let isBottle = rocket.label.lowercased().contains("bottle")
+                return (
+                    .object,
+                    isBottle ? "chai nước" : "tên lửa nước",
+                    rocket.confidence
+                )
+            }
         }
 
         guard let image = UIImage(data: referenceJPEG)?.cgImage else {
@@ -1387,9 +1427,11 @@ final class CameraController: NSObject, ObservableObject {
         do {
             try classifyHandler.perform([classifyRequest])
             if let result = classifyRequest.results?.first(where: { $0.confidence >= 0.05 }) {
+                let label = friendlyClassificationName(result.identifier)
+                let crossTypeLabels = ["người", "chó", "mèo", "chim"]
                 return (
                     .object,
-                    friendlyClassificationName(result.identifier),
+                    crossTypeLabels.contains(label) ? "vật thể" : label,
                     Double(result.confidence)
                 )
             }
@@ -1671,18 +1713,6 @@ final class CameraController: NSObject, ObservableObject {
             rect: selection.boundingRect,
             referenceJPEG: selection.referenceJPEG
         )
-        guard classification.kind == scanSubjectKind else {
-            let requested = scanSubjectKind.title
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.hasSelectedSubject = false
-                self.scanHasConfirmedTarget = false
-                self.scanNeedsNewAngle = true
-                self.scanGuidanceText = "Bạn chọn \(requested) nhưng AI thấy \(classification.kind.title)"
-                self.statusText = "Chạm lại đúng chủ thể hoặc đổi loại Người / Thú / Vật"
-            }
-            return
-        }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.hasSelectedSubject = true
@@ -1700,7 +1730,7 @@ final class CameraController: NSObject, ObservableObject {
                 ? "Đã loại vùng bàn tay; nếu chọn sai hãy chạm lại"
                 : "Nếu chọn sai, chạm lại vào đúng vật"
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            self.announce("Đã chọn vật cần chụp.", kind: .success)
+            self.announce("Đã chọn đúng \(self.scanSubjectKind.title.lowercased()) cần chụp.", kind: .success)
             self.onEvent?("SUBJECT_SELECTED")
         }
     }
@@ -1773,7 +1803,6 @@ final class CameraController: NSObject, ObservableObject {
             self.subjectContourPoints = []
             self.scanHasConfirmedTarget = true
             self.targetConfirmationProgress = 1
-            self.scanSubjectKind = reference.kind
             self.detectedSubjectLabel = reference.label
             self.detectedSubjectConfidence = reference.confidence
             self.learnedSamples = count
@@ -1833,7 +1862,6 @@ final class CameraController: NSObject, ObservableObject {
             freshScanSeedRect = selection.boundingRect
             freshScanSeedTimestamp = now
             DispatchQueue.main.async { [weak self] in
-                self?.scanSubjectKind = reference.kind
                 self?.detectedSubjectLabel = reference.label
                 self?.detectedSubjectConfidence = reference.confidence
             }
@@ -2886,13 +2914,14 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func sendSearchHeartbeatIfNeeded() {
-        guard isRecoveringLostTarget else { return }
+        guard isRecoveringLostTarget, !isStopRequested else { return }
         let now = CACurrentMediaTime()
         guard now - lastSearchCommandSentAt >= 0.35 else { return }
         lastSearchCommandSentAt = now
         let command = recoverySearchCommand
         DispatchQueue.main.async { [weak self] in
-            self?.onEvent?(command)
+            guard let self, !self.isStopRequested else { return }
+            self.onEvent?(command)
         }
     }
 
@@ -3224,6 +3253,7 @@ final class CameraController: NSObject, ObservableObject {
         let initialPoints = trackingTrianglePoints
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            guard !self.isStopRequested else { return }
             // Ưu tiên dừng searchMode trên ESP32 trước mọi cập nhật giao diện.
             self.onEvent?("TARGET_LOCKED")
             self.servoSearchVector = nil
@@ -3520,6 +3550,7 @@ final class CameraController: NSObject, ObservableObject {
     private func publishSearchProgress(message: String) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            guard !self.isStopRequested else { return }
             self.stage = .verifying
             self.matchText = message
             self.statusText = "Không cần đưa vào khung • app đang quét toàn màn hình"
@@ -3763,6 +3794,7 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func markTargetLost() {
+        guard !isStopRequested else { return }
         // Chuyển thẳng sang tìm lại tự động. Không yêu cầu người dùng bấm nút
         // hoặc đưa vật vào vòng tròn lần nữa.
         let lostAt = CACurrentMediaTime()
@@ -3802,6 +3834,10 @@ final class CameraController: NSObject, ObservableObject {
         sequenceHandler = VNSequenceRequestHandler()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            guard !self.isStopRequested else {
+                self.onEvent?("RECORDING_STOPPED")
+                return
+            }
             self.stage = .verifying
             self.targetRect = nil
             self.trackingPoints = []

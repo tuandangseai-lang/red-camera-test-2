@@ -726,7 +726,7 @@ struct ContentView: View {
             Menu {
                 ForEach(ScanSubjectKind.allCases) { kind in
                     Button {
-                        camera.scanSubjectKind = kind
+                        camera.selectSubjectKind(kind)
                     } label: {
                         Label(kind.title, systemImage: kind.symbol)
                     }
@@ -737,6 +737,7 @@ struct ContentView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .disabled(camera.isRecording || camera.stage.isScanning)
 
             Image(systemName: "viewfinder")
                 .foregroundStyle(.yellow)
@@ -789,6 +790,20 @@ struct ContentView: View {
                 ProgressView("Tự tìm liên tục theo quỹ đạo cuối...")
                     .tint(.white)
                     .foregroundStyle(.white)
+                if camera.isRecording {
+                    Button(role: .destructive) {
+                        camera.stopRecording()
+                    } label: {
+                        Label("Dừng tìm và lưu video", systemImage: "stop.circle.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                } else {
+                    secondaryButton("Dừng tìm mục tiêu", systemImage: "xmark.circle") {
+                        camera.cancelTargetSearch()
+                    }
+                }
             }
 
         case .tracking:

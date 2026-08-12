@@ -81,6 +81,7 @@ int latestConfidence = 0;
 uint32_t latestTargetAtMs = 0;
 bool targetAvailable = false;
 volatile bool searchMode = false;
+volatile bool trackingSessionActive = false;
 
 float panAngleDeg = PAN_CENTER_DEG;
 float tiltAngleDeg = TILT_CENTER_DEG;
@@ -305,6 +306,10 @@ void handlePhoneMessage(String value) {
   if (value.length() == 0) return;
 
   if (value.startsWith("S,")) {
+    if (!trackingSessionActive) {
+      Serial.println("[SEARCH] Bo goi tim cu vi phien tracking da dung.");
+      return;
+    }
     int x = IMAGE_CENTER;
     int y = IMAGE_CENTER;
     int velocityX = 0;
@@ -319,6 +324,7 @@ void handlePhoneMessage(String value) {
   }
 
   if (value.startsWith("T,")) {
+    if (!trackingSessionActive) return;
     int x = 0;
     int y = 0;
     int confidence = 0;
@@ -328,10 +334,20 @@ void handlePhoneMessage(String value) {
     return;
   }
 
-  if (value == "SEARCH_START" || value == "TARGET_LOST") {
+  if (value == "TRACKING_STARTED" || value == "RECORDING_STARTED") {
+    trackingSessionActive = true;
+    stopSearchPattern();
+    stopTrackingTarget();
+  } else if (value == "SEARCH_START" || value == "TARGET_LOST") {
+    if (!trackingSessionActive) return;
     startSearchPattern();
-  } else if (value == "SEARCH_STOP" || value == "TARGET_LOCKED" ||
-             value == "RECORDING_STOPPED") {
+  } else if (value == "TARGET_LOCKED") {
+    trackingSessionActive = true;
+    stopSearchPattern();
+    stopTrackingTarget();
+  } else if (value == "SEARCH_STOP" || value == "RECORDING_STOPPED" ||
+             value == "PROFILE_RESET" || value == "SCAN_CANCELLED") {
+    trackingSessionActive = false;
     stopSearchPattern();
     stopTrackingTarget();
   }
@@ -351,6 +367,7 @@ class TrackerServerCallbacks : public BLEServerCallbacks {
   void onDisconnect(BLEServer *server) override {
     phoneConnected = false;
     autoArmPending = false;
+    trackingSessionActive = false;
     searchMode = false;
     stopTrackingTarget();
     digitalWrite(LED_BUILTIN, LOW);
