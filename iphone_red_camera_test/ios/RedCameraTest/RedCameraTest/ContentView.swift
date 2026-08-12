@@ -27,6 +27,10 @@ struct ContentView: View {
                 controls
             }
             .padding()
+
+            if camera.trackingPreparationCountdown > 0 {
+                trackingPreparationCountdownOverlay
+            }
         }
         .background(Color.black)
         .onAppear {
@@ -87,6 +91,13 @@ struct ContentView: View {
                         .padding(.vertical, 5)
                         .background(guideColor, in: Capsule())
                         .position(x: rect.midX, y: max(18, rect.minY - 16))
+
+                    if camera.isCapturingReferenceVideo {
+                        referenceVideoTimerOverlay(
+                            diameter: diameter,
+                            center: CGPoint(x: rect.midX, y: rect.midY)
+                        )
+                    }
 
                 }
 
@@ -366,6 +377,64 @@ struct ContentView: View {
         .shadow(color: color.opacity(0.45), radius: 8)
     }
 
+    private var trackingPreparationCountdownOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.50)
+                .ignoresSafeArea()
+
+            VStack(spacing: 12) {
+                Text("\(camera.trackingPreparationCountdown)")
+                    .font(.system(size: 112, weight: .black, design: .rounded))
+                    .foregroundStyle(.white)
+                    .contentTransition(.numericText())
+                    .shadow(color: .cyan.opacity(0.85), radius: 18)
+
+                Text("ĐANG GHÉP DỮ LIỆU TRACKING")
+                    .font(.subheadline.weight(.black))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.black.opacity(0.68), in: Capsule())
+            }
+        }
+        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+        .animation(.easeInOut(duration: 0.18), value: camera.trackingPreparationCountdown)
+        .allowsHitTesting(false)
+    }
+
+    private func referenceVideoTimerOverlay(
+        diameter: CGFloat,
+        center: CGPoint
+    ) -> some View {
+        let progress = max(0, min(camera.referenceVideoProgress, 1))
+        let secondsLeft = max(0, Int(ceil(10.0 * (1.0 - progress))))
+
+        return ZStack {
+            Circle()
+                .stroke(Color.black.opacity(0.56), lineWidth: 9)
+            Circle()
+                .trim(from: 0, to: progress)
+                .stroke(
+                    Color.red,
+                    style: StrokeStyle(lineWidth: 7, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+                .animation(.linear(duration: 0.12), value: progress)
+
+            Text("\(secondsLeft)s")
+                .font(.system(size: 15, weight: .black, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.red.opacity(0.94), in: Capsule())
+        }
+        .frame(width: diameter + 14, height: diameter + 14)
+        .position(center)
+        .transition(.scale(scale: 0.88).combined(with: .opacity))
+        .allowsHitTesting(false)
+    }
+
     private var scanStatusColor: Color {
         if camera.scanIsSufficient { return .green }
         if camera.scanNeedsNewAngle { return .orange }
@@ -466,12 +535,12 @@ struct ContentView: View {
         case .idle, .scanningNear, .waitingFar, .scanningFar, .waitingAround, .scanningAround:
             if camera.stage.isScanning {
                 return camera.scanHasConfirmedTarget
-                    ? "ĐÃ XÁC NHẬN CHAI • \(camera.scanViewpointCount)/\(camera.referencePhotoTarget)"
-                    : "ĐẶT CHAI TRONG VÒNG TRÒN"
+                    ? "ĐÃ XÁC NHẬN \(camera.scanSubjectKind.title.uppercased()) • \(camera.scanViewpointCount)/\(camera.referencePhotoTarget)"
+                    : "ĐẶT \(camera.scanSubjectKind.title.uppercased()) TRONG VÒNG TRÒN"
             }
             return "CHỌN LOẠI • TẠO MẪU 7 ẢNH"
         case .ready, .verifying, .lost:
-            return "ĐẶT TÊN LỬA VÀO ĐÂY"
+            return "ĐẶT \(camera.scanSubjectKind.title.uppercased()) VÀO ĐÂY"
         case .tracking:
             return ""
         }
@@ -642,14 +711,13 @@ struct ContentView: View {
                         .disabled(camera.isCapturingReferenceVideo)
                         .accessibilityLabel(
                             camera.scanViewpointCount >= camera.referencePhotoTarget
-                                ? "Quay video mẫu 10 giây"
-                                : "Chụp ảnh mẫu"
+                                ? "Quay video mẫu \(camera.scanSubjectKind.title) 10 giây"
+                                : "Chụp ảnh mẫu \(camera.scanSubjectKind.title)"
                         )
 
                         Spacer()
 
-                        Image(systemName: camera.scanSubjectKind.symbol)
-                            .font(.title3)
+                        subjectKindIcon(camera.scanSubjectKind, size: 22)
                             .foregroundStyle(.cyan)
                             .frame(width: 42, height: 42)
                     }
@@ -689,7 +757,7 @@ struct ContentView: View {
                             camera.activateProfile(profile)
                         } label: {
                             HStack(spacing: 5) {
-                                Image(systemName: profile.subjectKind.symbol)
+                                subjectKindIcon(profile.subjectKind, size: 14)
                                 Text(profile.shortName)
                                     .lineLimit(1)
                             }
@@ -744,8 +812,7 @@ struct ContentView: View {
                     Button {
                         camera.selectSubjectKind(kind)
                     } label: {
-                        Image(systemName: kind.symbol)
-                            .font(.system(size: 20, weight: .bold))
+                        subjectKindIcon(kind, size: 22)
                         .foregroundStyle(isSelected ? .black : .white)
                         .frame(maxWidth: .infinity)
                         .frame(height: 38)
@@ -780,6 +847,20 @@ struct ContentView: View {
             }
         }
         .foregroundStyle(.white)
+    }
+
+    @ViewBuilder
+    private func subjectKindIcon(_ kind: ScanSubjectKind, size: CGFloat) -> some View {
+        if kind == .waterRocket {
+            Image("WaterRocketTabIcon")
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: size, height: size)
+        } else {
+            Image(systemName: kind.symbol)
+                .font(.system(size: size, weight: .bold))
+        }
     }
 
     @ViewBuilder

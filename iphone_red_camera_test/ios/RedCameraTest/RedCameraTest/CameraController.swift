@@ -105,6 +105,7 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var isCapturingReferenceVideo = false
     @Published private(set) var referenceVideoProgress = 0.0
     @Published private(set) var referenceVideoFrameCount = 0
+    @Published private(set) var trackingPreparationCountdown = 0
     @Published private(set) var surfacePointCount = 0
     @Published private(set) var scanHasConfirmedTarget = false
     @Published private(set) var targetConfirmationProgress = 0.0
@@ -405,7 +406,7 @@ final class CameraController: NSObject, ObservableObject {
         scanSampleTarget = 0
         scanIsSufficient = false
         scanNeedsNewAngle = false
-        scanGuidanceText = "Đưa tên lửa vào khung"
+        scanGuidanceText = "Đưa \(scanSubjectKind.title.lowercased()) vào khung"
         crystalCells = []
         crystalDepths = [:]
         crystalFacets3D = []
@@ -414,6 +415,7 @@ final class CameraController: NSObject, ObservableObject {
         isCapturingReferenceVideo = false
         referenceVideoProgress = 0
         referenceVideoFrameCount = 0
+        trackingPreparationCountdown = 0
         surfacePointCount = 0
         scanHasConfirmedTarget = false
         targetConfirmationProgress = 0
@@ -478,6 +480,7 @@ final class CameraController: NSObject, ObservableObject {
         isCapturingReferenceVideo = false
         referenceVideoProgress = 0
         referenceVideoFrameCount = 0
+        trackingPreparationCountdown = 0
         surfacePointCount = 0
         scanHasConfirmedTarget = false
         targetConfirmationProgress = 0
@@ -660,6 +663,7 @@ final class CameraController: NSObject, ObservableObject {
         trackingPoints = []
         predictedTargetPoint = nil
         trackingConfidence = 0
+        trackingPreparationCountdown = 3
         matchText = "ĐANG GHÉP ẢNH + VIDEO + AI • 3 GIÂY"
         statusText = "Chờ 3 giây để hợp nhất dữ liệu nhận diện trước khi quay"
         announce("Đang ghép dữ liệu nhận diện. Bắt đầu tìm mục tiêu sau ba giây.", kind: .start)
@@ -690,6 +694,17 @@ final class CameraController: NSObject, ObservableObject {
             self.clearRecoveryState()
             self.shouldRecordAfterVerification = recordAfterLock
             self.processingMode = .idle
+        }
+        for elapsedSecond in 1...3 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(elapsedSecond)) { [weak self] in
+                guard let self,
+                      !self.isStopRequested,
+                      self.activeTrackingPreparationID == preparationID else { return }
+                self.trackingPreparationCountdown = max(0, 3 - elapsedSecond)
+                if self.trackingPreparationCountdown > 0 {
+                    self.matchText = "ĐANG GHÉP ẢNH + VIDEO + AI • \(self.trackingPreparationCountdown) GIÂY"
+                }
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard let self,
@@ -731,6 +746,7 @@ final class CameraController: NSObject, ObservableObject {
     func cancelTargetSearch() {
         guard stage == .verifying else { return }
         isStopRequested = true
+        trackingPreparationCountdown = 0
         videoQueue.async { [weak self] in
             self?.processingMode = .idle
         }
@@ -748,6 +764,7 @@ final class CameraController: NSObject, ObservableObject {
     func stopRecording() {
         // Dừng UI và servo ngay khi chạm nút, không đợi movieOutput ghi xong file.
         isStopRequested = true
+        trackingPreparationCountdown = 0
         activeTrackingPreparationID = UUID()
         cancelZoomSequence()
         voiceNotifier.stop()
@@ -3426,10 +3443,10 @@ final class CameraController: NSObject, ObservableObject {
             confidence: detection.confidence,
             matchDescription: wasRecovery
                 ? "AI • đã bắt lại mục tiêu • \(Int(detection.confidence * 100))%"
-                : "AI chai + 7 ảnh mẫu • đã xác nhận \(confirmationCount) frame • \(Int(detection.confidence * 100))%",
+                : "AI \(scanSubjectKind.title.lowercased()) + 7 ảnh mẫu • đã xác nhận \(confirmationCount) frame • \(Int(detection.confidence * 100))%",
             statusDescription: wasRecovery
-                ? "Đã bắt lại tên lửa nhỏ — tiếp tục bám liên tục"
-                : "AI đã khóa đúng tên lửa của bạn — đang bám và dự đoán quỹ đạo"
+                ? "Đã bắt lại \(scanSubjectKind.title.lowercased()) — tiếp tục bám liên tục"
+                : "AI đã khóa đúng \(scanSubjectKind.title.lowercased()) — đang bám và dự đoán quỹ đạo"
         )
         return true
     }
