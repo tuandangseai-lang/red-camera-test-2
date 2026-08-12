@@ -600,8 +600,8 @@ final class CameraController: NSObject, ObservableObject {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
-    /// NÃºt chá»¥p cháº¡y trÃªn main thread, cÃ²n frame camera cháº¡y trÃªn `videoQueue`.
-    /// DÃ¹ng khÃ³a nháº¹ Ä‘á»ƒ nháº­n nÃºt ngay, khÃ´ng pháº£i xáº¿p hÃ ng sau cÃ¡c táº¡c vá»¥ Vision.
+    /// Nút chụp chạy trên main thread, còn frame camera chạy trên `videoQueue`.
+    /// Dùng khóa nhẹ để nhận nút ngay, không phải xếp hàng sau các tác vụ Vision.
     private func requestManualCapture() -> Bool {
         manualCaptureLock.lock()
         defer { manualCaptureLock.unlock() }
@@ -672,8 +672,8 @@ final class CameraController: NSObject, ObservableObject {
     func activateProfile(_ profile: SavedScanProfile) {
         guard !isRecording, !stage.isScanning else { return }
         if activeProfileID == profile.id, !isProfilePreparing {
-            matchText = "ÄÃƒ CHá»ŒN \(profile.name.uppercased())"
-            statusText = "Máº«u nÃ y Ä‘Ã£ sáºµn sÃ ng; khÃ´ng cáº§n náº¡p láº¡i"
+            matchText = "ĐÃ CHỌN \(profile.name.uppercased())"
+            statusText = "Mẫu này đã sẵn sàng; không cần nạp lại"
             UISelectionFeedbackGenerator().selectionChanged()
             return
         }
@@ -2003,8 +2003,8 @@ final class CameraController: NSObject, ObservableObject {
         var capturedContextFeature: VNFeaturePrintObservation?
         if let contextJPEG = capturedContextJPEG {
             scanContextImages.append(contextJPEG)
-            // Vá»›i tÃªn lá»­a/chai, áº£nh váº­t vÃ  áº£nh ngá»¯ cáº£nh thÆ°á»ng lÃ  cÃ¹ng má»™t crop.
-            // TÃ¡i sá»­ dá»¥ng FeaturePrint Ä‘á»ƒ bá»›t má»™t láº§n Vision má»—i khi báº¥m chá»¥p.
+            // Với tên lửa/chai, ảnh vật và ảnh ngữ cảnh thường là cùng một crop.
+            // Tái sử dụng FeaturePrint để bớt một lần Vision mỗi khi bấm chụp.
             let contextFeature = contextJPEG == selection.referenceJPEG
                 ? capturedFeature
                 : featurePrint(fromJPEGData: contextJPEG)
