@@ -39,22 +39,25 @@ constexpr int SERVO_MAX_US = 2400;
 // ======================== THUẬT TOÁN BÁM ========================
 // App gửi x/y từ 000...999; tâm ảnh là 500/500.
 constexpr int IMAGE_CENTER = 500;
-constexpr int DEAD_ZONE = 22;          // 2,2% quanh tâm: chỉ khử rung rất nhỏ.
+constexpr int DEAD_ZONE = 15;          // 1,5% quanh tâm: chỉ khử rung cơ khí.
 constexpr int CENTER_ZONE_HALF = 250;  // Vùng giữa rộng/cao 1/2 màn hình.
+constexpr int SUPPORT_ZONE_HALF = 120; // Ra khỏi lõi 24% là tăng phản hồi sớm.
 constexpr int STILL_VELOCITY = 4;      // Dưới mức này xem như vật gần đứng yên.
 // App dùng ngưỡng 60%. Chỉ gói T có confidence >= 60 mới được phép dừng tìm
 // và điều khiển servo; gói yếu hơn không được làm mất vector tìm cuối.
 constexpr int LOCK_CONFIDENCE = 60;    // 00...99.
 constexpr uint32_t TRACK_TIMEOUT_MS = 300;
-constexpr uint32_t CONTROL_PERIOD_MS = 20;  // Điều khiển servo 50 lần/giây.
+constexpr uint32_t CONTROL_PERIOD_MS = 10;  // Tính lệnh mới 100 lần/giây.
 
 // Tốc độ góc tối đa; giảm nếu giá điện thoại rung, tăng nếu servo đủ khỏe.
-constexpr float PAN_MAX_SPEED_DPS = 150.0f;
-constexpr float TILT_MAX_SPEED_DPS = 130.0f;
-constexpr float VELOCITY_FEEDFORWARD = 0.72f;
-constexpr float OUTSIDE_CENTER_BOOST = 1.30f;
-constexpr float TRACKING_INTEGRAL_GAIN = 1.85f;
-constexpr float TRACKING_INTEGRAL_LIMIT = 0.70f;
+constexpr float PAN_MAX_SPEED_DPS = 220.0f;
+constexpr float TILT_MAX_SPEED_DPS = 190.0f;
+constexpr float VELOCITY_FEEDFORWARD = 0.95f;
+constexpr float SUPPORT_ZONE_BOOST = 1.28f;
+constexpr float OUTSIDE_CENTER_BOOST = 1.65f;
+constexpr float TRACKING_INTEGRAL_GAIN = 2.20f;
+constexpr float TRACKING_INTEGRAL_LIMIT = 0.42f;
+constexpr float TRACKING_INTEGRAL_DECAY = 0.985f;
 
 // Khi mất mục tiêu, đi tiếp theo vector bay cuối trong 0,65 giây. Nếu vẫn chưa
 // thấy, chỉ rà một dải hẹp dọc theo chính quỹ đạo đó, không quét ngẫu nhiên.
@@ -205,7 +208,11 @@ float shapedAxisError(int error) {
   const float normalized =
       static_cast<float>(magnitude - DEAD_ZONE) /
       static_cast<float>(IMAGE_CENTER - DEAD_ZONE);
-  return (error < 0 ? -1.0f : 1.0f) * clampFloat(normalized, 0.0f, 1.0f);
+  // Có lực khởi động ngay sau vùng chết để thắng độ rơ/hãm của MG995. Lũy thừa
+  // 0,72 cho phản hồi nhanh ở sai lệch nhỏ nhưng vẫn tăng mượt tới toàn tốc.
+  const float responsive = 0.14f + 0.86f * powf(
+      clampFloat(normalized, 0.0f, 1.0f), 0.72f);
+  return (error < 0 ? -1.0f : 1.0f) * clampFloat(responsive, 0.0f, 1.0f);
 }
 
 void updateServosFromTarget() {
@@ -282,16 +289,24 @@ void updateServosFromTarget() {
   const bool outsideCenterZone =
       abs(targetX - IMAGE_CENTER) > CENTER_ZONE_HALF ||
       abs(targetY - IMAGE_CENTER) > CENTER_ZONE_HALF;
-  const float positionBoost = outsideCenterZone ? OUTSIDE_CENTER_BOOST : 1.0f;
+  const bool outsideSupportZone =
+      abs(targetX - IMAGE_CENTER) > SUPPORT_ZONE_HALF ||
+      abs(targetY - IMAGE_CENTER) > SUPPORT_ZONE_HALF;
+  const float positionBoost = outsideCenterZone
+                                  ? OUTSIDE_CENTER_BOOST
+                                  : (outsideSupportZone ? SUPPORT_ZONE_BOOST
+                                                        : 1.0f);
 
   // Thành phần tích phân học tốc độ quay cần thiết để giữ một vật đang bay ở
   // chính giữa. Vì thế khi sai số vừa về 0, servo không dừng đột ngột mà tiếp
   // tục đi cùng tên lửa. Với vật đứng yên, sai số ngược chiều sẽ tự triệt tiêu.
   panIntegralCommand = clampFloat(
-      panIntegralCommand + panError * TRACKING_INTEGRAL_GAIN * deltaSeconds,
+      panIntegralCommand * TRACKING_INTEGRAL_DECAY +
+          panError * TRACKING_INTEGRAL_GAIN * deltaSeconds,
       -TRACKING_INTEGRAL_LIMIT, TRACKING_INTEGRAL_LIMIT);
   tiltIntegralCommand = clampFloat(
-      tiltIntegralCommand + tiltError * TRACKING_INTEGRAL_GAIN * deltaSeconds,
+      tiltIntegralCommand * TRACKING_INTEGRAL_DECAY +
+          tiltError * TRACKING_INTEGRAL_GAIN * deltaSeconds,
       -TRACKING_INTEGRAL_LIMIT, TRACKING_INTEGRAL_LIMIT);
   if (panError == 0.0f && panVelocity == 0.0f &&
       fabsf(panIntegralCommand) < 0.025f) {

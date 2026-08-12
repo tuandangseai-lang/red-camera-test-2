@@ -744,17 +744,11 @@ struct ContentView: View {
                     Button {
                         camera.selectSubjectKind(kind)
                     } label: {
-                        VStack(spacing: 2) {
-                            Image(systemName: kind.symbol)
-                                .font(.system(size: 15, weight: .bold))
-                            Text(kind.compactTitle)
-                                .font(.system(size: 9, weight: .bold, design: .rounded))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.72)
-                        }
+                        Image(systemName: kind.symbol)
+                            .font(.system(size: 20, weight: .bold))
                         .foregroundStyle(isSelected ? .black : .white)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 5)
+                        .frame(height: 38)
                         .background(
                             isSelected ? Color.cyan : Color.white.opacity(0.09),
                             in: RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -763,6 +757,7 @@ struct ContentView: View {
                     .buttonStyle(.plain)
                     .disabled(camera.isRecording || camera.stage.isScanning)
                     .accessibilityLabel(kind.title)
+                    .help(kind.title)
                 }
             }
 

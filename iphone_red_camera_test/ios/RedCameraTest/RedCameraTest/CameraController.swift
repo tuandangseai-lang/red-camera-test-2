@@ -3841,7 +3841,7 @@ final class CameraController: NSObject, ObservableObject {
                 )
             }
 
-            // Ở 60 fps, gửi tâm dự đoán + vận tốc về ESP32 khoảng 20 lần/giây.
+            // Ở 60 fps, gửi tâm dự đoán + vận tốc về ESP32 khoảng 30 lần/giây.
             // Gói cố định 15 byte luôn nằm dưới giới hạn BLE 20 byte:
             // V xxxyyy cc vvvwww (x/y 000...999, confidence 00...99,
             // vx/vy -99...+99). Firmware vẫn nhận cả gói T cũ.
@@ -3854,7 +3854,7 @@ final class CameraController: NSObject, ObservableObject {
                 -99,
                 min(99, estimate.velocity.dy * velocityScale)
             ).rounded())
-            let telemetry: String? = trackingFrameCounter % 3 == 0
+            let telemetry: String? = trackingFrameCounter % 2 == 0
                 ? String(
                     format: "V%03d%03d%02d%+03d%+03d",
                     Int(max(0, min(999, predictedPoint.x * 999))),
