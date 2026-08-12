@@ -40,7 +40,9 @@ constexpr int SERVO_MAX_US = 2400;
 // App gửi x/y từ 000...999; tâm ảnh là 500/500.
 constexpr int IMAGE_CENTER = 500;
 constexpr int DEAD_ZONE = 35;          // 3,5% quanh tâm: servo đứng yên để khỏi rung.
-constexpr int MIN_CONFIDENCE = 12;     // 00...99.
+// App dùng ngưỡng 75%. Chỉ gói T có confidence >= 75 mới được phép dừng tìm
+// và điều khiển servo; gói yếu hơn không được làm mất vector tìm cuối.
+constexpr int LOCK_CONFIDENCE = 75;    // 00...99.
 constexpr uint32_t TRACK_TIMEOUT_MS = 300;
 constexpr uint32_t CONTROL_PERIOD_MS = 20;  // Điều khiển servo 50 lần/giây.
 
@@ -242,7 +244,7 @@ void updateServosFromTarget() {
   portEXIT_CRITICAL(&trackingMux);
 
   // Mất BLE, độ tin cậy thấp hoặc gói tọa độ quá cũ: giữ nguyên góc hiện tại.
-  if (!phoneConnected || !available || confidence < MIN_CONFIDENCE ||
+  if (!phoneConnected || !available || confidence < LOCK_CONFIDENCE ||
       now - receivedAt > TRACK_TIMEOUT_MS) {
     return;
   }
@@ -264,14 +266,25 @@ void acceptTrackingPacket(int x, int y, int confidence) {
   x = constrain(x, 0, 999);
   y = constrain(y, 0, 999);
   confidence = constrain(confidence, 0, 99);
-  searchMode = false;
+
+  // Điều kiện ưu tiên cao nhất: thấy đúng >=75% thì dừng chuyển động tìm ngay.
+  // Nếu confidence thấp hơn, giữ nguyên searchMode và quỹ đạo trước đó.
+  if (confidence < LOCK_CONFIDENCE) {
+    if (millis() - lastTelemetryPrintAtMs >= 250) {
+      lastTelemetryPrintAtMs = millis();
+      Serial.printf("[TRACK] Bo goi yeu %d%%; tiep tuc tim theo quy dao.\n",
+                    confidence);
+    }
+    return;
+  }
+  stopSearchPattern();
 
   portENTER_CRITICAL(&trackingMux);
   latestTargetX = x;
   latestTargetY = y;
   latestConfidence = confidence;
   latestTargetAtMs = millis();
-  targetAvailable = confidence >= MIN_CONFIDENCE;
+  targetAvailable = true;
   portEXIT_CRITICAL(&trackingMux);
 
   const uint32_t now = millis();
