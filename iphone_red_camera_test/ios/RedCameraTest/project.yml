@@ -7,7 +7,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "3.9"
-    CURRENT_PROJECT_VERSION: "34"
+    CURRENT_PROJECT_VERSION: "35"
 targets:
   RedCameraTest:
     type: application
@@ -17,7 +17,7 @@ targets:
     info:
       path: RedCameraTest/Info.plist
       properties:
-        CFBundleDisplayName: Rocket Tracker
+        CFBundleDisplayName: SE
         LSRequiresIPhoneOS: true
         NSBluetoothAlwaysUsageDescription: Connect to the ESP32 tracker over Bluetooth.
         NSCameraUsageDescription: Learn, track, and record your water rocket.
@@ -32,7 +32,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: vn.rockettracker.RedCameraTest
         MARKETING_VERSION: "3.9"
-        CURRENT_PROJECT_VERSION: "34"
+        CURRENT_PROJECT_VERSION: "35"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"
