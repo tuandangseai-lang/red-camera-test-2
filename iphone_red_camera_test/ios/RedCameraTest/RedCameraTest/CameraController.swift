@@ -3799,21 +3799,18 @@ final class CameraController: NSObject, ObservableObject {
                 // Khi đã mất mục tiêu, điểm khớp bộ ảnh/video cá nhân là cổng quyết
                 // định. Vật đủ lớn còn phải có tiền cảnh độc lập, nhờ vậy hình phản
                 // chiếu trên gương/bảng không thể khóa chỉ vì giống một góc mẫu.
-                let foreground = foregroundCandidates(
-                    from: pixelBuffer,
-                    includeFeaturePrints: false
-                )
                 let verified = onScreen.compactMap { detection -> (WaterRocketDetection, Double, Double)? in
-                    guard hasIndependentForegroundSupport(
-                        for: detection.rect,
-                        in: pixelBuffer,
-                        candidates: foreground
-                    ) else { return nil }
                     let similarity = personalizedSimilarity(
                         in: pixelBuffer,
                         rect: detection.rect
                     ) ?? 0
                     guard similarity >= immediateReacquisitionSimilarity else { return nil }
+                    // Chỉ chạy foreground-mask nặng sau khi ngoại hình đã qua 75%.
+                    // Phần lớn frame sai dừng trước đây, giúp giảm nóng lúc tìm lại.
+                    guard hasIndependentForegroundSupport(
+                        for: detection.rect,
+                        in: pixelBuffer
+                    ) else { return nil }
                     return (
                         detection,
                         similarity,
@@ -5289,8 +5286,8 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             // Giới hạn theo thời gian giữ tốc độ bắt lại 10–13 Hz và giảm mạnh tải
             // Neural Engine/GPU. Khi iOS báo nhiệt cao, tự hạ thêm mà không đổi video.
             let now = CACurrentMediaTime()
-            let isThermallyLimited = ProcessInfo.processInfo.thermalState == .serious
-                || ProcessInfo.processInfo.thermalState == .critical
+        let isThermallyLimited = ProcessInfo.processInfo.thermalState == .serious
+            || ProcessInfo.processInfo.thermalState == .critical
             let minimumInterval: TimeInterval = isThermallyLimited
                 ? 0.18
                 : (isRecoveringLostTarget ? 0.075 : 0.11)
@@ -5305,20 +5302,17 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
                 // YOLO tìm lớp tên lửa; nhánh mẫu cá nhân vẫn chạy song song ở
                 // nhịp thấp hơn, nên YOLO hụt vật gần hoặc chai trong suốt cũng
                 // không còn chặn toàn bộ bảy ảnh người dùng.
-                let aiStride = isRecoveringLostTarget ? 1 : 2
-                if featureFrameCounter % aiStride == 0 {
-                    verifyWithAIDetector(pixelBuffer: pixelBuffer)
-                }
+                verifyWithAIDetector(pixelBuffer: pixelBuffer)
                 // Feature-print đa góc là đường dự phòng nặng. Lúc cứu mục tiêu chỉ
                 // chạy thưa để không chặn detector Core ML đang quét từng frame.
-                let personalizedStride = isRecoveringLostTarget ? 6 : 12
+                let personalizedStride = isRecoveringLostTarget ? 5 : 8
                 if featureFrameCounter % personalizedStride == 1 {
                     verifyAndLock(pixelBuffer: pixelBuffer)
                 }
             } else {
                 // Người / Thú / Vật dùng Vision phân loại + bộ ảnh/video cá nhân.
                 // Khi đang tìm lại, chạy mỗi frame để ứng viên >=75% khóa tức thì.
-                let categoryStride = isRecoveringLostTarget ? 1 : 4
+                let categoryStride = isRecoveringLostTarget ? 1 : 2
                 if featureFrameCounter % categoryStride == 0 {
                     verifyAndLock(pixelBuffer: pixelBuffer)
                 }
