@@ -384,7 +384,7 @@ struct ContentView: View {
 
             VStack(spacing: 12) {
                 Text("\(camera.trackingPreparationCountdown)")
-                    .font(.system(size: 112, weight: .black, design: .rounded))
+                    .font(.custom("Arial-BoldMT", size: 112))
                     .foregroundStyle(.white)
                     .contentTransition(.numericText())
                     .shadow(color: .cyan.opacity(0.85), radius: 18)
@@ -406,28 +406,30 @@ struct ContentView: View {
         diameter: CGFloat,
         center: CGPoint
     ) -> some View {
-        let progress = max(0, min(camera.referenceVideoProgress, 1))
-        let secondsLeft = max(0, Int(ceil(10.0 * (1.0 - progress))))
+        return TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
+            let startedAt = camera.referenceVideoDisplayStartedAt ?? timeline.date
+            let elapsed = max(0, timeline.date.timeIntervalSince(startedAt))
+            let progress = max(0, min(elapsed / 10.0, 1))
+            let secondsLeft = max(0, 10.0 - elapsed)
 
-        return ZStack {
-            Circle()
-                .stroke(Color.black.opacity(0.56), lineWidth: 9)
-            Circle()
-                .trim(from: 0, to: progress)
-                .stroke(
-                    Color.red,
-                    style: StrokeStyle(lineWidth: 7, lineCap: .round)
-                )
-                .rotationEffect(.degrees(-90))
-                .animation(.linear(duration: 0.12), value: progress)
+            ZStack {
+                Circle()
+                    .stroke(Color.black.opacity(0.56), lineWidth: 9)
+                Circle()
+                    .trim(from: 0, to: progress)
+                    .stroke(
+                        Color.red,
+                        style: StrokeStyle(lineWidth: 7, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
 
-            Text("\(secondsLeft)s")
-                .font(.system(size: 15, weight: .black, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(.white)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.red.opacity(0.94), in: Capsule())
+                Text(String(format: "%.1f s", secondsLeft))
+                    .font(.custom("Arial-BoldMT", size: 15))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.red.opacity(0.94), in: Capsule())
+            }
         }
         .frame(width: diameter + 14, height: diameter + 14)
         .position(center)

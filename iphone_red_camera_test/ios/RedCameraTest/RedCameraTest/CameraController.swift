@@ -105,6 +105,7 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var isCapturingReferenceVideo = false
     @Published private(set) var referenceVideoProgress = 0.0
     @Published private(set) var referenceVideoFrameCount = 0
+    @Published private(set) var referenceVideoDisplayStartedAt: Date?
     @Published private(set) var trackingPreparationCountdown = 0
     @Published private(set) var surfacePointCount = 0
     @Published private(set) var scanHasConfirmedTarget = false
@@ -217,6 +218,10 @@ final class CameraController: NSObject, ObservableObject {
     private var processingRect = CGRect(x: 0.29, y: 0.15, width: 0.42, height: 0.70)
     private var featureSamples: [VNFeaturePrintObservation] = []
     private var contextFeatureSamples: [VNFeaturePrintObservation] = []
+    private var photoFeatureSamples: [VNFeaturePrintObservation] = []
+    private var videoFeatureSamples: [VNFeaturePrintObservation] = []
+    private var photoContextFeatureSamples: [VNFeaturePrintObservation] = []
+    private var videoContextFeatureSamples: [VNFeaturePrintObservation] = []
     private var freshScanSeedRect: CGRect?
     private var freshScanSeedTimestamp: TimeInterval = 0
     private var pendingFreshScanSeedRect: CGRect?
@@ -373,6 +378,10 @@ final class CameraController: NSObject, ObservableObject {
             self.processingMode = .idle
             self.featureSamples.removeAll()
             self.contextFeatureSamples.removeAll()
+            self.photoFeatureSamples.removeAll()
+            self.videoFeatureSamples.removeAll()
+            self.photoContextFeatureSamples.removeAll()
+            self.videoContextFeatureSamples.removeAll()
             self.scanReferenceImages.removeAll()
             self.scanContextImages.removeAll()
             self.freshScanSeedRect = nil
@@ -415,6 +424,7 @@ final class CameraController: NSObject, ObservableObject {
         isCapturingReferenceVideo = false
         referenceVideoProgress = 0
         referenceVideoFrameCount = 0
+        referenceVideoDisplayStartedAt = nil
         trackingPreparationCountdown = 0
         surfacePointCount = 0
         scanHasConfirmedTarget = false
@@ -480,6 +490,7 @@ final class CameraController: NSObject, ObservableObject {
         isCapturingReferenceVideo = false
         referenceVideoProgress = 0
         referenceVideoFrameCount = 0
+        referenceVideoDisplayStartedAt = nil
         trackingPreparationCountdown = 0
         surfacePointCount = 0
         scanHasConfirmedTarget = false
@@ -537,6 +548,7 @@ final class CameraController: NSObject, ObservableObject {
         isCapturingReferenceVideo = true
         referenceVideoProgress = 0
         referenceVideoFrameCount = 0
+        referenceVideoDisplayStartedAt = Date()
         scanIsSufficient = false
         scanNeedsNewAngle = false
         scanGuidanceText = "Quay \(scanSubjectKind.title.lowercased()) từ từ trong 10 giây"
@@ -578,6 +590,18 @@ final class CameraController: NSObject, ObservableObject {
 
             self.featureSamples = observations
             self.contextFeatureSamples = contextObservations
+            let storedPhotoReferenceCount = min(
+                profile.photoReferenceCount ?? min(self.manualPhotoTarget, observations.count),
+                observations.count
+            )
+            let storedPhotoContextCount = min(
+                profile.photoContextCount ?? min(self.manualPhotoTarget, contextObservations.count),
+                contextObservations.count
+            )
+            self.photoFeatureSamples = Array(observations.prefix(storedPhotoReferenceCount))
+            self.videoFeatureSamples = Array(observations.dropFirst(storedPhotoReferenceCount))
+            self.photoContextFeatureSamples = Array(contextObservations.prefix(storedPhotoContextCount))
+            self.videoContextFeatureSamples = Array(contextObservations.dropFirst(storedPhotoContextCount))
             self.scanContextImages = profile.contextImages ?? []
             self.freshScanSeedRect = nil
             self.freshScanSeedTimestamp = 0
@@ -680,6 +704,26 @@ final class CameraController: NSObject, ObservableObject {
                 self.featurePrint(fromJPEGData: $0)
             }
             if !rebuiltContexts.isEmpty { self.contextFeatureSamples = rebuiltContexts }
+            let photoReferenceCount = min(
+                self.activeProfileID.flatMap { id in
+                    self.savedProfiles.first(where: { $0.id == id })?.photoReferenceCount
+                } ?? min(self.manualPhotoTarget, rebuiltFeatures.count),
+                rebuiltFeatures.count
+            )
+            let photoContextCount = min(
+                self.activeProfileID.flatMap { id in
+                    self.savedProfiles.first(where: { $0.id == id })?.photoContextCount
+                } ?? min(self.manualPhotoTarget, rebuiltContexts.count),
+                rebuiltContexts.count
+            )
+            if !rebuiltFeatures.isEmpty {
+                self.photoFeatureSamples = Array(rebuiltFeatures.prefix(photoReferenceCount))
+                self.videoFeatureSamples = Array(rebuiltFeatures.dropFirst(photoReferenceCount))
+            }
+            if !rebuiltContexts.isEmpty {
+                self.photoContextFeatureSamples = Array(rebuiltContexts.prefix(photoContextCount))
+                self.videoContextFeatureSamples = Array(rebuiltContexts.dropFirst(photoContextCount))
+            }
             self.processingRect = fullFrame
             self.featureFrameCounter = 0
             self.aiDetectionMisses = 0
@@ -844,6 +888,10 @@ final class CameraController: NSObject, ObservableObject {
             if resetProfile {
                 self.featureSamples.removeAll()
                 self.contextFeatureSamples.removeAll()
+                self.photoFeatureSamples.removeAll()
+                self.videoFeatureSamples.removeAll()
+                self.photoContextFeatureSamples.removeAll()
+                self.videoContextFeatureSamples.removeAll()
                 self.sequenceHandler = VNSequenceRequestHandler()
                 self.trackingObservation = nil
                 self.trackingAnchorObservations.removeAll()
@@ -913,6 +961,14 @@ final class CameraController: NSObject, ObservableObject {
                     subjectKind: self.scanSubjectKind,
                     referenceImages: self.scanReferenceImages,
                     contextImages: self.scanContextImages,
+                    photoReferenceCount: min(
+                        self.manualPhotoTarget,
+                        self.scanReferenceImages.count
+                    ),
+                    photoContextCount: min(
+                        self.manualPhotoTarget,
+                        self.scanContextImages.count
+                    ),
                     surfacePointCount: self.scanReferenceImages.count,
                     voxelOccupancy: nil,
                     classificationLabel: self.scanSubjectKind.title
@@ -1836,6 +1892,7 @@ final class CameraController: NSObject, ObservableObject {
         if let feature = featurePrint(fromJPEGData: selection.referenceJPEG) {
             lastAcceptedFeature = feature
             featureSamples.append(feature)
+            photoFeatureSamples.append(feature)
         }
         acceptedViewMasks.append(selection.cells)
         scanReferenceImages.append(selection.referenceJPEG)
@@ -1847,6 +1904,7 @@ final class CameraController: NSObject, ObservableObject {
             scanContextImages.append(contextJPEG)
             if let contextFeature = featurePrint(fromJPEGData: contextJPEG) {
                 contextFeatureSamples.append(contextFeature)
+                photoContextFeatureSamples.append(contextFeature)
             }
         }
         confirmedTargetCells = selection.cells
@@ -1913,6 +1971,7 @@ final class CameraController: NSObject, ObservableObject {
             scanReferenceImages.append(selection.referenceJPEG)
             if let feature = featurePrint(fromJPEGData: selection.referenceJPEG) {
                 featureSamples.append(feature)
+                videoFeatureSamples.append(feature)
             }
             if let contextJPEG = referenceJPEG(
                 from: pixelBuffer,
@@ -1922,6 +1981,7 @@ final class CameraController: NSObject, ObservableObject {
                 scanContextImages.append(contextJPEG)
                 if let feature = featurePrint(fromJPEGData: contextJPEG) {
                     contextFeatureSamples.append(feature)
+                    videoContextFeatureSamples.append(feature)
                 }
             }
             capturedReferenceVideoFrames += 1
@@ -1958,6 +2018,7 @@ final class CameraController: NSObject, ObservableObject {
             guard let self else { return }
             self.isCapturingReferenceVideo = false
             self.referenceVideoProgress = 1
+            self.referenceVideoDisplayStartedAt = nil
             self.scanIsSufficient = true
             self.scanGuidanceText = "Đã ghép 7 ảnh + video 10 giây"
             self.statusText = "AI đã liên kết dữ liệu có sẵn, bộ ảnh và video \(self.scanSubjectKind.title.lowercased())"
@@ -2474,13 +2535,36 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    private struct IdentityEvidenceMatch {
+        let photo: MultiViewMatch
+        let video: MultiViewMatch
+
+        var score: Float { photo.score * 0.56 + video.score * 0.44 }
+        var bestDistance: Float { max(photo.bestDistance, video.bestDistance) }
+        var votes: Int { photo.votes + video.votes }
+        var requiredVotes: Int { photo.requiredVotes + video.requiredVotes }
+        var isAccepted: Bool {
+            photo.isAccepted
+                && video.isAccepted
+                && photo.bestDistance <= 34
+                && video.bestDistance <= 36
+        }
+
+        var similarity: Double {
+            let combined = photo.similarity * 0.56 + video.similarity * 0.44
+            // Tuyệt đối không cho một nguồn đơn lẻ vượt cổng bắt lại 60%.
+            return isAccepted ? combined : min(0.59, combined)
+        }
+    }
+
     private func multiViewMatch(to candidate: VNFeaturePrintObservation) -> MultiViewMatch? {
         multiViewMatch(to: candidate, among: featureSamples)
     }
 
     private func multiViewMatch(
         to candidate: VNFeaturePrintObservation,
-        among samples: [VNFeaturePrintObservation]
+        among samples: [VNFeaturePrintObservation],
+        requiredVotesOverride: Int? = nil
     ) -> MultiViewMatch? {
         var distances: [Float] = []
         for sample in samples {
@@ -2489,18 +2573,54 @@ final class CameraController: NSObject, ObservableObject {
                 distances.append(distance)
             }
         }
-        distances.sort()
-        guard let best = distances.first else { return nil }
-        let requiredVotes: Int
-        if distances.count >= 9 {
-            requiredVotes = 4
-        } else if distances.count >= 5 {
-            requiredVotes = 3
-        } else if distances.count >= 3 {
-            requiredVotes = 2
-        } else {
-            requiredVotes = 1
+        return multiViewMatch(
+            from: distances,
+            requiredVotesOverride: requiredVotesOverride
+        )
+    }
+
+    private func multiViewMatch(
+        to candidate: VNFeaturePrintObservation,
+        among groups: [[VNFeaturePrintObservation]],
+        requiredVotesOverride: Int? = nil
+    ) -> MultiViewMatch? {
+        let distances = groups.compactMap { group -> Float? in
+            var best: Float?
+            for sample in group {
+                var distance: Float = 0
+                guard (try? candidate.computeDistance(&distance, to: sample)) != nil else {
+                    continue
+                }
+                best = min(best ?? distance, distance)
+            }
+            return best
         }
+        return multiViewMatch(
+            from: distances,
+            requiredVotesOverride: requiredVotesOverride
+        )
+    }
+
+    private func multiViewMatch(
+        from unsortedDistances: [Float],
+        requiredVotesOverride: Int? = nil
+    ) -> MultiViewMatch? {
+        let distances = unsortedDistances.sorted()
+        guard let best = distances.first else { return nil }
+        let automaticRequiredVotes: Int
+        if distances.count >= 9 {
+            automaticRequiredVotes = 4
+        } else if distances.count >= 5 {
+            automaticRequiredVotes = 3
+        } else if distances.count >= 3 {
+            automaticRequiredVotes = 2
+        } else {
+            automaticRequiredVotes = 1
+        }
+        let requiredVotes = min(
+            distances.count,
+            max(1, requiredVotesOverride ?? automaticRequiredVotes)
+        )
         let voteThreshold: Float = 44
         let votes = distances.filter { $0 <= voteThreshold }.count
         let selected = distances.prefix(min(requiredVotes, distances.count))
@@ -2519,6 +2639,45 @@ final class CameraController: NSObject, ObservableObject {
         )
     }
 
+    private func temporalGroups(
+        from samples: [VNFeaturePrintObservation],
+        desiredGroupCount: Int = 6
+    ) -> [[VNFeaturePrintObservation]] {
+        guard !samples.isEmpty else { return [] }
+        let groupCount = min(desiredGroupCount, max(1, samples.count))
+        return (0..<groupCount).compactMap { groupIndex in
+            let start = groupIndex * samples.count / groupCount
+            let end = (groupIndex + 1) * samples.count / groupCount
+            guard start < end else { return nil }
+            return Array(samples[start..<end])
+        }
+    }
+
+    private func identityEvidenceMatch(
+        to candidate: VNFeaturePrintObservation,
+        useContextSamples: Bool = false
+    ) -> IdentityEvidenceMatch? {
+        let photos = useContextSamples && !photoContextFeatureSamples.isEmpty
+            ? photoContextFeatureSamples
+            : photoFeatureSamples
+        let videos = useContextSamples && !videoContextFeatureSamples.isEmpty
+            ? videoContextFeatureSamples
+            : videoFeatureSamples
+        guard photos.count >= 3,
+              videos.count >= 3,
+              let photoMatch = multiViewMatch(
+                to: candidate,
+                among: photos,
+                requiredVotesOverride: 2
+              ),
+              let videoMatch = multiViewMatch(
+                to: candidate,
+                among: temporalGroups(from: videos),
+                requiredVotesOverride: 2
+              ) else { return nil }
+        return IdentityEvidenceMatch(photo: photoMatch, video: videoMatch)
+    }
+
     private func personalizedSimilarity(
         in pixelBuffer: CVPixelBuffer,
         rect: CGRect
@@ -2532,11 +2691,9 @@ final class CameraController: NSObject, ObservableObject {
         guard let feature = featurePrint(
             from: pixelBuffer,
             normalizedTopLeftRect: crop
-        ), let match = multiViewMatch(
+        ), let match = identityEvidenceMatch(
             to: feature,
-            among: contextFeatureSamples.isEmpty
-                ? featureSamples
-                : contextFeatureSamples
+            useContextSamples: !contextFeatureSamples.isEmpty
         ) else { return nil }
         return match.similarity
     }
@@ -2919,7 +3076,7 @@ final class CameraController: NSObject, ObservableObject {
         var bestScore = Float.greatestFiniteMagnitude
         for candidate in foregroundCandidates(from: pixelBuffer) {
             guard let feature = candidate.feature,
-                  let match = multiViewMatch(to: feature),
+                  let match = identityEvidenceMatch(to: feature),
                   match.isAccepted else { continue }
             let centerDistance = hypot(
                 candidate.rect.midX - bounds.midX,
@@ -3090,7 +3247,7 @@ final class CameraController: NSObject, ObservableObject {
         var bestScore = Float.greatestFiniteMagnitude
         for candidate in candidates {
             guard let feature = candidate.feature,
-                  let match = multiViewMatch(to: feature),
+                  let match = identityEvidenceMatch(to: feature),
                   match.isAccepted else { continue }
             for detection in detections.prefix(5) {
                 let centerDistance = hypot(
@@ -3146,11 +3303,9 @@ final class CameraController: NSObject, ObservableObject {
                     from: pixelBuffer,
                     normalizedTopLeftRect: crop
                 ),
-                let match = multiViewMatch(
+                let match = identityEvidenceMatch(
                     to: feature,
-                    among: contextFeatureSamples.isEmpty
-                        ? featureSamples
-                        : contextFeatureSamples
+                    useContextSamples: !contextFeatureSamples.isEmpty
                 ),
                 match.isAccepted,
                 match.bestDistance <= 31,
@@ -3489,10 +3644,10 @@ final class CameraController: NSObject, ObservableObject {
         ) else { return false }
 
         if !contextFeatureSamples.isEmpty {
-            guard let match = multiViewMatch(
+            guard let match = identityEvidenceMatch(
                 to: currentFeature,
-                among: contextFeatureSamples
-            ), match.bestDistance <= 38 else {
+                useContextSamples: true
+            ), match.isAccepted else {
                 identityGateStatus = "Vật đã rời vị trí chụp • đang tìm lại toàn màn hình"
                 return false
             }
@@ -3514,11 +3669,11 @@ final class CameraController: NSObject, ObservableObject {
             return
         }
         var bestCandidate: ForegroundCandidate?
-        var bestMatch: MultiViewMatch?
-        var closestRejected: MultiViewMatch?
+        var bestMatch: IdentityEvidenceMatch?
+        var closestRejected: IdentityEvidenceMatch?
         for candidate in foregroundCandidates(from: pixelBuffer) {
             guard let feature = candidate.feature,
-                  let match = multiViewMatch(to: feature) else { continue }
+                  let match = identityEvidenceMatch(to: feature) else { continue }
             if closestRejected == nil || match.score < closestRejected!.score {
                 closestRejected = match
             }
@@ -3548,16 +3703,14 @@ final class CameraController: NSObject, ObservableObject {
                 guard let feature = featurePrint(
                     from: pixelBuffer,
                     normalizedTopLeftRect: rect
-                ), let match = multiViewMatch(
+                ), let match = identityEvidenceMatch(
                     to: feature,
-                    among: contextFeatureSamples
+                    useContextSamples: true
                 ) else { continue }
                 if closestRejected == nil || match.score < closestRejected!.score {
                     closestRejected = match
                 }
-                let strongPersonalMatch = match.isAccepted
-                    || (match.bestDistance <= 28 && match.votes >= 2)
-                guard strongPersonalMatch else { continue }
+                guard match.isAccepted else { continue }
                 if bestMatch == nil || match.score < bestMatch!.score {
                     bestMatch = match
                     bestCandidate = ForegroundCandidate(

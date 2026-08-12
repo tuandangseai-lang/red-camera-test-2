@@ -9,6 +9,11 @@ struct SavedScanProfile: Codable, Equatable, Identifiable {
     /// Ảnh crop thật từ 7 góc và các khung đại diện của video 10 giây. Dùng cho
     /// nhánh nhận diện cá nhân cùng với model tên lửa/chai có sẵn.
     let contextImages: [Data]?
+    /// Số ảnh tĩnh nằm ở đầu `referenceImages` / `contextImages`. Phần còn lại là
+    /// khung lấy từ video mẫu 10 giây. Tách nguồn để một góc video lặp lại không
+    /// được tính thành nhiều phiếu độc lập khi xác minh danh tính.
+    let photoReferenceCount: Int?
+    let photoContextCount: Int?
     let surfacePointCount: Int
     let voxelOccupancy: [Bool]?
     let classificationLabel: String?
@@ -61,6 +66,8 @@ final class ScanProfileStore {
                 subjectKind: .waterRocket,
                 referenceImages: profile.referenceImages,
                 contextImages: profile.contextImages,
+                photoReferenceCount: profile.photoReferenceCount,
+                photoContextCount: profile.photoContextCount,
                 surfacePointCount: profile.surfacePointCount,
                 voxelOccupancy: profile.voxelOccupancy,
                 classificationLabel: profile.classificationLabel
@@ -100,6 +107,8 @@ final class ScanProfileStore {
                 subjectKind: profile.subjectKind,
                 referenceImages: profile.referenceImages,
                 contextImages: profile.contextImages,
+                photoReferenceCount: profile.photoReferenceCount,
+                photoContextCount: profile.photoContextCount,
                 surfacePointCount: profile.surfacePointCount,
                 voxelOccupancy: profile.voxelOccupancy,
                 classificationLabel: profile.classificationLabel
