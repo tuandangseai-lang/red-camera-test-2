@@ -44,7 +44,7 @@ final class BLEManager: NSObject, ObservableObject {
         }
         peripheral.writeValue(data, for: characteristic, type: writeType)
         if message.hasPrefix("S,") {
-            connectionText = "ESP32 đang tìm theo quỹ đạo cuối"
+            connectionText = "Đang tìm"
         } else if message == "TARGET_LOCKED" {
             connectionText = "ESP32 đang bám mục tiêu"
         } else if message == "SEARCH_STOP" || message == "RECORDING_STOPPED" {

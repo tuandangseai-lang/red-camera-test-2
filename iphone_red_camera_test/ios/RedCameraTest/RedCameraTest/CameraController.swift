@@ -112,7 +112,9 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var selectedSubjectMaskImage: UIImage?
     @Published private(set) var selectedSubjectRect: CGRect?
     @Published private(set) var subjectContourPoints: [CGPoint] = []
-    @Published private(set) var detectedSubjectLabel = "Chưa phân loại"
+    // Nhãn giao diện luôn đi theo tab đang chọn. Nhãn chi tiết của AI (chai,
+    // chó, mèo...) chỉ dùng nội bộ, không được ghi đè tên tab.
+    @Published private(set) var detectedSubjectLabel = "Tên lửa nước"
     @Published private(set) var detectedSubjectConfidence = 0.0
     @Published private(set) var isARScanning = false
     @Published private(set) var targetRect: CGRect?
@@ -420,7 +422,7 @@ final class CameraController: NSObject, ObservableObject {
         selectedSubjectRect = nil
         subjectContourPoints = []
         subjectContourPoints = []
-        detectedSubjectLabel = "Chưa phân loại"
+        detectedSubjectLabel = scanSubjectKind.title
         detectedSubjectConfidence = 0
         targetRect = nil
         trackingPoints = []
@@ -483,7 +485,7 @@ final class CameraController: NSObject, ObservableObject {
         selectedSubjectMaskImage = nil
         selectedSubjectRect = nil
         subjectContourPoints = []
-        detectedSubjectLabel = "Chưa phân loại"
+        detectedSubjectLabel = scanSubjectKind.title
         detectedSubjectConfidence = 0
         targetRect = nil
         trackingPoints = []
@@ -502,8 +504,8 @@ final class CameraController: NSObject, ObservableObject {
             y: min(0.99, max(0.01, normalizedPoint.y))
         )
         scanNeedsNewAngle = false
-        scanGuidanceText = "Đang tách riêng vật tại điểm bạn chạm..."
-        statusText = "Đang xác định vật trong ảnh"
+        scanGuidanceText = "Đang tách riêng \(scanSubjectKind.title.lowercased()) tại điểm bạn chạm..."
+        statusText = "Đang xác định \(scanSubjectKind.title.lowercased()) trong ảnh"
         videoQueue.async { [weak self] in
             self?.selectedSubjectPoint = point
             self?.manualSelectionRequested = true
@@ -518,7 +520,7 @@ final class CameraController: NSObject, ObservableObject {
             return
         }
         scanNeedsNewAngle = false
-        scanGuidanceText = "AI đang tìm chai trong ảnh..."
+        scanGuidanceText = "AI đang tìm \(scanSubjectKind.title.lowercased()) trong ảnh..."
         videoQueue.async { [weak self] in
             guard let self, !self.manualCaptureRequested else { return }
             self.manualCaptureRequested = true
@@ -534,7 +536,7 @@ final class CameraController: NSObject, ObservableObject {
         referenceVideoFrameCount = 0
         scanIsSufficient = false
         scanNeedsNewAngle = false
-        scanGuidanceText = "Quay vật từ từ quanh vòng tròn trong 10 giây"
+        scanGuidanceText = "Quay \(scanSubjectKind.title.lowercased()) từ từ trong 10 giây"
         matchText = "VIDEO MẪU 0,0/10,0 GIÂY"
         statusText = "AI sẽ lấy 24 khung và ghép với 7 ảnh đã chụp"
         videoQueue.async { [weak self] in
@@ -544,7 +546,10 @@ final class CameraController: NSObject, ObservableObject {
             self.capturedReferenceVideoFrames = 0
             self.lastReferenceVideoRect = nil
         }
-        announce("Bắt đầu video mẫu. Hãy quay vật từ từ trong mười giây.", kind: .start)
+        announce(
+            "Bắt đầu video mẫu \(scanSubjectKind.title.lowercased()). Hãy quay từ từ trong mười giây.",
+            kind: .start
+        )
         onEvent?("REFERENCE_VIDEO_START")
     }
 
@@ -599,7 +604,7 @@ final class CameraController: NSObject, ObservableObject {
                 self.activeProfileID = profile.id
                 self.learnedSamples = observations.count
                 self.surfacePointCount = profile.surfacePointCount
-                self.detectedSubjectLabel = profile.classificationLabel ?? profile.subjectKind.title
+                self.detectedSubjectLabel = profile.subjectKind.title
                 self.detectedSubjectConfidence = 1
                 self.crystalFacets3D = storedFacets
                 self.scanHasConfirmedTarget = true
@@ -709,7 +714,7 @@ final class CameraController: NSObject, ObservableObject {
         trackingPoints = []
         predictedTargetPoint = nil
         matchText = "Đang tìm lại \(detectedSubjectLabel) trên toàn màn hình..."
-        statusText = "Có thể đặt vật ở bất kỳ vị trí nào trong khung camera"
+        statusText = "Có thể đặt \(scanSubjectKind.title.lowercased()) ở bất kỳ vị trí nào trong khung camera"
         videoQueue.async { [weak self] in
             guard let self else { return }
             self.processingRect = fullFrame
@@ -812,7 +817,7 @@ final class CameraController: NSObject, ObservableObject {
         hasSelectedSubject = false
         selectedSubjectMaskImage = nil
         selectedSubjectRect = nil
-        detectedSubjectLabel = "Chưa phân loại"
+        detectedSubjectLabel = scanSubjectKind.title
         detectedSubjectConfidence = 0
         targetRect = rect
         matchText = "CHỤP BÌNH THƯỜNG • AI TỰ CHỌN VẬT NHẤT QUÁN"
@@ -886,14 +891,14 @@ final class CameraController: NSObject, ObservableObject {
                 formatter.dateFormat = "dd/MM HH:mm"
                 let profile = SavedScanProfile(
                     id: UUID(),
-                    name: "\(self.detectedSubjectLabel.capitalized) \(formatter.string(from: Date()))",
+                    name: "\(self.scanSubjectKind.title) \(formatter.string(from: Date()))",
                     createdAt: Date(),
                     subjectKind: self.scanSubjectKind,
                     referenceImages: self.scanReferenceImages,
                     contextImages: self.scanContextImages,
                     surfacePointCount: self.scanReferenceImages.count,
                     voxelOccupancy: nil,
-                    classificationLabel: self.detectedSubjectLabel
+                    classificationLabel: self.scanSubjectKind.title
                 )
                 updatedProfiles = self.profileStore.save(profile)
                 savedProfile = profile
@@ -1730,8 +1735,8 @@ final class CameraController: NSObject, ObservableObject {
                 self.selectedSubjectRect = nil
                 self.subjectContourPoints = []
                 self.scanNeedsNewAngle = true
-                self.scanGuidanceText = "Không tách được vật • hãy chạm gần giữa vật"
-                self.statusText = "AI chưa xác định được vật trong ảnh này"
+                self.scanGuidanceText = "Không tách được \(self.scanSubjectKind.title.lowercased()) • hãy chạm gần giữa chủ thể"
+                self.statusText = "AI chưa xác định được \(self.scanSubjectKind.title.lowercased()) trong ảnh này"
             }
             return
         }
@@ -1744,8 +1749,8 @@ final class CameraController: NSObject, ObservableObject {
                 self.selectedSubjectRect = nil
                 self.subjectContourPoints = []
                 self.scanNeedsNewAngle = true
-                self.scanGuidanceText = "Đưa một phần chính của vật qua tâm vòng tròn"
-                self.statusText = "Vật được phép lớn và tràn khỏi vòng, nhưng tâm vòng phải chạm vật"
+                self.scanGuidanceText = "Đưa một phần chính của \(self.scanSubjectKind.title.lowercased()) qua tâm vòng tròn"
+                self.statusText = "Chủ thể được phép tràn khỏi vòng, nhưng tâm vòng phải chạm chủ thể"
             }
             return
         }
@@ -1765,14 +1770,14 @@ final class CameraController: NSObject, ObservableObject {
             self.subjectContourPoints = selection.contourPoints
             self.scanHasConfirmedTarget = true
             self.targetConfirmationProgress = 1
-            self.detectedSubjectLabel = classification.label
+            self.detectedSubjectLabel = self.scanSubjectKind.title
             self.detectedSubjectConfidence = classification.confidence
             self.scanNeedsNewAngle = false
             self.scanGuidanceText = self.nextReferenceGuidance(after: 0)
-            self.matchText = "NHẬN DIỆN: \(classification.label.uppercased()) • \(Int(classification.confidence * 100))%"
+            self.matchText = "NHẬN DIỆN: \(self.scanSubjectKind.title.uppercased()) • \(Int(classification.confidence * 100))%"
             self.statusText = selection.removedHand
                 ? "Đã loại vùng bàn tay; nếu chọn sai hãy chạm lại"
-                : "Nếu chọn sai, chạm lại vào đúng vật"
+                : "Nếu chọn sai, chạm lại vào đúng \(self.scanSubjectKind.title.lowercased())"
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             self.announce("Đã chọn đúng \(self.scanSubjectKind.title.lowercased()) cần chụp.", kind: .success)
             self.onEvent?("SUBJECT_SELECTED")
@@ -1803,7 +1808,7 @@ final class CameraController: NSObject, ObservableObject {
                 self?.scanHasConfirmedTarget = false
                 self?.matchText = "CHƯA XÁC NHẬN ĐÚNG \(self?.scanSubjectKind.title.uppercased() ?? "CHỦ THỂ")"
                 self?.scanGuidanceText = "Đặt đúng chủ thể đã chọn vào giữa vòng tròn rồi chụp lại"
-                self?.statusText = "Ảnh chưa được lưu để tránh lấy nhầm vật khác"
+                self?.statusText = "Ảnh chưa được lưu để tránh lấy nhầm chủ thể khác"
             }
             return
         }
@@ -1847,7 +1852,7 @@ final class CameraController: NSObject, ObservableObject {
             self.subjectContourPoints = []
             self.scanHasConfirmedTarget = true
             self.targetConfirmationProgress = 1
-            self.detectedSubjectLabel = reference.label
+            self.detectedSubjectLabel = self.scanSubjectKind.title
             self.detectedSubjectConfidence = reference.confidence
             self.learnedSamples = count
             self.scanViewpointCount = count
@@ -1856,12 +1861,12 @@ final class CameraController: NSObject, ObservableObject {
             self.scanProgress = self.shapeScanCoverage
             self.scanIsSufficient = false
             self.scanNeedsNewAngle = false
-            self.matchText = "ĐÃ XÁC NHẬN \(reference.label.uppercased()) \(Int(reference.confidence * 100))% • \(count)/7"
+            self.matchText = "ĐÃ XÁC NHẬN \(self.scanSubjectKind.title.uppercased()) \(Int(reference.confidence * 100))% • \(count)/7"
             self.scanGuidanceText = photosComplete
-                ? "Đã đủ 7 ảnh • bấm nút video và quay quanh vật 10 giây"
+                ? "Đã đủ 7 ảnh • bấm video và quay \(self.scanSubjectKind.title.lowercased()) trong 10 giây"
                 : self.nextReferenceGuidance(after: count)
             self.statusText = photosComplete
-                ? "Bước cuối: video quanh vật sẽ bổ sung góc chuyển tiếp cho AI"
+                ? "Bước cuối: video \(self.scanSubjectKind.title.lowercased()) sẽ bổ sung góc chuyển tiếp cho AI"
                 : "Ảnh đã lưu • làm theo hướng chụp tiếp theo"
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             self.onEvent?("REFERENCE_PHOTO_\(count)")
@@ -1906,7 +1911,7 @@ final class CameraController: NSObject, ObservableObject {
             freshScanSeedRect = selection.boundingRect
             freshScanSeedTimestamp = now
             DispatchQueue.main.async { [weak self] in
-                self?.detectedSubjectLabel = reference.label
+                self?.detectedSubjectLabel = self?.scanSubjectKind.title ?? reference.kind.title
                 self?.detectedSubjectConfidence = reference.confidence
             }
         }
@@ -1938,7 +1943,7 @@ final class CameraController: NSObject, ObservableObject {
             self.referenceVideoProgress = 1
             self.scanIsSufficient = true
             self.scanGuidanceText = "Đã ghép 7 ảnh + video 10 giây"
-            self.statusText = "AI đã liên kết model có sẵn, bộ ảnh và video vật mới"
+            self.statusText = "AI đã liên kết dữ liệu có sẵn, bộ ảnh và video \(self.scanSubjectKind.title.lowercased())"
             self.announce("Video mẫu hoàn tất. Mô hình nhận diện đã sẵn sàng.", kind: .success)
             self.onEvent?("REFERENCE_VIDEO_DONE")
         }
@@ -2191,10 +2196,10 @@ final class CameraController: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.isReady = true
-            self.statusText = "Đặt tên lửa vào khung; app đang dùng góc siêu rộng để tránh hụt mục tiêu"
+            self.statusText = "Chọn đúng tab rồi tạo mẫu; camera góc rộng giúp tránh hụt mục tiêu"
             if self.pendingArm {
                 self.pendingArm = false
-                self.statusText = "Đã nhận ARM nhưng cần quét tên lửa trước"
+                self.statusText = "Đã nhận ARM nhưng cần tạo mẫu \(self.scanSubjectKind.title.lowercased()) trước"
             }
         }
     }
@@ -3242,23 +3247,14 @@ final class CameraController: NSObject, ObservableObject {
                     && (0.045...0.955).contains(centre.y)
             }
             if isRecoveringLostTarget {
-                // Không khóa lại chỉ bằng nhãn YOLO. Ứng viên phải giống bộ ảnh/video
-                // cá nhân và là vật tiền cảnh thật, nhờ vậy ảnh chai phản trên bảng bị loại.
-                let foreground = foregroundCandidates(
-                    from: pixelBuffer,
-                    includeFeaturePrints: false
-                )
+                // Khi đã mất mục tiêu, điểm khớp bộ ảnh/video cá nhân là cổng quyết
+                // định. Đạt 60% sẽ trả ứng viên ngay trong frame hiện tại.
                 let verified = onScreen.compactMap { detection -> (WaterRocketDetection, Double)? in
                     let similarity = personalizedSimilarity(
                         in: pixelBuffer,
                         rect: detection.rect
                     ) ?? 0
-                    guard similarity >= immediateReacquisitionSimilarity,
-                          hasIndependentForegroundSupport(
-                            for: detection.rect,
-                            in: pixelBuffer,
-                            candidates: foreground
-                          ) else { return nil }
+                    guard similarity >= immediateReacquisitionSimilarity else { return nil }
                     return (detection, similarity * 0.72 + detection.confidence * 0.28)
                 }
                 return verified.max { $0.1 < $1.1 }?.0
@@ -3388,23 +3384,13 @@ final class CameraController: NSObject, ObservableObject {
             in: pixelBuffer,
             rect: detection.rect
         ) ?? 0
-        let categoryIsCorrect = categoryConfidence(
-            for: detection.rect,
-            in: pixelBuffer
-        ) != nil
         // Khi bắt lại, mọi nhãn (kể cả tên lửa chuyên dụng) đều phải giống bộ
         // ảnh/video cá nhân. Không cho ảnh phản chiếu đi đường tắt bằng điểm YOLO.
         let reacquisitionSimilarity = personalSimilarity
         if isRecoveringLostTarget {
-            // Sau 0,3 giây bestAIDetection đã kiểm tra tiền cảnh một lần cho toàn
-            // bộ ứng viên; chỉ kiểm tra tại đây trong đoạn ưu tiên quỹ đạo ban đầu.
-            let foregroundSupported = expectedRect == nil
-                || hasIndependentForegroundSupport(for: detection.rect, in: pixelBuffer)
-            guard categoryIsCorrect,
-                  foregroundSupported,
-                  reacquisitionSimilarity >= immediateReacquisitionSimilarity else {
+            guard reacquisitionSimilarity >= immediateReacquisitionSimilarity else {
                 publishSearchProgress(
-                    message: "Đang đối chứng vật thật • \(Int(reacquisitionSimilarity * 100))% / cần 60%"
+                    message: "Đang tìm • khớp \(Int(reacquisitionSimilarity * 100))% / cần 60%"
                 )
                 return true
             }
@@ -3413,7 +3399,7 @@ final class CameraController: NSObject, ObservableObject {
                 trianglePoints: representativeTrackingPoints(in: detection.rect),
                 confidence: reacquisitionSimilarity,
                 matchDescription: "BẮT LẠI NGAY • KHỚP \(Int(reacquisitionSimilarity * 100))%",
-                statusDescription: "Đã đạt 60% và không phải ảnh phản chiếu — ESP32 bám lại"
+                statusDescription: "Đã đạt 60% — bám lại ngay"
             )
             return true
         }
@@ -3582,15 +3568,6 @@ final class CameraController: NSObject, ObservableObject {
         }
 
         let score = match.similarity
-        let categoryIsCorrect = categoryConfidence(
-            for: candidate.rect,
-            in: pixelBuffer
-        ) != nil
-        guard categoryIsCorrect else {
-            publishSearchProgress(message: "Ứng viên chưa đúng loại \(scanSubjectKind.title.lowercased())")
-            return
-        }
-
         if isRecoveringLostTarget,
            score < immediateReacquisitionSimilarity {
             publishSearchProgress(
@@ -3612,8 +3589,17 @@ final class CameraController: NSObject, ObservableObject {
                 trianglePoints: candidate.trianglePoints,
                 confidence: score,
                 matchDescription: String(format: "BẮT LẠI NGAY • KHỚP %.0f%%", score * 100),
-                statusDescription: "Đã đạt 60% — ESP32 dừng tìm và bám lại ngay"
+                statusDescription: "Đã đạt 60% — bám lại ngay"
             )
+            return
+        }
+
+        let categoryIsCorrect = categoryConfidence(
+            for: candidate.rect,
+            in: pixelBuffer
+        ) != nil
+        guard categoryIsCorrect else {
+            publishSearchProgress(message: "Ứng viên chưa đúng loại \(scanSubjectKind.title.lowercased())")
             return
         }
 
@@ -3968,7 +3954,7 @@ final class CameraController: NSObject, ObservableObject {
 
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("rocket-track-\(UUID().uuidString).mov")
-        statusText = "Đã khóa tên lửa — đang bắt đầu quay..."
+        statusText = "Đã khóa \(scanSubjectKind.title.lowercased()) — đang bắt đầu quay..."
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -4517,9 +4503,9 @@ final class CameraController: NSObject, ObservableObject {
             self.surfacePointCount = voxelCount
             self.learnedSamples = self.featureSamples.count
             self.scanNeedsNewAngle = false
-            self.scanGuidanceText = "Đã xác nhận • giữ iPhone cố định và xoay vật chậm"
+            self.scanGuidanceText = "Đã xác nhận • giữ iPhone cố định và xoay \(self.scanSubjectKind.title.lowercased()) chậm"
             self.matchText = "ĐÃ KHÓA CHỦ THỂ • bắt đầu dựng khối 3D"
-            self.announce("Đã xác nhận đúng chủ thể. Hãy xoay vật chậm.", kind: .success)
+            self.announce("Đã xác nhận đúng \(self.scanSubjectKind.title.lowercased()). Hãy xoay chậm.", kind: .success)
             self.onEvent?("SCAN_TARGET_CONFIRMED")
         }
         return true
@@ -4616,7 +4602,7 @@ final class CameraController: NSObject, ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.scanNeedsNewAngle = true
-                self.scanGuidanceText = "Xoay vật thêm một chút • thay đổi \(changePercent)%"
+                self.scanGuidanceText = "Xoay \(self.scanSubjectKind.title.lowercased()) thêm một chút • thay đổi \(changePercent)%"
             }
             return
         }
@@ -4660,7 +4646,7 @@ final class CameraController: NSObject, ObservableObject {
             self.scanNeedsNewAngle = false
             self.scanGuidanceText = sufficient
                 ? "Đã dựng đủ khối 3D cần thiết"
-                : "Đã nhận mặt \(acceptedViews)/8 • tiếp tục xoay vật"
+                : "Đã nhận mặt \(acceptedViews)/8 • tiếp tục xoay \(self.scanSubjectKind.title.lowercased())"
             self.matchText = "KHỐI 3D \(coveragePercent)% • \(voxelCount) voxel bề mặt"
         }
 
@@ -4738,7 +4724,7 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
                 }
                 // Feature-print đa góc là đường dự phòng nặng. Lúc cứu mục tiêu chỉ
                 // chạy thưa để không chặn detector Core ML đang quét từng frame.
-                let personalizedStride = isRecoveringLostTarget ? 24 : 12
+                let personalizedStride = isRecoveringLostTarget ? 6 : 12
                 if featureFrameCounter % personalizedStride == 1 {
                     verifyAndLock(pixelBuffer: pixelBuffer)
                 }

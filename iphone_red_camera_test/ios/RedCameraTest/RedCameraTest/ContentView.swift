@@ -120,7 +120,7 @@ struct ContentView: View {
     }
 
     /// Lớp AR chỉ nằm trong SwiftUI preview. Video được AVCaptureMovieFileOutput ghi
-    /// trực tiếp từ camera nên mũi tên và nhãn ESP32 không xuất hiện trong file lưu.
+    /// trực tiếp từ camera nên mũi tên và nhãn tìm không xuất hiện trong file lưu.
     private func servoTrajectorySearchOverlay(
         vector: CGPoint,
         in size: CGSize
@@ -179,7 +179,7 @@ struct ContentView: View {
                 Circle()
                     .fill(Color.cyan)
                     .frame(width: 7, height: 7)
-                Text("ESP32 ĐANG TÌM")
+                Text("ĐANG TÌM")
                     .font(.system(size: 11, weight: .black, design: .rounded))
             }
             .foregroundStyle(.white)
@@ -648,7 +648,7 @@ struct ContentView: View {
 
                         Spacer()
 
-                        Image(systemName: "waterbottle.fill")
+                        Image(systemName: camera.scanSubjectKind.symbol)
                             .font(.title3)
                             .foregroundStyle(.cyan)
                             .frame(width: 42, height: 42)
