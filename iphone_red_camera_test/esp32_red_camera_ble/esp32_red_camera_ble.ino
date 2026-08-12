@@ -48,11 +48,14 @@ constexpr uint32_t CONTROL_PERIOD_MS = 20;  // Điều khiển servo 50 lần/gi
 constexpr float PAN_MAX_SPEED_DPS = 120.0f;
 constexpr float TILT_MAX_SPEED_DPS = 100.0f;
 
-// Khi app mất mục tiêu, giá đỡ tự quét nhẹ quanh góc cuối cùng để tìm lại.
-// Biên độ nhỏ để video không bị quăng mạnh và tránh xoắn dây.
-constexpr float SEARCH_PAN_SPAN_DEG = 11.0f;
-constexpr float SEARCH_TILT_SPAN_DEG = 6.0f;
-constexpr float SEARCH_PHASE_SPEED = 2.4f;  // radian/giây.
+// Khi mất mục tiêu, đi tiếp theo vector bay cuối trong 0,65 giây. Nếu vẫn chưa
+// thấy, chỉ rà một dải hẹp dọc theo chính quỹ đạo đó, không quét ngẫu nhiên.
+constexpr uint32_t TRAJECTORY_LEAD_MS = 650;
+constexpr float TRAJECTORY_MAX_PAN_SPEED_DPS = 85.0f;
+constexpr float TRAJECTORY_MAX_TILT_SPEED_DPS = 70.0f;
+constexpr float SEARCH_ALONG_SPAN_DEG = 10.0f;
+constexpr float SEARCH_CROSS_SPAN_DEG = 2.5f;
+constexpr float SEARCH_PHASE_SPEED = 3.0f;
 
 constexpr char DEVICE_NAME[] = "RocketTracker-Test";
 constexpr char SERVICE_UUID[] = "7E57A000-8E3A-4D6A-9B2B-13B10A000001";
@@ -81,7 +84,12 @@ float panAngleDeg = PAN_CENTER_DEG;
 float tiltAngleDeg = TILT_CENTER_DEG;
 float searchOriginPanDeg = PAN_CENTER_DEG;
 float searchOriginTiltDeg = TILT_CENTER_DEG;
+float searchDirectionPan = 0.0f;
+float searchDirectionTilt = 0.0f;
+float searchPanSpeedDps = 0.0f;
+float searchTiltSpeedDps = 0.0f;
 float searchPhase = 0.0f;
+uint32_t searchStartedAtMs = 0;
 uint32_t lastControlAtMs = 0;
 uint32_t lastTelemetryPrintAtMs = 0;
 
@@ -114,13 +122,46 @@ void stopTrackingTarget() {
   portEXIT_CRITICAL(&trackingMux);
 }
 
-void startSearchPattern() {
+void startTrajectorySearch(int predictedX, int predictedY, int velocityX,
+                           int velocityY) {
+  if (searchMode) return;  // Gói nhắc lại không được đặt lại quỹ đạo từ đầu.
   stopTrackingTarget();
   searchOriginPanDeg = panAngleDeg;
   searchOriginTiltDeg = tiltAngleDeg;
+  float directionX = clampFloat(velocityX / 99.0f, -1.0f, 1.0f);
+  float directionY = clampFloat(velocityY / 99.0f, -1.0f, 1.0f);
+  float magnitude = sqrtf(directionX * directionX + directionY * directionY);
+
+  // Nếu vận tốc cuối quá nhỏ, dùng phía mà mục tiêu vừa lệch khỏi tâm.
+  if (magnitude < 0.08f) {
+    directionX = clampFloat((predictedX - IMAGE_CENTER) / 500.0f, -1.0f, 1.0f);
+    directionY = clampFloat((predictedY - IMAGE_CENTER) / 500.0f, -1.0f, 1.0f);
+    magnitude = sqrtf(directionX * directionX + directionY * directionY);
+  }
+  if (magnitude >= 0.02f) {
+    directionX /= magnitude;
+    directionY /= magnitude;
+  } else {
+    directionX = 0.0f;
+    directionY = 0.0f;
+  }
+
+  searchDirectionPan = PAN_DIRECTION * directionX;
+  searchDirectionTilt = TILT_DIRECTION * directionY;
+  const float speedFactor = clampFloat(magnitude, 0.20f, 1.0f);
+  searchPanSpeedDps = searchDirectionPan * TRAJECTORY_MAX_PAN_SPEED_DPS * speedFactor;
+  searchTiltSpeedDps = searchDirectionTilt * TRAJECTORY_MAX_TILT_SPEED_DPS * speedFactor;
   searchPhase = 0.0f;
+  searchStartedAtMs = millis();
   searchMode = true;
-  Serial.println("[SEARCH] Quet nhe trai-phai va tren-duoi quanh goc cuoi.");
+  Serial.printf(
+      "[SEARCH] Theo quy dao x=%d y=%d vx=%d vy=%d | huong %.2f/%.2f\n",
+      predictedX, predictedY, velocityX, velocityY, searchDirectionPan,
+      searchDirectionTilt);
+}
+
+void startSearchPattern() {
+  startTrajectorySearch(latestTargetX, latestTargetY, 0, 0);
 }
 
 void stopSearchPattern() {
@@ -159,11 +200,27 @@ void updateServosFromTarget() {
   deltaSeconds = clampFloat(deltaSeconds, 0.001f, 0.050f);
 
   if (phoneConnected && searchMode) {
-    searchPhase += SEARCH_PHASE_SPEED * deltaSeconds;
-    // Hai tần số khác nhau tạo đường quét hình số 8 nhỏ, phủ cả bốn hướng.
-    panAngleDeg = searchOriginPanDeg + SEARCH_PAN_SPAN_DEG * sinf(searchPhase);
-    tiltAngleDeg =
-        searchOriginTiltDeg + SEARCH_TILT_SPAN_DEG * sinf(searchPhase * 0.57f);
+    const uint32_t searchAgeMs = now - searchStartedAtMs;
+    const float leadSeconds =
+        min(searchAgeMs, TRAJECTORY_LEAD_MS) / 1000.0f;
+    const float predictedPan =
+        searchOriginPanDeg + searchPanSpeedDps * leadSeconds;
+    const float predictedTilt =
+        searchOriginTiltDeg + searchTiltSpeedDps * leadSeconds;
+
+    if (searchAgeMs <= TRAJECTORY_LEAD_MS) {
+      panAngleDeg = predictedPan;
+      tiltAngleDeg = predictedTilt;
+    } else {
+      // Rà dọc quỹ đạo; phương vuông góc chỉ lệch rất nhỏ để bù sai số dự đoán.
+      searchPhase += SEARCH_PHASE_SPEED * deltaSeconds;
+      const float along = SEARCH_ALONG_SPAN_DEG * sinf(searchPhase);
+      const float cross = SEARCH_CROSS_SPAN_DEG * sinf(searchPhase * 0.53f);
+      panAngleDeg = predictedPan + searchDirectionPan * along -
+                    searchDirectionTilt * cross;
+      tiltAngleDeg = predictedTilt + searchDirectionTilt * along +
+                     searchDirectionPan * cross;
+    }
     panAngleDeg = clampFloat(panAngleDeg, PAN_MIN_DEG, PAN_MAX_DEG);
     tiltAngleDeg = clampFloat(tiltAngleDeg, TILT_MIN_DEG, TILT_MAX_DEG);
     writeServoAngles();
@@ -233,6 +290,20 @@ void acceptTrackingPacket(int x, int y, int confidence) {
 void handlePhoneMessage(String value) {
   value.trim();
   if (value.length() == 0) return;
+
+  if (value.startsWith("S,")) {
+    int x = IMAGE_CENTER;
+    int y = IMAGE_CENTER;
+    int velocityX = 0;
+    int velocityY = 0;
+    if (sscanf(value.c_str(), "S,%d,%d,%d,%d", &x, &y, &velocityX,
+               &velocityY) == 4) {
+      startTrajectorySearch(constrain(x, 0, 999), constrain(y, 0, 999),
+                            constrain(velocityX, -99, 99),
+                            constrain(velocityY, -99, 99));
+    }
+    return;
+  }
 
   if (value.startsWith("T,")) {
     int x = 0;

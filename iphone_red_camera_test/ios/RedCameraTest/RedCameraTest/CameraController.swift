@@ -218,6 +218,8 @@ final class CameraController: NSObject, ObservableObject {
     private var recoverySeedEstimate: RocketMotionEstimate?
     private var recoveryStartedAt: TimeInterval = 0
     private var isRecoveringLostTarget = false
+    private var recoverySearchCommand = "SEARCH_START"
+    private var lastSearchCommandSentAt: TimeInterval = 0
 
     // Quét 3D gần đúng trên iPhone không LiDAR: ARKit cung cấp vị trí camera và
     // điểm đặc trưng 3D, Vision giữ lại các điểm nằm trên mặt nạ chủ thể.
@@ -672,7 +674,7 @@ final class CameraController: NSObject, ObservableObject {
         surfacePointCount = 0
         scanHasConfirmedTarget = false
         targetConfirmationProgress = 0
-        hasSelectedSubject = true
+        hasSelectedSubject = false
         selectedSubjectMaskImage = nil
         selectedSubjectRect = nil
         detectedSubjectLabel = "Chưa phân loại"
@@ -851,17 +853,23 @@ final class CameraController: NSObject, ObservableObject {
         )
     }
 
-    /// Người dùng chỉ cần đặt chai tên lửa nổi bật trong ảnh. Hai detector tìm
-    /// hộp chai/tên lửa; nếu cả hai hụt vì chai trong suốt, crop trung tâm lớn
-    /// vẫn được lưu và tính nhất quán giữa bảy ảnh sẽ loại cảnh sai.
+    /// Chỉ chọn chai/tên lửa đã được AI xác nhận và có tâm nằm trong vòng tròn.
+    /// Các vật ở ngoài vòng hoặc ở bốn góc crop không được đưa vào bộ ảnh mẫu.
     private func automaticReferenceSelection(
         from pixelBuffer: CVPixelBuffer
-    ) -> ManualSubjectMask? {
+    ) -> (selection: ManualSubjectMask, detection: WaterRocketDetection)? {
+        let guide = scanRect
+        let isFarPhoto = scanReferenceImages.count >= manualPhotoTarget - 1
+        let minimumArea: CGFloat = isFarPhoto ? 0.00035 : 0.0025
         let detections = detectRocketOrBottle(
             in: pixelBuffer,
-            minimumConfidence: 0.08
+            minimumConfidence: isFarPhoto ? 0.06 : 0.10,
+            regionOfInterest: guide
         ).filter {
-            $0.rect.width * $0.rect.height >= 0.012
+            let normalizedX = ($0.rect.midX - guide.midX) / max(0.001, guide.width / 2)
+            let normalizedY = ($0.rect.midY - guide.midY) / max(0.001, guide.height / 2)
+            let insideCircle = normalizedX * normalizedX + normalizedY * normalizedY <= 1.0
+            return insideCircle && $0.rect.width * $0.rect.height >= minimumArea
         }
         let center = CGPoint(x: 0.5, y: 0.5)
         let selected = detections.max { lhs, rhs in
@@ -884,18 +892,24 @@ final class CameraController: NSObject, ObservableObject {
         if let detection = selected {
             let padX = max(0.025, detection.rect.width * 0.10)
             let padY = max(0.030, detection.rect.height * 0.08)
-            return rawSubjectSelection(
+            let padded = detection.rect
+                .insetBy(dx: -padX, dy: -padY)
+                .intersection(guide)
+            let cropWidth = max(0.08, padded.width)
+            let cropHeight = max(0.10, padded.height)
+            let crop = CGRect(
+                x: padded.midX - cropWidth / 2,
+                y: padded.midY - cropHeight / 2,
+                width: cropWidth,
+                height: cropHeight
+            ).intersection(guide)
+            guard let selection = rawSubjectSelection(
                 from: pixelBuffer,
-                rect: detection.rect.insetBy(dx: -padX, dy: -padY)
-            )
+                rect: crop
+            ) else { return nil }
+            return (selection, detection)
         }
-
-        // Fallback dành cho chai PET trong suốt bị mất biên: người dùng chỉ cần
-        // đặt vật chính ở giữa và cho nó chiếm phần lớn ảnh.
-        return rawSubjectSelection(
-            from: pixelBuffer,
-            rect: CGRect(x: 0.08, y: 0.035, width: 0.84, height: 0.93)
-        )
+        return nil
     }
 
     private func instanceLabel(
@@ -1581,13 +1595,18 @@ final class CameraController: NSObject, ObservableObject {
         from pixelBuffer: CVPixelBuffer,
         kind: ScanKind
     ) {
-        guard let selection = automaticReferenceSelection(from: pixelBuffer) else {
+        guard let reference = automaticReferenceSelection(from: pixelBuffer) else {
             DispatchQueue.main.async { [weak self] in
                 self?.scanNeedsNewAngle = true
-                self?.scanGuidanceText = "Chưa tìm thấy chai • đưa vật lớn hơn vào giữa ảnh"
+                self?.scanHasConfirmedTarget = false
+                self?.matchText = "CHƯA XÁC NHẬN ĐƯỢC CHAI"
+                self?.scanGuidanceText = "Đặt thân chai vào giữa vòng tròn rồi chụp lại"
+                self?.statusText = "Ảnh chưa được lưu để tránh lấy nhầm vật khác"
             }
             return
         }
+        let selection = reference.selection
+        let detection = reference.detection
         processingRect = selection.boundingRect
         // Người dùng chủ động chụp đúng vật theo từng hướng dẫn. Luôn nhận ảnh khi
         // bấm nút; không chặn vì trùng góc, ánh sáng hoặc khoảng cách feature.
@@ -1639,7 +1658,7 @@ final class CameraController: NSObject, ObservableObject {
             self.scanProgress = self.shapeScanCoverage
             self.scanIsSufficient = sufficient
             self.scanNeedsNewAngle = false
-            self.matchText = "MÔ HÌNH ĐA GÓC • ĐÃ CHỤP \(count)/7"
+            self.matchText = "ĐÃ XÁC NHẬN CHAI \(Int(detection.confidence * 100))% • \(count)/7"
             self.scanGuidanceText = sufficient
                 ? "Đã đủ 7 ảnh nhận diện"
                 : self.nextReferenceGuidance(after: count)
@@ -2540,6 +2559,33 @@ final class CameraController: NSObject, ObservableObject {
         recoverySeedEstimate = nil
         recoveryStartedAt = 0
         isRecoveringLostTarget = false
+        recoverySearchCommand = "SEARCH_START"
+        lastSearchCommandSentAt = 0
+    }
+
+    private func trajectorySearchCommand(
+        for estimate: RocketMotionEstimate?
+    ) -> String {
+        guard let estimate else { return "SEARCH_START" }
+        let speed = hypot(estimate.velocity.dx, estimate.velocity.dy)
+        guard speed >= 0.015 else { return "SEARCH_START" }
+        let x = Int(max(0, min(999, estimate.predictedPoint.x * 999)).rounded())
+        let y = Int(max(0, min(999, estimate.predictedPoint.y * 999)).rounded())
+        let velocityScale: CGFloat = 99.0 / 3.0
+        let vx = Int(max(-99, min(99, estimate.velocity.dx * velocityScale)).rounded())
+        let vy = Int(max(-99, min(99, estimate.velocity.dy * velocityScale)).rounded())
+        return String(format: "S,%03d,%03d,%+03d,%+03d", x, y, vx, vy)
+    }
+
+    private func sendSearchHeartbeatIfNeeded() {
+        guard isRecoveringLostTarget else { return }
+        let now = CACurrentMediaTime()
+        guard now - lastSearchCommandSentAt >= 0.35 else { return }
+        lastSearchCommandSentAt = now
+        let command = recoverySearchCommand
+        DispatchQueue.main.async { [weak self] in
+            self?.onEvent?(command)
+        }
     }
 
     private func recoveryExpectedRect(at timestamp: TimeInterval) -> CGRect? {
@@ -3353,7 +3399,10 @@ final class CameraController: NSObject, ObservableObject {
             )
         }
         recoveryStartedAt = lostAt
-        isRecoveringLostTarget = recoverySeedEstimate != nil
+        isRecoveringLostTarget = true
+        recoverySearchCommand = trajectorySearchCommand(for: recoverySeedEstimate)
+        lastSearchCommandSentAt = lostAt
+        let searchCommand = recoverySearchCommand
         processingMode = .verifying
         featureFrameCounter = 0
         shouldRecordAfterVerification = false
@@ -3377,12 +3426,12 @@ final class CameraController: NSObject, ObservableObject {
             self.predictedTargetPoint = nil
             self.trackingConfidence = 0
             self.matchText = self.aiDetector.isAvailable
-                ? "Mất mục tiêu • AI phóng to vùng quỹ đạo để bắt lại"
+                ? "Mất mục tiêu • AI và servo đang đi tiếp theo quỹ đạo cuối"
                 : "Mất mục tiêu • đang tự tìm lại mô hình đa góc"
-            self.statusText = "Ưu tiên quỹ đạo 0,3 giây rồi quét toàn màn hình để khóa lại ngay"
+            self.statusText = "Servo đi theo hướng bay trước đó; AI quét toàn màn hình để khóa lại"
             self.returnToUltraWide()
             self.announce("Mất mục tiêu. Đang tự tìm lại.", kind: .warning)
-            self.onEvent?("SEARCH_START")
+            self.onEvent?(searchCommand)
         }
     }
 
@@ -4124,6 +4173,7 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         case .verifying:
             featureFrameCounter += 1
+            sendSearchHeartbeatIfNeeded()
             if verifyFreshScanSeed(pixelBuffer: pixelBuffer) {
                 return
             }

@@ -63,7 +63,7 @@ struct ContentView: View {
     private var trackingOverlay: some View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
-                if camera.stage.showsGuide, !camera.stage.isScanning {
+                if camera.stage.showsGuide {
                     let rect = mappedRect(camera.scanRect, in: geometry.size)
                     let guideColor: Color = camera.stage.isScanning
                         ? scanStatusColor
@@ -367,9 +367,9 @@ struct ContentView: View {
         switch camera.stage {
         case .idle, .scanningNear, .waitingFar, .scanningFar, .waitingAround, .scanningAround:
             if camera.stage.isScanning {
-                return camera.hasSelectedSubject
-                    ? "MÔ HÌNH ĐA GÓC • \(camera.scanViewpointCount)/\(camera.referencePhotoTarget)"
-                    : "CHẠM VÀO VẬT CẦN CHỤP"
+                return camera.scanHasConfirmedTarget
+                    ? "ĐÃ XÁC NHẬN CHAI • \(camera.scanViewpointCount)/\(camera.referencePhotoTarget)"
+                    : "ĐẶT CHAI TRONG VÒNG TRÒN"
             }
             return "CHỌN LOẠI • TẠO MẪU 7 ẢNH"
         case .ready, .verifying, .lost:
@@ -683,12 +683,9 @@ struct ContentView: View {
 
         case .verifying:
             VStack(spacing: 10) {
-                ProgressView("Đang tìm trên toàn màn hình...")
+                ProgressView("Tự tìm liên tục theo quỹ đạo cuối...")
                     .tint(.white)
                     .foregroundStyle(.white)
-                secondaryButton("Dừng tìm", systemImage: "xmark.circle") {
-                    camera.cancelTargetSearch()
-                }
             }
 
         case .tracking:

@@ -26,9 +26,25 @@ final class BLEManager: NSObject, ObservableObject {
               let characteristic = statusCharacteristic,
               let data = message.data(using: .utf8) else { return }
 
-        let writeType: CBCharacteristicWriteType =
-            characteristic.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
+        // Tọa độ tracking gửi dày nên dùng writeWithoutResponse. Các lệnh đổi
+        // trạng thái servo phải có phản hồi để SEARCH không bị rơi gói BLE.
+        let isTelemetry = message.hasPrefix("T,")
+        let canWriteFast = characteristic.properties.contains(.writeWithoutResponse)
+        let canWriteConfirmed = characteristic.properties.contains(.write)
+        let writeType: CBCharacteristicWriteType
+        if isTelemetry, canWriteFast {
+            writeType = .withoutResponse
+        } else if canWriteConfirmed {
+            writeType = .withResponse
+        } else {
+            writeType = .withoutResponse
+        }
         peripheral.writeValue(data, for: characteristic, type: writeType)
+        if message.hasPrefix("S,") {
+            connectionText = "ESP32 đang tìm theo quỹ đạo cuối"
+        } else if message == "TARGET_LOCKED" {
+            connectionText = "ESP32 đang bám mục tiêu"
+        }
     }
 
     private func startScanning() {
