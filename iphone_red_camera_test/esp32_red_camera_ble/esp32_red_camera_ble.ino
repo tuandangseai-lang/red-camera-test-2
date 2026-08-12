@@ -40,8 +40,8 @@ constexpr int SERVO_MAX_US = 2400;
 // App gửi x/y từ 000...999; tâm ảnh là 500/500.
 constexpr int IMAGE_CENTER = 500;
 constexpr int DEAD_ZONE = 15;          // 1,5% quanh tâm: chỉ khử rung cơ khí.
-constexpr int CENTER_ZONE_HALF = 250;  // Vùng giữa rộng/cao 1/2 màn hình.
-constexpr int SUPPORT_ZONE_HALF = 120; // Ra khỏi lõi 24% là tăng phản hồi sớm.
+constexpr int CENTER_ZONE_HALF = 167;  // Vùng giữa rộng/cao xấp xỉ 1/3 màn hình.
+constexpr int SUPPORT_ZONE_HALF = 80;  // Ra khỏi lõi 16% là tăng phản hồi sớm.
 constexpr int STILL_VELOCITY = 4;      // Dưới mức này xem như vật gần đứng yên.
 // App dùng ngưỡng 60%. Chỉ gói T có confidence >= 60 mới được phép dừng tìm
 // và điều khiển servo; gói yếu hơn không được làm mất vector tìm cuối.

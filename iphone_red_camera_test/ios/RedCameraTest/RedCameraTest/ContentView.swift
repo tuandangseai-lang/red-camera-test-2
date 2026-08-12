@@ -116,10 +116,10 @@ struct ContentView: View {
         .allowsHitTesting(false)
     }
 
-    /// Vùng mục tiêu an toàn chiếm 1/2 chiều rộng và 1/2 chiều cao màn hình dọc.
+    /// Vùng mục tiêu an toàn chiếm 1/3 chiều rộng và 1/3 chiều cao màn hình dọc.
     /// Đây chỉ là overlay SwiftUI nên không xuất hiện trong video được lưu.
     private func centerTrackingZone(in size: CGSize) -> some View {
-        let zone = CGSize(width: size.width * 0.50, height: size.height * 0.50)
+        let zone = CGSize(width: size.width / 3.0, height: size.height / 3.0)
         return RoundedRectangle(cornerRadius: 28, style: .continuous)
             .stroke(
                 Color.white.opacity(0.34),
@@ -537,8 +537,12 @@ struct ContentView: View {
         case .idle, .scanningNear, .waitingFar, .scanningFar, .waitingAround, .scanningAround:
             if camera.stage.isScanning {
                 return camera.scanHasConfirmedTarget
-                    ? "ĐÃ XÁC NHẬN \(camera.scanSubjectKind.title.uppercased()) • \(camera.scanViewpointCount)/\(camera.referencePhotoTarget)"
-                    : "ĐẶT \(camera.scanSubjectKind.title.uppercased()) TRONG VÒNG TRÒN"
+                    ? (camera.isAddingReferencePhoto
+                       ? "ĐÃ XÁC NHẬN ẢNH BỔ SUNG"
+                       : "ĐÃ XÁC NHẬN \(camera.scanSubjectKind.title.uppercased()) • \(camera.scanViewpointCount)/\(camera.referencePhotoTarget)")
+                    : (camera.isAddingReferencePhoto
+                       ? "CHỤP THÊM \(camera.scanSubjectKind.title.uppercased())"
+                       : "ĐẶT \(camera.scanSubjectKind.title.uppercased()) TRONG VÒNG TRÒN")
             }
             return "CHỌN LOẠI • TẠO MẪU 7 ẢNH"
         case .ready, .verifying, .lost:
@@ -598,7 +602,9 @@ struct ContentView: View {
                 Spacer(minLength: 4)
                 Label(
                     camera.stage.isScanning
-                        ? "\(camera.scanViewpointCount)/\(camera.referencePhotoTarget)"
+                        ? (camera.isAddingReferencePhoto
+                           ? "+1"
+                           : "\(camera.scanViewpointCount)/\(camera.referencePhotoTarget)")
                         : "\(camera.learnedSamples)",
                     systemImage: camera.stage.isScanning
                         ? "photo.stack.fill"
@@ -652,19 +658,23 @@ struct ContentView: View {
                             .lineLimit(2)
                             .minimumScaleFactor(0.78)
                         Spacer(minLength: 4)
-                        Text("\(camera.scanViewpointCount)/\(camera.referencePhotoTarget)")
+                        Text(camera.isAddingReferencePhoto
+                             ? "+1"
+                             : "\(camera.scanViewpointCount)/\(camera.referencePhotoTarget)")
                             .font(.caption.monospacedDigit().bold())
                     }
 
-                    HStack(spacing: 7) {
-                        ForEach(0..<camera.referencePhotoTarget, id: \.self) { index in
-                            Circle()
-                                .fill(
-                                    index < camera.scanViewpointCount
-                                        ? Color.cyan
-                                        : Color.white.opacity(0.20)
-                                )
-                                .frame(width: 9, height: 9)
+                    if !camera.isAddingReferencePhoto {
+                        HStack(spacing: 7) {
+                            ForEach(0..<camera.referencePhotoTarget, id: \.self) { index in
+                                Circle()
+                                    .fill(
+                                        index < camera.scanViewpointCount
+                                            ? Color.cyan
+                                            : Color.white.opacity(0.20)
+                                    )
+                                    .frame(width: 9, height: 9)
+                            }
                         }
                     }
 
@@ -682,7 +692,8 @@ struct ContentView: View {
                         Spacer()
 
                         Button {
-                            if camera.scanViewpointCount >= camera.referencePhotoTarget {
+                            if !camera.isAddingReferencePhoto,
+                               camera.scanViewpointCount >= camera.referencePhotoTarget {
                                 camera.startReferenceVideoCapture()
                             } else {
                                 camera.captureManualReferencePhoto()
@@ -691,7 +702,8 @@ struct ContentView: View {
                             ZStack {
                                 Circle()
                                     .fill(
-                                        camera.scanViewpointCount >= camera.referencePhotoTarget
+                                        !camera.isAddingReferencePhoto
+                                            && camera.scanViewpointCount >= camera.referencePhotoTarget
                                             ? Color.red
                                             : Color.white
                                     )
@@ -699,7 +711,8 @@ struct ContentView: View {
                                 Circle()
                                     .stroke(.black.opacity(0.70), lineWidth: 3)
                                     .frame(width: 64, height: 64)
-                                if camera.scanViewpointCount >= camera.referencePhotoTarget {
+                                if !camera.isAddingReferencePhoto,
+                                   camera.scanViewpointCount >= camera.referencePhotoTarget {
                                     Image(systemName: camera.isCapturingReferenceVideo
                                           ? "record.circle.fill"
                                           : "video.fill")
@@ -712,9 +725,12 @@ struct ContentView: View {
                         .buttonStyle(.plain)
                         .disabled(camera.isCapturingReferenceVideo)
                         .accessibilityLabel(
-                            camera.scanViewpointCount >= camera.referencePhotoTarget
+                            !camera.isAddingReferencePhoto
+                                && camera.scanViewpointCount >= camera.referencePhotoTarget
                                 ? "Quay video mẫu \(camera.scanSubjectKind.title) 10 giây"
-                                : "Chụp ảnh mẫu \(camera.scanSubjectKind.title)"
+                                : (camera.isAddingReferencePhoto
+                                   ? "Chụp thêm ảnh đối chứng \(camera.scanSubjectKind.title)"
+                                   : "Chụp ảnh mẫu \(camera.scanSubjectKind.title)")
                         )
 
                         Spacer()
@@ -887,6 +903,11 @@ struct ContentView: View {
         case .ready:
             primaryButton("Khóa, bám & quay", systemImage: "scope") {
                 camera.startTrackingAndRecording()
+            }
+            if camera.activeProfileID != nil {
+                secondaryButton("Chụp thêm ảnh", systemImage: "camera.badge.ellipsis") {
+                    camera.beginAddingReferencePhoto()
+                }
             }
             secondaryButton("Tạo lại mẫu 7 ảnh", systemImage: "trash") {
                 camera.resetProfile()

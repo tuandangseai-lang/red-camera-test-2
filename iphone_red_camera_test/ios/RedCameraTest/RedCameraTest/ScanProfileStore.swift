@@ -118,6 +118,50 @@ final class ScanProfileStore {
         return profiles
     }
 
+    @discardableResult
+    func addSupplementalPhoto(
+        id: UUID,
+        referenceImage: Data,
+        contextImage: Data?
+    ) -> [SavedScanProfile] {
+        let profiles = load().map { profile in
+            guard profile.id == id else { return profile }
+
+            var references = profile.referenceImages
+            let referencePhotoCount = min(
+                profile.photoReferenceCount ?? min(7, references.count),
+                references.count
+            )
+            references.insert(referenceImage, at: referencePhotoCount)
+
+            var contexts = profile.contextImages ?? []
+            var contextPhotoCount = min(
+                profile.photoContextCount ?? min(7, contexts.count),
+                contexts.count
+            )
+            if let contextImage {
+                contexts.insert(contextImage, at: contextPhotoCount)
+                contextPhotoCount += 1
+            }
+
+            return SavedScanProfile(
+                id: profile.id,
+                name: profile.name,
+                createdAt: profile.createdAt,
+                subjectKind: profile.subjectKind,
+                referenceImages: references,
+                contextImages: contexts,
+                photoReferenceCount: referencePhotoCount + 1,
+                photoContextCount: contextPhotoCount,
+                surfacePointCount: profile.surfacePointCount + 1,
+                voxelOccupancy: profile.voxelOccupancy,
+                classificationLabel: profile.classificationLabel
+            )
+        }
+        persist(profiles)
+        return profiles
+    }
+
     private func persist(_ profiles: [SavedScanProfile]) {
         guard let data = try? JSONEncoder().encode(profiles) else { return }
         try? data.write(to: fileURL, options: .atomic)

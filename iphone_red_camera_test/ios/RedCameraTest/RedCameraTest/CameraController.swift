@@ -106,6 +106,7 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var referenceVideoProgress = 0.0
     @Published private(set) var referenceVideoFrameCount = 0
     @Published private(set) var referenceVideoDisplayStartedAt: Date?
+    @Published private(set) var isAddingReferencePhoto = false
     @Published private(set) var trackingPreparationCountdown = 0
     @Published private(set) var surfacePointCount = 0
     @Published private(set) var scanHasConfirmedTarget = false
@@ -196,10 +197,10 @@ final class CameraController: NSObject, ObservableObject {
     private let aiAcquisitionConfidence = 0.42
     private let aiReacquisitionConfidence = 0.16
     private let aiContinuationConfidence = 0.12
-    /// Một ngưỡng thống nhất cho cả bám và bắt lại. Dưới 60%: ESP32 tìm ngay.
-    /// Từ 60% trở lên: tiếp tục bám hoặc khóa lại nếu đã qua cổng chống phản chiếu.
+    /// Tracker Vision theo từng frame vẫn dùng 60% để không đứt bám vì nhòe chuyển động.
+    /// Riêng bắt lại danh tính sau khi mất phải đạt 75% từ cả ảnh và video mẫu.
     private let hardTrackingConfidence = 0.60
-    private let immediateReacquisitionSimilarity = 0.60
+    private let immediateReacquisitionSimilarity = 0.75
 
     private var videoDevice: AVCaptureDevice?
     private var ultraWideDeviceZoomFactor: CGFloat = 1.0
@@ -344,7 +345,33 @@ final class CameraController: NSObject, ObservableObject {
 
     func startShapeScan() {
         guard isReady, !isRecording else { return }
+        isAddingReferencePhoto = false
         startScan(kind: .near, resetProfile: true)
+    }
+
+    func beginAddingReferencePhoto() {
+        guard isReady,
+              !isRecording,
+              stage == .ready,
+              activeProfileID != nil else { return }
+        isAddingReferencePhoto = true
+        stage = .scanningNear
+        scanViewpointCount = 0
+        scanHasConfirmedTarget = false
+        hasSelectedSubject = false
+        selectedSubjectRect = nil
+        targetRect = scanRect
+        scanIsSufficient = false
+        scanNeedsNewAngle = false
+        scanGuidanceText = "Đặt \(scanSubjectKind.title.lowercased()) ở góc cần bổ sung rồi bấm chụp"
+        matchText = "CHỤP THÊM ẢNH ĐỐI CHỨNG"
+        statusText = "Ảnh mới sẽ được ghép vào đúng mẫu đang chọn"
+        videoQueue.async { [weak self] in
+            guard let self else { return }
+            self.manualCaptureRequested = false
+            self.processingMode = .scanning(.near)
+        }
+        onEvent?("SUPPLEMENTAL_PHOTO_STARTED")
     }
 
     func selectSubjectKind(_ kind: ScanSubjectKind) {
@@ -371,6 +398,7 @@ final class CameraController: NSObject, ObservableObject {
 
     func resetProfile() {
         guard !isRecording else { return }
+        isAddingReferencePhoto = false
         stopARScanAndResumeCamera()
         voiceNotifier.stop()
         videoQueue.async { [weak self] in
@@ -451,6 +479,20 @@ final class CameraController: NSObject, ObservableObject {
 
     func cancelShapeScan() {
         guard stage.isScanning else { return }
+        if isAddingReferencePhoto {
+            isAddingReferencePhoto = false
+            videoQueue.async { [weak self] in
+                self?.manualCaptureRequested = false
+                self?.processingMode = .idle
+            }
+            stage = .ready
+            scanIsSufficient = true
+            targetRect = nil
+            scanGuidanceText = "Đã hủy chụp thêm"
+            matchText = "Mẫu hiện tại vẫn được giữ nguyên"
+            statusText = "Có thể khóa, bám và quay"
+            return
+        }
         stopARScanAndResumeCamera()
         videoQueue.async { [weak self] in
             guard let self else { return }
@@ -529,7 +571,7 @@ final class CameraController: NSObject, ObservableObject {
     func captureManualReferencePhoto() {
         guard stage.isScanning, !isRecording else { return }
         guard !isCapturingReferenceVideo else { return }
-        if scanViewpointCount >= manualPhotoTarget {
+        if !isAddingReferencePhoto, scanViewpointCount >= manualPhotoTarget {
             startReferenceVideoCapture()
             return
         }
@@ -1896,11 +1938,12 @@ final class CameraController: NSObject, ObservableObject {
         }
         acceptedViewMasks.append(selection.cells)
         scanReferenceImages.append(selection.referenceJPEG)
-        if let contextJPEG = referenceJPEG(
+        let capturedContextJPEG = referenceJPEG(
             from: pixelBuffer,
             normalizedTopLeftRect: selection.boundingRect,
             orientation: .up
-        ) {
+        )
+        if let contextJPEG = capturedContextJPEG {
             scanContextImages.append(contextJPEG)
             if let contextFeature = featurePrint(fromJPEGData: contextJPEG) {
                 contextFeatureSamples.append(contextFeature)
@@ -1908,6 +1951,33 @@ final class CameraController: NSObject, ObservableObject {
             }
         }
         confirmedTargetCells = selection.cells
+
+        if isAddingReferencePhoto, let profileID = activeProfileID {
+            let updatedProfiles = profileStore.addSupplementalPhoto(
+                id: profileID,
+                referenceImage: selection.referenceJPEG,
+                contextImage: capturedContextJPEG
+            )
+            processingMode = .idle
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.savedProfiles = updatedProfiles
+                self.isAddingReferencePhoto = false
+                self.stage = .ready
+                self.scanIsSufficient = true
+                self.scanNeedsNewAngle = false
+                self.scanHasConfirmedTarget = true
+                self.scanViewpointCount = 0
+                self.targetRect = nil
+                self.learnedSamples = self.featureSamples.count
+                self.matchText = "ĐÃ GHÉP THÊM 1 ẢNH VÀO MẪU"
+                self.statusText = "Ảnh bổ sung đã được đối chiếu cùng bộ ảnh và video cũ"
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                self.announce("Đã thêm ảnh đối chứng vào mẫu.", kind: .success)
+                self.onEvent?("SUPPLEMENTAL_PHOTO_ADDED")
+            }
+            return
+        }
 
         capturedReferencePhotoCount = min(
             manualPhotoTarget,
@@ -2552,8 +2622,8 @@ final class CameraController: NSObject, ObservableObject {
 
         var similarity: Double {
             let combined = photo.similarity * 0.56 + video.similarity * 0.44
-            // Tuyệt đối không cho một nguồn đơn lẻ vượt cổng bắt lại 60%.
-            return isAccepted ? combined : min(0.59, combined)
+            // Tuyệt đối không cho một nguồn đơn lẻ vượt cổng bắt lại 75%.
+            return isAccepted ? combined : min(0.74, combined)
         }
     }
 
@@ -2682,20 +2752,47 @@ final class CameraController: NSObject, ObservableObject {
         in pixelBuffer: CVPixelBuffer,
         rect: CGRect
     ) -> Double? {
-        let crop = rect
+        let frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let fullCrop = rect
             .insetBy(
                 dx: -max(0.01, rect.width * 0.06),
                 dy: -max(0.01, rect.height * 0.05)
             )
-            .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
-        guard let feature = featurePrint(
-            from: pixelBuffer,
-            normalizedTopLeftRect: crop
-        ), let match = identityEvidenceMatch(
-            to: feature,
-            useContextSamples: !contextFeatureSamples.isEmpty
-        ) else { return nil }
-        return match.similarity
+            .intersection(frame)
+        var crops = [fullCrop]
+
+        // Sau khi dù bung, hộp ứng viên có thể chứa một tán dù rộng phía trên và thân
+        // tên lửa nhỏ phía dưới. Không so cả tán dù với mẫu trước phóng; thử tách phần
+        // thân ở nửa dưới rồi vẫn bắt buộc thân đó vượt đồng thuận ảnh + video đã học.
+        let isDescendingDuringRecovery = (recoverySeedEstimate?.velocity.dy ?? 0) > 0.00045
+        if scanSubjectKind == .waterRocket,
+           parachuteDetected || isDescendingDuringRecovery {
+            crops.append(CGRect(
+                x: rect.minX + rect.width * 0.18,
+                y: rect.minY + rect.height * 0.36,
+                width: rect.width * 0.64,
+                height: rect.height * 0.64
+            ).intersection(frame))
+            crops.append(CGRect(
+                x: rect.minX + rect.width * 0.28,
+                y: rect.minY + rect.height * 0.52,
+                width: rect.width * 0.44,
+                height: rect.height * 0.48
+            ).intersection(frame))
+        }
+
+        return crops.compactMap { crop -> Double? in
+            guard crop.width > 0.01,
+                  crop.height > 0.01,
+                  let feature = featurePrint(
+                    from: pixelBuffer,
+                    normalizedTopLeftRect: crop
+                  ), let match = identityEvidenceMatch(
+                    to: feature,
+                    useContextSamples: !contextFeatureSamples.isEmpty
+                  ) else { return nil }
+            return match.similarity
+        }.max()
     }
 
     private func categoryConfidence(
@@ -3420,7 +3517,7 @@ final class CameraController: NSObject, ObservableObject {
             }
             if isRecoveringLostTarget {
                 // Khi đã mất mục tiêu, điểm khớp bộ ảnh/video cá nhân là cổng quyết
-                // định. Đạt 60% sẽ trả ứng viên ngay trong frame hiện tại.
+                // định. Đạt 75% sẽ trả ứng viên ngay trong frame hiện tại.
                 let verified = onScreen.compactMap { detection -> (WaterRocketDetection, Double)? in
                     let similarity = personalizedSimilarity(
                         in: pixelBuffer,
@@ -3562,7 +3659,7 @@ final class CameraController: NSObject, ObservableObject {
         if isRecoveringLostTarget {
             guard reacquisitionSimilarity >= immediateReacquisitionSimilarity else {
                 publishSearchProgress(
-                    message: "Đang tìm • khớp \(Int(reacquisitionSimilarity * 100))% / cần 60%"
+                    message: "Đang tìm • khớp \(Int(reacquisitionSimilarity * 100))% / cần 75%"
                 )
                 return true
             }
@@ -3571,7 +3668,7 @@ final class CameraController: NSObject, ObservableObject {
                 trianglePoints: representativeTrackingPoints(in: detection.rect),
                 confidence: reacquisitionSimilarity,
                 matchDescription: "BẮT LẠI NGAY • KHỚP \(Int(reacquisitionSimilarity * 100))%",
-                statusDescription: "Đã đạt 60% — bám lại ngay"
+                statusDescription: "Đã đạt 75% — bám lại ngay"
             )
             return true
         }
@@ -3742,7 +3839,7 @@ final class CameraController: NSObject, ObservableObject {
            score < immediateReacquisitionSimilarity {
             publishSearchProgress(
                 message: String(
-                    format: "Đang đối chứng %@ • %.0f%% / cần 60%%",
+                    format: "Đang đối chứng %@ • %.0f%% / cần 75%%",
                     scanSubjectKind.title,
                     score * 100
                 )
@@ -3750,7 +3847,7 @@ final class CameraController: NSObject, ObservableObject {
             return
         }
 
-        // Khi đang cứu mục tiêu, một ứng viên khớp >=60% dừng servo ngay;
+        // Khi đang cứu mục tiêu, một ứng viên khớp >=75% dừng servo ngay;
         // không chờ bộ đếm nhiều frame khiến tên lửa đã đi qua vị trí đó.
         if isRecoveringLostTarget,
            score >= immediateReacquisitionSimilarity {
@@ -3759,7 +3856,7 @@ final class CameraController: NSObject, ObservableObject {
                 trianglePoints: candidate.trianglePoints,
                 confidence: score,
                 matchDescription: String(format: "BẮT LẠI NGAY • KHỚP %.0f%%", score * 100),
-                statusDescription: "Đã đạt 60% — bám lại ngay"
+                statusDescription: "Đã đạt 75% — bám lại ngay"
             )
             return
         }
@@ -4092,7 +4189,6 @@ final class CameraController: NSObject, ObservableObject {
         smoothedTrackingVelocity = .zero
         motionFilter.clear()
         aiDetectionMisses = 0
-        parachuteDetected = false
         clearPendingAIDetection()
         sequenceHandler = VNSequenceRequestHandler()
         DispatchQueue.main.async { [weak self] in
@@ -4900,7 +4996,7 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
                 }
             } else {
                 // Người / Thú / Vật dùng Vision phân loại + bộ ảnh/video cá nhân.
-                // Khi đang tìm lại, chạy mỗi frame để ứng viên >=60% khóa tức thì.
+                // Khi đang tìm lại, chạy mỗi frame để ứng viên >=75% khóa tức thì.
                 let categoryStride = isRecoveringLostTarget ? 1 : 4
                 if featureFrameCounter % categoryStride == 0 {
                     verifyAndLock(pixelBuffer: pixelBuffer)
