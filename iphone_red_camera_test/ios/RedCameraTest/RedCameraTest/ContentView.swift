@@ -718,12 +718,18 @@ struct ContentView: View {
                                           : "video.fill")
                                         .font(.title2.bold())
                                         .foregroundStyle(.white)
+                                } else if camera.isProcessingReferencePhoto {
+                                    ProgressView()
+                                        .tint(.black)
                                 }
                             }
                             .shadow(color: .black.opacity(0.35), radius: 5, y: 2)
                         }
                         .buttonStyle(.plain)
-                        .disabled(camera.isCapturingReferenceVideo)
+                        .disabled(
+                            camera.isCapturingReferenceVideo
+                                || camera.isProcessingReferencePhoto
+                        )
                         .accessibilityLabel(
                             !camera.isAddingReferencePhoto
                                 && camera.scanViewpointCount >= camera.referencePhotoTarget
@@ -775,7 +781,13 @@ struct ContentView: View {
                             camera.activateProfile(profile)
                         } label: {
                             HStack(spacing: 5) {
-                                subjectKindIcon(profile.subjectKind, size: 14)
+                                if isActive && camera.isProfilePreparing {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                        .tint(.black)
+                                } else {
+                                    subjectKindIcon(profile.subjectKind, size: 14)
+                                }
                                 Text(profile.shortName)
                                     .lineLimit(1)
                             }
@@ -789,6 +801,7 @@ struct ContentView: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .disabled(camera.isProfilePreparing)
                     }
                 }
             }
@@ -911,6 +924,7 @@ struct ContentView: View {
             }
             secondaryButton("Tạo lại mẫu 7 ảnh", systemImage: "trash") {
                 camera.resetProfile()
+                camera.startShapeScan()
             }
 
         case .verifying:

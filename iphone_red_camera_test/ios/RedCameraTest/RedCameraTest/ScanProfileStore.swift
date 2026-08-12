@@ -14,6 +14,10 @@ struct SavedScanProfile: Codable, Equatable, Identifiable {
     /// được tính thành nhiều phiếu độc lập khi xác minh danh tính.
     let photoReferenceCount: Int?
     let photoContextCount: Int?
+    /// FeaturePrint đã tính sẵn để mở mẫu không phải chạy lại Vision cho hơn 60 ảnh.
+    /// Hai trường là tùy chọn để mẫu của phiên bản cũ vẫn đọc được bình thường.
+    let referenceFeaturePrints: [Data]?
+    let contextFeaturePrints: [Data]?
     let surfacePointCount: Int
     let voxelOccupancy: [Bool]?
     let classificationLabel: String?
@@ -68,6 +72,8 @@ final class ScanProfileStore {
                 contextImages: profile.contextImages,
                 photoReferenceCount: profile.photoReferenceCount,
                 photoContextCount: profile.photoContextCount,
+                referenceFeaturePrints: profile.referenceFeaturePrints,
+                contextFeaturePrints: profile.contextFeaturePrints,
                 surfacePointCount: profile.surfacePointCount,
                 voxelOccupancy: profile.voxelOccupancy,
                 classificationLabel: profile.classificationLabel
@@ -109,6 +115,8 @@ final class ScanProfileStore {
                 contextImages: profile.contextImages,
                 photoReferenceCount: profile.photoReferenceCount,
                 photoContextCount: profile.photoContextCount,
+                referenceFeaturePrints: profile.referenceFeaturePrints,
+                contextFeaturePrints: profile.contextFeaturePrints,
                 surfacePointCount: profile.surfacePointCount,
                 voxelOccupancy: profile.voxelOccupancy,
                 classificationLabel: profile.classificationLabel
@@ -122,7 +130,9 @@ final class ScanProfileStore {
     func addSupplementalPhoto(
         id: UUID,
         referenceImage: Data,
-        contextImage: Data?
+        contextImage: Data?,
+        referenceFeaturePrint: Data?,
+        contextFeaturePrint: Data?
     ) -> [SavedScanProfile] {
         let profiles = load().map { profile in
             guard profile.id == id else { return profile }
@@ -133,6 +143,13 @@ final class ScanProfileStore {
                 references.count
             )
             references.insert(referenceImage, at: referencePhotoCount)
+            var referenceFeatures = profile.referenceFeaturePrints ?? []
+            if let referenceFeaturePrint,
+               referenceFeatures.count == profile.referenceImages.count {
+                referenceFeatures.insert(referenceFeaturePrint, at: referencePhotoCount)
+            } else {
+                referenceFeatures.removeAll()
+            }
 
             var contexts = profile.contextImages ?? []
             var contextPhotoCount = min(
@@ -142,6 +159,16 @@ final class ScanProfileStore {
             if let contextImage {
                 contexts.insert(contextImage, at: contextPhotoCount)
                 contextPhotoCount += 1
+            }
+            var contextFeatures = profile.contextFeaturePrints ?? []
+            if let contextFeaturePrint,
+               contextFeatures.count == (profile.contextImages ?? []).count {
+                contextFeatures.insert(
+                    contextFeaturePrint,
+                    at: max(0, contextPhotoCount - 1)
+                )
+            } else if contextImage != nil {
+                contextFeatures.removeAll()
             }
 
             return SavedScanProfile(
@@ -153,7 +180,37 @@ final class ScanProfileStore {
                 contextImages: contexts,
                 photoReferenceCount: referencePhotoCount + 1,
                 photoContextCount: contextPhotoCount,
+                referenceFeaturePrints: referenceFeatures.isEmpty ? nil : referenceFeatures,
+                contextFeaturePrints: contextFeatures.isEmpty ? nil : contextFeatures,
                 surfacePointCount: profile.surfacePointCount + 1,
+                voxelOccupancy: profile.voxelOccupancy,
+                classificationLabel: profile.classificationLabel
+            )
+        }
+        persist(profiles)
+        return profiles
+    }
+
+    @discardableResult
+    func cacheFeaturePrints(
+        id: UUID,
+        referenceFeaturePrints: [Data],
+        contextFeaturePrints: [Data]
+    ) -> [SavedScanProfile] {
+        let profiles = load().map { profile in
+            guard profile.id == id else { return profile }
+            return SavedScanProfile(
+                id: profile.id,
+                name: profile.name,
+                createdAt: profile.createdAt,
+                subjectKind: profile.subjectKind,
+                referenceImages: profile.referenceImages,
+                contextImages: profile.contextImages,
+                photoReferenceCount: profile.photoReferenceCount,
+                photoContextCount: profile.photoContextCount,
+                referenceFeaturePrints: referenceFeaturePrints,
+                contextFeaturePrints: contextFeaturePrints,
+                surfacePointCount: profile.surfacePointCount,
                 voxelOccupancy: profile.voxelOccupancy,
                 classificationLabel: profile.classificationLabel
             )

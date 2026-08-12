@@ -107,6 +107,8 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var referenceVideoFrameCount = 0
     @Published private(set) var referenceVideoDisplayStartedAt: Date?
     @Published private(set) var isAddingReferencePhoto = false
+    @Published private(set) var isProcessingReferencePhoto = false
+    @Published private(set) var isProfilePreparing = false
     @Published private(set) var trackingPreparationCountdown = 0
     @Published private(set) var surfacePointCount = 0
     @Published private(set) var scanHasConfirmedTarget = false
@@ -176,6 +178,10 @@ final class CameraController: NSObject, ObservableObject {
 
     private let sessionQueue = DispatchQueue(label: "vn.rockettracker.camera.session")
     private let videoQueue = DispatchQueue(label: "vn.rockettracker.camera.frames")
+    private let profileQueue = DispatchQueue(
+        label: "vn.rockettracker.profile.features",
+        qos: .userInitiated
+    )
     private let movieOutput = AVCaptureMovieFileOutput()
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
@@ -272,7 +278,9 @@ final class CameraController: NSObject, ObservableObject {
     private var voxelOccupancy: [Bool] = []
     private var selectedSubjectPoint = CGPoint(x: 0.5, y: 0.5)
     private var manualSelectionRequested = false
+    private let manualCaptureLock = NSLock()
     private var manualCaptureRequested = false
+    private var manualCaptureInFlight = false
     private var capturedReferencePhotoCount = 0
     private var referenceVideoStartedAt: TimeInterval?
     private var lastReferenceVideoSampleAt: TimeInterval = 0
@@ -296,12 +304,19 @@ final class CameraController: NSObject, ObservableObject {
 
     private var zoomInWorkItem: DispatchWorkItem?
     private var zoomFinishedWorkItem: DispatchWorkItem?
+    private var profileActivationID = UUID()
 
     override init() {
         super.init()
         arSession.delegate = self
         arSession.delegateQueue = videoQueue
-        savedProfiles = profileStore.load()
+        profileQueue.async { [weak self] in
+            guard let self else { return }
+            let profiles = self.profileStore.load()
+            DispatchQueue.main.async {
+                self.savedProfiles = profiles
+            }
+        }
     }
 
     func start() {
@@ -345,6 +360,8 @@ final class CameraController: NSObject, ObservableObject {
 
     func startShapeScan() {
         guard isReady, !isRecording else { return }
+        profileActivationID = UUID()
+        isProfilePreparing = false
         isAddingReferencePhoto = false
         startScan(kind: .near, resetProfile: true)
     }
@@ -366,9 +383,9 @@ final class CameraController: NSObject, ObservableObject {
         scanGuidanceText = "Đặt \(scanSubjectKind.title.lowercased()) ở góc cần bổ sung rồi bấm chụp"
         matchText = "CHỤP THÊM ẢNH ĐỐI CHỨNG"
         statusText = "Ảnh mới sẽ được ghép vào đúng mẫu đang chọn"
+        resetManualCaptureRequest()
         videoQueue.async { [weak self] in
             guard let self else { return }
-            self.manualCaptureRequested = false
             self.processingMode = .scanning(.near)
         }
         onEvent?("SUPPLEMENTAL_PHOTO_STARTED")
@@ -422,7 +439,7 @@ final class CameraController: NSObject, ObservableObject {
             self.lastAcceptedFeature = nil
             self.voxelOccupancy.removeAll()
             self.manualSelectionRequested = false
-            self.manualCaptureRequested = false
+            self.resetManualCaptureRequest()
             self.trackingObservation = nil
             self.trackingAnchorObservations.removeAll()
             self.trackingTrianglePoints.removeAll()
@@ -481,8 +498,8 @@ final class CameraController: NSObject, ObservableObject {
         guard stage.isScanning else { return }
         if isAddingReferencePhoto {
             isAddingReferencePhoto = false
+            resetManualCaptureRequest()
             videoQueue.async { [weak self] in
-                self?.manualCaptureRequested = false
                 self?.processingMode = .idle
             }
             stage = .ready
@@ -510,7 +527,7 @@ final class CameraController: NSObject, ObservableObject {
             self.lastAcceptedFeature = nil
             self.voxelOccupancy.removeAll()
             self.manualSelectionRequested = false
-            self.manualCaptureRequested = false
+            self.resetManualCaptureRequest()
             self.capturedReferencePhotoCount = 0
             self.referenceVideoStartedAt = nil
             self.lastReferenceVideoSampleAt = 0
@@ -575,11 +592,53 @@ final class CameraController: NSObject, ObservableObject {
             startReferenceVideoCapture()
             return
         }
+        guard requestManualCapture() else { return }
+        isProcessingReferencePhoto = true
         scanNeedsNewAngle = false
-        scanGuidanceText = "AI đang tìm \(scanSubjectKind.title.lowercased()) trong ảnh..."
-        videoQueue.async { [weak self] in
-            guard let self, !self.manualCaptureRequested else { return }
-            self.manualCaptureRequested = true
+        scanGuidanceText = "Đã nhận nút chụp • AI đang xử lý ảnh..."
+        matchText = "ĐANG CHỤP \(scanSubjectKind.title.uppercased())"
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    /// NÃºt chá»¥p cháº¡y trÃªn main thread, cÃ²n frame camera cháº¡y trÃªn `videoQueue`.
+    /// DÃ¹ng khÃ³a nháº¹ Ä‘á»ƒ nháº­n nÃºt ngay, khÃ´ng pháº£i xáº¿p hÃ ng sau cÃ¡c táº¡c vá»¥ Vision.
+    private func requestManualCapture() -> Bool {
+        manualCaptureLock.lock()
+        defer { manualCaptureLock.unlock() }
+        guard !manualCaptureRequested, !manualCaptureInFlight else { return false }
+        manualCaptureRequested = true
+        return true
+    }
+
+    private func consumeManualCaptureRequest() -> Bool {
+        manualCaptureLock.lock()
+        defer { manualCaptureLock.unlock() }
+        guard manualCaptureRequested, !manualCaptureInFlight else { return false }
+        manualCaptureRequested = false
+        manualCaptureInFlight = true
+        return true
+    }
+
+    private func finishManualCaptureRequest() {
+        manualCaptureLock.lock()
+        manualCaptureInFlight = false
+        manualCaptureLock.unlock()
+        DispatchQueue.main.async { [weak self] in
+            self?.isProcessingReferencePhoto = false
+        }
+    }
+
+    private func resetManualCaptureRequest() {
+        manualCaptureLock.lock()
+        manualCaptureRequested = false
+        manualCaptureInFlight = false
+        manualCaptureLock.unlock()
+        if Thread.isMainThread {
+            isProcessingReferencePhoto = false
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.isProcessingReferencePhoto = false
+            }
         }
     }
 
@@ -612,26 +671,53 @@ final class CameraController: NSObject, ObservableObject {
 
     func activateProfile(_ profile: SavedScanProfile) {
         guard !isRecording, !stage.isScanning else { return }
-        statusText = "Đang mở \(profile.name)..."
+        if activeProfileID == profile.id, !isProfilePreparing {
+            matchText = "ÄÃƒ CHá»ŒN \(profile.name.uppercased())"
+            statusText = "Máº«u nÃ y Ä‘Ã£ sáºµn sÃ ng; khÃ´ng cáº§n náº¡p láº¡i"
+            UISelectionFeedbackGenerator().selectionChanged()
+            return
+        }
+        profileActivationID = UUID()
+        let activationID = profileActivationID
+        activeProfileID = profile.id
+        stage = .ready
+        isProfilePreparing = true
+        learnedSamples = profile.referenceImages.count
+        scanIsSufficient = true
+        matchText = "ĐÃ CHỌN \(profile.name.uppercased())"
+        statusText = "Đang chuẩn bị dữ liệu AI trong nền..."
         scanSubjectKind = profile.subjectKind
 
-        videoQueue.async { [weak self] in
+        profileQueue.async { [weak self] in
             guard let self else { return }
-            let observations = profile.referenceImages.compactMap {
-                self.featurePrint(fromJPEGData: $0)
-            }
-            let contextObservations = (profile.contextImages ?? []).compactMap {
-                self.featurePrint(fromJPEGData: $0)
-            }
+            var cachedProfiles: [SavedScanProfile]?
+            let observations = self.decodeFeaturePrints(profile.referenceFeaturePrints)
+                ?? profile.referenceImages.compactMap { self.featurePrint(fromJPEGData: $0) }
+            let contextObservations = self.decodeFeaturePrints(profile.contextFeaturePrints)
+                ?? (profile.contextImages ?? []).compactMap { self.featurePrint(fromJPEGData: $0) }
             guard !observations.isEmpty else {
                 DispatchQueue.main.async {
+                    guard self.profileActivationID == activationID else { return }
+                    self.isProfilePreparing = false
                     self.statusText = "Mẫu này không còn dữ liệu ảnh hợp lệ"
                 }
                 return
             }
 
-            self.featureSamples = observations
-            self.contextFeatureSamples = contextObservations
+            if profile.referenceFeaturePrints?.count != observations.count
+                || profile.contextFeaturePrints?.count != contextObservations.count {
+                let references = observations.compactMap(self.encodeFeaturePrint)
+                let contexts = contextObservations.compactMap(self.encodeFeaturePrint)
+                if references.count == observations.count,
+                   contexts.count == contextObservations.count {
+                    cachedProfiles = self.profileStore.cacheFeaturePrints(
+                        id: profile.id,
+                        referenceFeaturePrints: references,
+                        contextFeaturePrints: contexts
+                    )
+                }
+            }
+
             let storedPhotoReferenceCount = min(
                 profile.photoReferenceCount ?? min(self.manualPhotoTarget, observations.count),
                 observations.count
@@ -640,42 +726,27 @@ final class CameraController: NSObject, ObservableObject {
                 profile.photoContextCount ?? min(self.manualPhotoTarget, contextObservations.count),
                 contextObservations.count
             )
-            self.photoFeatureSamples = Array(observations.prefix(storedPhotoReferenceCount))
-            self.videoFeatureSamples = Array(observations.dropFirst(storedPhotoReferenceCount))
-            self.photoContextFeatureSamples = Array(contextObservations.prefix(storedPhotoContextCount))
-            self.videoContextFeatureSamples = Array(contextObservations.dropFirst(storedPhotoContextCount))
-            self.scanContextImages = profile.contextImages ?? []
-            self.freshScanSeedRect = nil
-            self.freshScanSeedTimestamp = 0
-            self.pendingFreshScanSeedRect = nil
-            if let storedVoxels = profile.voxelOccupancy,
-               storedVoxels.count == self.voxelColumns * self.voxelRows * self.voxelDepthLayers {
-                self.voxelOccupancy = storedVoxels
-            } else {
-                self.voxelOccupancy.removeAll()
-            }
-            let storedFacets = self.makeCrystalFacets(viewIndex: 0)
-            self.processingMode = .idle
-            self.trackingObservation = nil
-            self.trackingAnchorObservations.removeAll()
-            self.trackingTrianglePoints.removeAll()
-            self.lastTrackingBounds = nil
-            self.segmentationMissFrames = 0
-            self.previousTrackingCenter = nil
-            self.smoothedTrackingVelocity = .zero
-            self.motionFilter.clear()
-            self.aiDetectionMisses = 0
-            self.clearPendingAIDetection()
-            self.clearRecoveryState()
-            self.sequenceHandler = VNSequenceRequestHandler()
-
-            DispatchQueue.main.async {
-                self.activeProfileID = profile.id
+            self.videoQueue.async {
+                guard self.profileActivationID == activationID else { return }
+                self.featureSamples = observations
+                self.contextFeatureSamples = contextObservations
+                self.photoFeatureSamples = Array(observations.prefix(storedPhotoReferenceCount))
+                self.videoFeatureSamples = Array(observations.dropFirst(storedPhotoReferenceCount))
+                self.photoContextFeatureSamples = Array(contextObservations.prefix(storedPhotoContextCount))
+                self.videoContextFeatureSamples = Array(contextObservations.dropFirst(storedPhotoContextCount))
+                self.scanContextImages = profile.contextImages ?? []
+                self.processingMode = .idle
+                self.trackingObservation = nil
+                self.sequenceHandler = VNSequenceRequestHandler()
+                DispatchQueue.main.async {
+                    guard self.profileActivationID == activationID else { return }
+                    if let cachedProfiles {
+                        self.savedProfiles = cachedProfiles
+                    }
                 self.learnedSamples = observations.count
                 self.surfacePointCount = profile.surfacePointCount
                 self.detectedSubjectLabel = profile.subjectKind.title
                 self.detectedSubjectConfidence = 1
-                self.crystalFacets3D = storedFacets
                 self.scanHasConfirmedTarget = true
                 self.targetConfirmationProgress = 1
                 self.scanProgress = 0.8
@@ -685,10 +756,12 @@ final class CameraController: NSObject, ObservableObject {
                 self.scanNeedsNewAngle = false
                 self.selectedSubjectRect = nil
                 self.stage = .ready
+                self.isProfilePreparing = false
                 self.matchText = "Đã mở \(profile.name) • \(observations.count) góc"
                 self.statusText = "Mẫu đã sẵn sàng để khóa, bám và quay"
                 self.announce("Đã mở mẫu. Sẵn sàng bám mục tiêu.", kind: .success)
                 self.onEvent?("PROFILE_LOADED")
+                }
             }
         }
     }
@@ -712,18 +785,16 @@ final class CameraController: NSObject, ObservableObject {
 
     func startTrackingAndRecording() {
         guard isReady, !isRecording, (stage == .ready || stage == .lost) else { return }
+        guard !isProfilePreparing else {
+            statusText = "Mẫu đang chuẩn bị dữ liệu AI; vui lòng chờ trong giây lát"
+            return
+        }
         isStopRequested = false
         hasCompletedOneTimeZoom = false
         activeTrackingPreparationID = UUID()
         let preparationID = activeTrackingPreparationID
         let fullFrame = CGRect(x: 0, y: 0, width: 1, height: 1)
         let recordAfterLock = !isRecording
-        let preparationReferenceImages = activeProfileID
-            .flatMap { id in savedProfiles.first(where: { $0.id == id })?.referenceImages }
-            ?? scanReferenceImages
-        let preparationContextImages = activeProfileID
-            .flatMap { id in savedProfiles.first(where: { $0.id == id })?.contextImages }
-            ?? scanContextImages
         stage = .verifying
         targetRect = nil
         trackingPoints = []
@@ -736,36 +807,8 @@ final class CameraController: NSObject, ObservableObject {
 
         videoQueue.async { [weak self] in
             guard let self else { return }
-            // Chủ động dựng lại kho đặc trưng từ toàn bộ ảnh + 24 khung video.
-            // Công việc này chạy trong khoảng chờ 3 giây trước khi mở detector.
-            let rebuiltFeatures = preparationReferenceImages.compactMap {
-                self.featurePrint(fromJPEGData: $0)
-            }
-            if !rebuiltFeatures.isEmpty { self.featureSamples = rebuiltFeatures }
-            let rebuiltContexts = preparationContextImages.compactMap {
-                self.featurePrint(fromJPEGData: $0)
-            }
-            if !rebuiltContexts.isEmpty { self.contextFeatureSamples = rebuiltContexts }
-            let photoReferenceCount = min(
-                self.activeProfileID.flatMap { id in
-                    self.savedProfiles.first(where: { $0.id == id })?.photoReferenceCount
-                } ?? min(self.manualPhotoTarget, rebuiltFeatures.count),
-                rebuiltFeatures.count
-            )
-            let photoContextCount = min(
-                self.activeProfileID.flatMap { id in
-                    self.savedProfiles.first(where: { $0.id == id })?.photoContextCount
-                } ?? min(self.manualPhotoTarget, rebuiltContexts.count),
-                rebuiltContexts.count
-            )
-            if !rebuiltFeatures.isEmpty {
-                self.photoFeatureSamples = Array(rebuiltFeatures.prefix(photoReferenceCount))
-                self.videoFeatureSamples = Array(rebuiltFeatures.dropFirst(photoReferenceCount))
-            }
-            if !rebuiltContexts.isEmpty {
-                self.photoContextFeatureSamples = Array(rebuiltContexts.prefix(photoContextCount))
-                self.videoContextFeatureSamples = Array(rebuiltContexts.dropFirst(photoContextCount))
-            }
+            // FeaturePrint đã có sẵn trong RAM hoặc cache của mẫu. Ba giây này chỉ
+            // khóa trạng thái và hợp nhất bộ lọc, không chạy lại Vision cho 60+ ảnh.
             self.processingRect = fullFrame
             self.featureFrameCounter = 0
             self.aiDetectionMisses = 0
@@ -890,6 +933,7 @@ final class CameraController: NSObject, ObservableObject {
     private func startScan(kind: ScanKind, resetProfile: Bool) {
         let rect = scanRect
         let requiredSamples = sampleTarget(for: kind)
+        resetManualCaptureRequest()
 
         switch kind {
         case .near:
@@ -964,7 +1008,6 @@ final class CameraController: NSObject, ObservableObject {
             self.lastAcceptedFeature = nil
             self.voxelOccupancy.removeAll()
             self.manualSelectionRequested = false
-            self.manualCaptureRequested = false
             self.capturedReferencePhotoCount = 0
             self.referenceVideoStartedAt = nil
             self.lastReferenceVideoSampleAt = 0
@@ -991,7 +1034,6 @@ final class CameraController: NSObject, ObservableObject {
             self.processingMode = .idle
             self.activeARScanKind = nil
             var savedProfile: SavedScanProfile?
-            var updatedProfiles = self.savedProfiles
             if isComplete, !self.scanReferenceImages.isEmpty {
                 let formatter = DateFormatter()
                 formatter.locale = Locale(identifier: "vi_VN")
@@ -1011,11 +1053,16 @@ final class CameraController: NSObject, ObservableObject {
                         self.manualPhotoTarget,
                         self.scanContextImages.count
                     ),
+                    referenceFeaturePrints: self.featureSamples.count == self.scanReferenceImages.count
+                        ? self.featureSamples.compactMap(self.encodeFeaturePrint)
+                        : nil,
+                    contextFeaturePrints: self.contextFeatureSamples.count == self.scanContextImages.count
+                        ? self.contextFeatureSamples.compactMap(self.encodeFeaturePrint)
+                        : nil,
                     surfacePointCount: self.scanReferenceImages.count,
                     voxelOccupancy: nil,
                     classificationLabel: self.scanSubjectKind.title
                 )
-                updatedProfiles = self.profileStore.save(profile)
                 savedProfile = profile
             }
             DispatchQueue.main.async {
@@ -1027,7 +1074,6 @@ final class CameraController: NSObject, ObservableObject {
                 self.scanNeedsNewAngle = false
                 self.learnedSamples = totalSampleCount
                 if let savedProfile {
-                    self.savedProfiles = updatedProfiles
                     self.activeProfileID = savedProfile.id
                 }
 
@@ -1045,6 +1091,15 @@ final class CameraController: NSObject, ObservableObject {
                 self.statusText = "Đã liên kết AI có sẵn, bộ ảnh và video 10 giây. Có thể khóa và quay"
                 self.announce("Đã ghép bộ ảnh và video mẫu. Mô hình nhận diện đã sẵn sàng.", kind: .success)
                 self.onEvent?("SHAPE_SCAN_DONE")
+            }
+            if let savedProfile {
+                self.profileQueue.async { [weak self] in
+                    guard let self else { return }
+                    let updatedProfiles = self.profileStore.save(savedProfile)
+                    DispatchQueue.main.async {
+                        self.savedProfiles = updatedProfiles
+                    }
+                }
             }
         }
     }
@@ -1917,6 +1972,7 @@ final class CameraController: NSObject, ObservableObject {
         from pixelBuffer: CVPixelBuffer,
         kind: ScanKind
     ) {
+        defer { finishManualCaptureRequest() }
         guard let reference = trainingReferenceSelection(from: pixelBuffer) else {
             DispatchQueue.main.async { [weak self] in
                 self?.scanNeedsNewAngle = true
@@ -1931,7 +1987,8 @@ final class CameraController: NSObject, ObservableObject {
         processingRect = selection.boundingRect
         // Người dùng chủ động chụp đúng vật theo từng hướng dẫn. Luôn nhận ảnh khi
         // bấm nút; không chặn vì trùng góc, ánh sáng hoặc khoảng cách feature.
-        if let feature = featurePrint(fromJPEGData: selection.referenceJPEG) {
+        let capturedFeature = featurePrint(fromJPEGData: selection.referenceJPEG)
+        if let feature = capturedFeature {
             lastAcceptedFeature = feature
             featureSamples.append(feature)
             photoFeatureSamples.append(feature)
@@ -1943,9 +2000,16 @@ final class CameraController: NSObject, ObservableObject {
             normalizedTopLeftRect: selection.boundingRect,
             orientation: .up
         )
+        var capturedContextFeature: VNFeaturePrintObservation?
         if let contextJPEG = capturedContextJPEG {
             scanContextImages.append(contextJPEG)
-            if let contextFeature = featurePrint(fromJPEGData: contextJPEG) {
+            // Vá»›i tÃªn lá»­a/chai, áº£nh váº­t vÃ  áº£nh ngá»¯ cáº£nh thÆ°á»ng lÃ  cÃ¹ng má»™t crop.
+            // TÃ¡i sá»­ dá»¥ng FeaturePrint Ä‘á»ƒ bá»›t má»™t láº§n Vision má»—i khi báº¥m chá»¥p.
+            let contextFeature = contextJPEG == selection.referenceJPEG
+                ? capturedFeature
+                : featurePrint(fromJPEGData: contextJPEG)
+            if let contextFeature {
+                capturedContextFeature = contextFeature
                 contextFeatureSamples.append(contextFeature)
                 photoContextFeatureSamples.append(contextFeature)
             }
@@ -1953,15 +2017,11 @@ final class CameraController: NSObject, ObservableObject {
         confirmedTargetCells = selection.cells
 
         if isAddingReferencePhoto, let profileID = activeProfileID {
-            let updatedProfiles = profileStore.addSupplementalPhoto(
-                id: profileID,
-                referenceImage: selection.referenceJPEG,
-                contextImage: capturedContextJPEG
-            )
+            let referenceFeatureData = capturedFeature.flatMap(encodeFeaturePrint)
+            let contextFeatureData = capturedContextFeature.flatMap(encodeFeaturePrint)
             processingMode = .idle
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.savedProfiles = updatedProfiles
                 self.isAddingReferencePhoto = false
                 self.stage = .ready
                 self.scanIsSufficient = true
@@ -1975,6 +2035,19 @@ final class CameraController: NSObject, ObservableObject {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 self.announce("Đã thêm ảnh đối chứng vào mẫu.", kind: .success)
                 self.onEvent?("SUPPLEMENTAL_PHOTO_ADDED")
+            }
+            profileQueue.async { [weak self] in
+                guard let self else { return }
+                let updatedProfiles = self.profileStore.addSupplementalPhoto(
+                    id: profileID,
+                    referenceImage: selection.referenceJPEG,
+                    contextImage: capturedContextJPEG,
+                    referenceFeaturePrint: referenceFeatureData,
+                    contextFeaturePrint: contextFeatureData
+                )
+                DispatchQueue.main.async {
+                    self.savedProfiles = updatedProfiles
+                }
             }
             return
         }
@@ -2566,6 +2639,26 @@ final class CameraController: NSObject, ObservableObject {
         } catch {
             return nil
         }
+    }
+
+    private func encodeFeaturePrint(_ observation: VNFeaturePrintObservation) -> Data? {
+        try? NSKeyedArchiver.archivedData(
+            withRootObject: observation,
+            requiringSecureCoding: true
+        )
+    }
+
+    private func decodeFeaturePrint(_ data: Data) -> VNFeaturePrintObservation? {
+        try? NSKeyedUnarchiver.unarchivedObject(
+            ofClass: VNFeaturePrintObservation.self,
+            from: data
+        )
+    }
+
+    private func decodeFeaturePrints(_ data: [Data]?) -> [VNFeaturePrintObservation]? {
+        guard let data, !data.isEmpty else { return nil }
+        let observations = data.compactMap(decodeFeaturePrint)
+        return observations.count == data.count ? observations : nil
     }
 
     private func minimumDistance(to candidate: VNFeaturePrintObservation) -> Float? {
@@ -4969,8 +5062,7 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
                 manualSelectionRequested = false
                 updateManualSubjectSelection(from: pixelBuffer)
             }
-            if manualCaptureRequested {
-                manualCaptureRequested = false
+            if consumeManualCaptureRequest() {
                 captureManualPhoto(from: pixelBuffer, kind: kind)
             }
 
