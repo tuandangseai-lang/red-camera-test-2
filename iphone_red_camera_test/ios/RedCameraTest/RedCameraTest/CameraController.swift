@@ -2544,10 +2544,10 @@ final class CameraController: NSObject, ObservableObject {
 
     private func recoveryExpectedRect(at timestamp: TimeInterval) -> CGRect? {
         guard isRecoveringLostTarget, let seed = recoverySeedEstimate else { return nil }
-        // Chỉ ưu tiên quỹ đạo cũ trong giây đầu. Sau đó trả nil để detector quét toàn
+        // Chỉ ưu tiên quỹ đạo cũ trong 0,3 giây đầu. Sau đó trả nil để detector quét toàn
         // màn hình: mục tiêu có thể quay lại ở bất kỳ vị trí nào vì servo đã chuyển góc.
         let recoveryAge = CGFloat(max(0, min(4.0, timestamp - recoveryStartedAt)))
-        guard recoveryAge < 1.0 else { return nil }
+        guard recoveryAge < 0.30 else { return nil }
         let elapsed = min(1.2, recoveryAge)
         let seedCenter = CGPoint(
             x: seed.filteredRect.midX,
@@ -2773,6 +2773,26 @@ final class CameraController: NSObject, ObservableObject {
                 return (0.055...0.945).contains(centre.x)
                     && (0.045...0.955).contains(centre.y)
             }
+            if isRecoveringLostTarget {
+                // Khi đã bám đúng mục tiêu trước đó, detector chuyên tên lửa là đường
+                // cứu nhanh. Không chạy feature-print đa góc nặng trên từng frame nữa.
+                // Nhãn tên lửa được ưu tiên hơn nhãn bottle chung của COCO.
+                return onScreen.max { lhs, rhs in
+                    func recoveryScore(_ detection: WaterRocketDetection) -> Double {
+                        let genericBottle = detection.label
+                            .lowercased()
+                            .contains("bottle")
+                        let rocketBoost = genericBottle ? 0.0 : 0.24
+                        let centre = CGPoint(
+                            x: detection.rect.midX,
+                            y: detection.rect.midY
+                        )
+                        let centrePenalty = hypot(centre.x - 0.5, centre.y - 0.5) * 0.04
+                        return detection.confidence + rocketBoost - centrePenalty
+                    }
+                    return recoveryScore(lhs) < recoveryScore(rhs)
+                }
+            }
             return bestIdentityAlignedDetection(
                 among: onScreen,
                 in: pixelBuffer
@@ -2888,21 +2908,12 @@ final class CameraController: NSObject, ObservableObject {
             return true
         }
 
-        let detectionArea = detection.rect.width * detection.rect.height
-        if isRecoveringLostTarget,
-           detectionArea >= 0.0035,
-           bestIdentityAlignedDetection(
-               among: [detection],
-               in: pixelBuffer
-           ) == nil {
-            pendingAIDetectionCount = max(0, pendingAIDetectionCount - 1)
-            publishSearchProgress(
-                message: "AI thấy vật gần quỹ đạo nhưng chưa khớp đa số ảnh mẫu"
-            )
-            return true
-        }
-
-        let confirmationCount = isRecoveringLostTarget ? 2 : 4
+        let isGenericBottle = detection.label.lowercased().contains("bottle")
+        // Model chuyên tên lửa đã được huấn luyện riêng nên khóa ngay ở frame đầu.
+        // Model chai COCO rộng hơn phải lặp lại 2 frame để tránh bắt chai khác.
+        let confirmationCount = isRecoveringLostTarget
+            ? (isGenericBottle ? 2 : 1)
+            : 4
         guard confirmsAIDetection(
             detection.rect,
             requiredCount: confirmationCount
@@ -3368,7 +3379,7 @@ final class CameraController: NSObject, ObservableObject {
             self.matchText = self.aiDetector.isAvailable
                 ? "Mất mục tiêu • AI phóng to vùng quỹ đạo để bắt lại"
                 : "Mất mục tiêu • đang tự tìm lại mô hình đa góc"
-            self.statusText = "Giữ quỹ đạo cũ, mở dần vùng tìm; chỉ khóa mục tiêu ổn định 2 frame"
+            self.statusText = "Ưu tiên quỹ đạo 0,3 giây rồi quét toàn màn hình để khóa lại ngay"
             self.returnToUltraWide()
             self.announce("Mất mục tiêu. Đang tự tìm lại.", kind: .warning)
             self.onEvent?("SEARCH_START")
@@ -4120,10 +4131,13 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
                 // YOLO tìm lớp tên lửa; nhánh mẫu cá nhân vẫn chạy song song ở
                 // nhịp thấp hơn, nên YOLO hụt vật gần hoặc chai trong suốt cũng
                 // không còn chặn toàn bộ bảy ảnh người dùng.
-                if featureFrameCounter % 2 == 1 {
+                let aiStride = isRecoveringLostTarget ? 1 : 2
+                if featureFrameCounter % aiStride == 0 {
                     verifyWithAIDetector(pixelBuffer: pixelBuffer)
                 }
-                let personalizedStride = isRecoveringLostTarget ? 6 : 12
+                // Feature-print đa góc là đường dự phòng nặng. Lúc cứu mục tiêu chỉ
+                // chạy thưa để không chặn detector Core ML đang quét từng frame.
+                let personalizedStride = isRecoveringLostTarget ? 24 : 12
                 if featureFrameCounter % personalizedStride == 1 {
                     verifyAndLock(pixelBuffer: pixelBuffer)
                 }
