@@ -112,6 +112,11 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var trackingPoints: [CGPoint] = []
     @Published private(set) var predictedTargetPoint: CGPoint?
     @Published private(set) var trackingConfidence = 0.0
+    /// Hướng chuẩn hóa trên màn hình mà app đang gửi cho ESP32 khi tìm lại mục tiêu.
+    /// Đây chỉ là trạng thái giao diện; AVCaptureMovieFileOutput không ghi lớp này vào video.
+    @Published private(set) var servoSearchVector: CGPoint?
+    @Published private(set) var servoSearchAnchor: CGPoint?
+    @Published private(set) var isServoTrajectorySearching = false
     @Published private(set) var matchText = "Chưa có mẫu"
     @Published private(set) var frameAspectRatio: CGFloat = 9.0 / 16.0
     @Published private(set) var savedProfiles: [SavedScanProfile] = []
@@ -391,6 +396,9 @@ final class CameraController: NSObject, ObservableObject {
         targetRect = nil
         trackingPoints = []
         predictedTargetPoint = nil
+        servoSearchVector = nil
+        servoSearchAnchor = nil
+        isServoTrajectorySearching = false
         trackingConfidence = 0
         matchText = "Chưa có mẫu"
         activeProfileID = nil
@@ -451,6 +459,9 @@ final class CameraController: NSObject, ObservableObject {
         targetRect = nil
         trackingPoints = []
         predictedTargetPoint = nil
+        servoSearchVector = nil
+        servoSearchAnchor = nil
+        isServoTrajectorySearching = false
         statusText = "Đã dừng tạo mẫu"
         onEvent?("SCAN_CANCELLED")
     }
@@ -661,6 +672,9 @@ final class CameraController: NSObject, ObservableObject {
         stage = isRecording ? .lost : .ready
         trackingPoints = []
         predictedTargetPoint = nil
+        servoSearchVector = nil
+        servoSearchAnchor = nil
+        isServoTrajectorySearching = false
         matchText = isRecording ? "Đã dừng tìm lại mục tiêu" : "Mẫu đã sẵn sàng"
         statusText = isRecording ? "Mất mục tiêu • có thể bấm Bắt lại" : "Có thể bấm Khóa, bám & quay"
         onEvent?("SEARCH_STOP")
@@ -685,6 +699,9 @@ final class CameraController: NSObject, ObservableObject {
         targetRect = nil
         trackingPoints = []
         predictedTargetPoint = nil
+        servoSearchVector = nil
+        servoSearchAnchor = nil
+        isServoTrajectorySearching = false
         sessionQueue.async { [weak self] in
             guard let self else { return }
             if self.movieOutput.isRecording {
@@ -2698,6 +2715,24 @@ final class CameraController: NSObject, ObservableObject {
         return String(format: "S,%03d,%03d,%+03d,%+03d", x, y, vx, vy)
     }
 
+    /// Dùng đúng hướng ảnh mà firmware nhận trong gói S,x,y,vx,vy. Khi vận tốc cuối
+    /// quá nhỏ, firmware dùng độ lệch của mục tiêu khỏi tâm nên giao diện cũng làm vậy.
+    private func trajectoryScreenVector(
+        for estimate: RocketMotionEstimate?
+    ) -> CGPoint? {
+        guard let estimate else { return nil }
+        var dx = estimate.velocity.dx
+        var dy = estimate.velocity.dy
+        var magnitude = hypot(dx, dy)
+        if magnitude < 0.015 {
+            dx = estimate.predictedPoint.x - 0.5
+            dy = estimate.predictedPoint.y - 0.5
+            magnitude = hypot(dx, dy)
+        }
+        guard magnitude >= 0.002 else { return nil }
+        return CGPoint(x: dx / magnitude, y: dy / magnitude)
+    }
+
     private func sendSearchHeartbeatIfNeeded() {
         guard isRecoveringLostTarget else { return }
         let now = CACurrentMediaTime()
@@ -3042,6 +3077,9 @@ final class CameraController: NSObject, ObservableObject {
             self.trackingPoints = initialPoints
             self.predictedTargetPoint = CGPoint(x: clippedRect.midX, y: clippedRect.midY)
             self.trackingConfidence = confidence
+            self.servoSearchVector = nil
+            self.servoSearchAnchor = nil
+            self.isServoTrajectorySearching = false
             self.matchText = matchDescription
             self.statusText = statusDescription
             self.onEvent?("TARGET_LOCKED")
@@ -3524,6 +3562,8 @@ final class CameraController: NSObject, ObservableObject {
         recoveryStartedAt = lostAt
         isRecoveringLostTarget = true
         recoverySearchCommand = trajectorySearchCommand(for: recoverySeedEstimate)
+        let screenSearchVector = trajectoryScreenVector(for: recoverySeedEstimate)
+        let screenSearchAnchor = recoverySeedEstimate?.predictedPoint
         lastSearchCommandSentAt = lostAt
         let searchCommand = recoverySearchCommand
         processingMode = .verifying
@@ -3548,6 +3588,9 @@ final class CameraController: NSObject, ObservableObject {
             self.trackingPoints = []
             self.predictedTargetPoint = nil
             self.trackingConfidence = 0
+            self.servoSearchVector = screenSearchVector
+            self.servoSearchAnchor = screenSearchAnchor
+            self.isServoTrajectorySearching = screenSearchVector != nil
             self.matchText = self.aiDetector.isAvailable
                 ? "Mất mục tiêu • AI và servo đang đi tiếp theo quỹ đạo cuối"
                 : "Mất mục tiêu • đang tự tìm lại mô hình đa góc"

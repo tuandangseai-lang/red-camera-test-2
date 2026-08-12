@@ -94,8 +94,91 @@ struct ContentView: View {
                    camera.targetRect != nil {
                     aiTrackingOverlay(in: geometry.size)
                 }
+
+                if camera.isServoTrajectorySearching,
+                   let vector = camera.servoSearchVector {
+                    servoTrajectorySearchOverlay(vector: vector, in: geometry.size)
+                }
             }
         }
+        .allowsHitTesting(false)
+    }
+
+    /// Lớp AR chỉ nằm trong SwiftUI preview. Video được AVCaptureMovieFileOutput ghi
+    /// trực tiếp từ camera nên mũi tên và nhãn ESP32 không xuất hiện trong file lưu.
+    private func servoTrajectorySearchOverlay(
+        vector: CGPoint,
+        in size: CGSize
+    ) -> some View {
+        let magnitude = max(0.001, hypot(vector.x, vector.y))
+        let dx = vector.x / magnitude
+        let dy = vector.y / magnitude
+        let angle = Angle.radians(Double(atan2(dy, dx)) + .pi / 2)
+        let anchor = camera.servoSearchAnchor ?? CGPoint(x: 0.5, y: 0.45)
+        let safeAnchor = CGPoint(
+            x: min(0.78, max(0.22, anchor.x)),
+            y: min(0.70, max(0.25, anchor.y))
+        )
+        let base = mappedPoint(safeAnchor, in: size)
+        let travel = min(92.0, max(64.0, min(size.width, size.height) * 0.16))
+        let arrowPoint = CGPoint(
+            x: min(size.width - 42, max(42, base.x + dx * travel)),
+            y: min(size.height - 130, max(105, base.y + dy * travel))
+        )
+
+        return ZStack(alignment: .topLeading) {
+            Canvas { context, _ in
+                var trajectory = Path()
+                trajectory.move(to: base)
+                trajectory.addLine(to: arrowPoint)
+                context.stroke(
+                    trajectory,
+                    with: .color(.cyan.opacity(0.82)),
+                    style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: [7, 6])
+                )
+
+                let centerDot = CGRect(
+                    x: base.x - 5,
+                    y: base.y - 5,
+                    width: 10,
+                    height: 10
+                )
+                context.fill(Path(ellipseIn: centerDot), with: .color(.cyan))
+            }
+
+            ZStack {
+                Circle()
+                    .fill(Color.blue.opacity(0.92))
+                Circle()
+                    .stroke(Color.white.opacity(0.88), lineWidth: 2)
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 28, weight: .black))
+                    .foregroundStyle(.white)
+                    .rotationEffect(angle)
+            }
+            .frame(width: 58, height: 58)
+            .shadow(color: .cyan.opacity(0.85), radius: 10)
+            .position(arrowPoint)
+
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(Color.cyan)
+                    .frame(width: 7, height: 7)
+                Text("ESP32 ĐANG TÌM")
+                    .font(.system(size: 11, weight: .black, design: .rounded))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.black.opacity(0.74), in: Capsule())
+            .overlay(Capsule().stroke(Color.cyan.opacity(0.75), lineWidth: 1))
+            .position(
+                x: min(size.width - 78, max(78, arrowPoint.x)),
+                y: min(size.height - 94, arrowPoint.y + 46)
+            )
+        }
+        .transition(.scale(scale: 0.82).combined(with: .opacity))
+        .animation(.easeOut(duration: 0.18), value: camera.isServoTrajectorySearching)
         .allowsHitTesting(false)
     }
 
