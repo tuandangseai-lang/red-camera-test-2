@@ -44,8 +44,30 @@ final class ScanProfileStore {
                 [SavedScanProfile].self,
                 from: data
               ) else { return [] }
+        // Bản cũ lưu tên lửa nước trong tab Vật. Tự chuyển những mẫu có nhãn
+        // tên lửa/chai sang tab chuyên dụng để người dùng không phải chụp lại.
+        let migratedProfiles = profiles.map { profile -> SavedScanProfile in
+            let label = profile.classificationLabel?.lowercased() ?? ""
+            let isLegacyRocket = profile.subjectKind == .object
+                && (label.contains("tên lửa")
+                    || label.contains("rocket")
+                    || label.contains("chai")
+                    || label.contains("bottle"))
+            guard isLegacyRocket else { return profile }
+            return SavedScanProfile(
+                id: profile.id,
+                name: profile.name,
+                createdAt: profile.createdAt,
+                subjectKind: .waterRocket,
+                referenceImages: profile.referenceImages,
+                contextImages: profile.contextImages,
+                surfacePointCount: profile.surfacePointCount,
+                voxelOccupancy: profile.voxelOccupancy,
+                classificationLabel: profile.classificationLabel
+            )
+        }
         return Array(
-            profiles
+            migratedProfiles
                 .sorted { $0.createdAt > $1.createdAt }
                 .prefix(maximumProfileCount)
         )

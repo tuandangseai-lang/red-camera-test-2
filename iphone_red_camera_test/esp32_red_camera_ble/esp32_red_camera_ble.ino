@@ -39,7 +39,9 @@ constexpr int SERVO_MAX_US = 2400;
 // ======================== THUẬT TOÁN BÁM ========================
 // App gửi x/y từ 000...999; tâm ảnh là 500/500.
 constexpr int IMAGE_CENTER = 500;
-constexpr int DEAD_ZONE = 35;          // 3,5% quanh tâm: servo đứng yên để khỏi rung.
+constexpr int DEAD_ZONE = 22;          // 2,2% quanh tâm: chỉ khử rung rất nhỏ.
+constexpr int CENTER_ZONE_HALF = 250;  // Vùng giữa rộng/cao 1/2 màn hình.
+constexpr int STILL_VELOCITY = 4;      // Dưới mức này xem như vật gần đứng yên.
 // App dùng ngưỡng 60%. Chỉ gói T có confidence >= 60 mới được phép dừng tìm
 // và điều khiển servo; gói yếu hơn không được làm mất vector tìm cuối.
 constexpr int LOCK_CONFIDENCE = 60;    // 00...99.
@@ -47,8 +49,12 @@ constexpr uint32_t TRACK_TIMEOUT_MS = 300;
 constexpr uint32_t CONTROL_PERIOD_MS = 20;  // Điều khiển servo 50 lần/giây.
 
 // Tốc độ góc tối đa; giảm nếu giá điện thoại rung, tăng nếu servo đủ khỏe.
-constexpr float PAN_MAX_SPEED_DPS = 120.0f;
-constexpr float TILT_MAX_SPEED_DPS = 100.0f;
+constexpr float PAN_MAX_SPEED_DPS = 150.0f;
+constexpr float TILT_MAX_SPEED_DPS = 130.0f;
+constexpr float VELOCITY_FEEDFORWARD = 0.72f;
+constexpr float OUTSIDE_CENTER_BOOST = 1.30f;
+constexpr float TRACKING_INTEGRAL_GAIN = 1.85f;
+constexpr float TRACKING_INTEGRAL_LIMIT = 0.70f;
 
 // Khi mất mục tiêu, đi tiếp theo vector bay cuối trong 0,65 giây. Nếu vẫn chưa
 // thấy, chỉ rà một dải hẹp dọc theo chính quỹ đạo đó, không quét ngẫu nhiên.
@@ -78,6 +84,8 @@ portMUX_TYPE trackingMux = portMUX_INITIALIZER_UNLOCKED;
 int latestTargetX = IMAGE_CENTER;
 int latestTargetY = IMAGE_CENTER;
 int latestConfidence = 0;
+int latestVelocityX = 0;
+int latestVelocityY = 0;
 uint32_t latestTargetAtMs = 0;
 bool targetAvailable = false;
 volatile bool searchMode = false;
@@ -85,6 +93,8 @@ volatile bool trackingSessionActive = false;
 
 float panAngleDeg = PAN_CENTER_DEG;
 float tiltAngleDeg = TILT_CENTER_DEG;
+float panIntegralCommand = 0.0f;
+float tiltIntegralCommand = 0.0f;
 float searchOriginPanDeg = PAN_CENTER_DEG;
 float searchOriginTiltDeg = TILT_CENTER_DEG;
 float searchDirectionPan = 0.0f;
@@ -122,7 +132,11 @@ void stopTrackingTarget() {
   portENTER_CRITICAL(&trackingMux);
   targetAvailable = false;
   latestConfidence = 0;
+  latestVelocityX = 0;
+  latestVelocityY = 0;
   portEXIT_CRITICAL(&trackingMux);
+  panIntegralCommand = 0.0f;
+  tiltIntegralCommand = 0.0f;
 }
 
 void startTrajectorySearch(int predictedX, int predictedY, int velocityX,
@@ -233,6 +247,8 @@ void updateServosFromTarget() {
   int targetX;
   int targetY;
   int confidence;
+  int velocityX;
+  int velocityY;
   uint32_t receivedAt;
   bool available;
 
@@ -240,6 +256,8 @@ void updateServosFromTarget() {
   targetX = latestTargetX;
   targetY = latestTargetY;
   confidence = latestConfidence;
+  velocityX = latestVelocityX;
+  velocityY = latestVelocityY;
   receivedAt = latestTargetAtMs;
   available = targetAvailable;
   portEXIT_CRITICAL(&trackingMux);
@@ -253,20 +271,63 @@ void updateServosFromTarget() {
   const float panError = shapedAxisError(targetX - IMAGE_CENTER);
   const float tiltError = shapedAxisError(targetY - IMAGE_CENTER);
 
+  // Feed-forward theo hướng bay: dù mục tiêu vừa đi qua tâm, servo vẫn quay
+  // đón đầu. Khi vật thật sự đứng yên, thành phần này bằng 0 và servo nghỉ.
+  const float panVelocity = abs(velocityX) <= STILL_VELOCITY
+                                ? 0.0f
+                                : clampFloat(velocityX / 99.0f, -1.0f, 1.0f);
+  const float tiltVelocity = abs(velocityY) <= STILL_VELOCITY
+                                 ? 0.0f
+                                 : clampFloat(velocityY / 99.0f, -1.0f, 1.0f);
+  const bool outsideCenterZone =
+      abs(targetX - IMAGE_CENTER) > CENTER_ZONE_HALF ||
+      abs(targetY - IMAGE_CENTER) > CENTER_ZONE_HALF;
+  const float positionBoost = outsideCenterZone ? OUTSIDE_CENTER_BOOST : 1.0f;
+
+  // Thành phần tích phân học tốc độ quay cần thiết để giữ một vật đang bay ở
+  // chính giữa. Vì thế khi sai số vừa về 0, servo không dừng đột ngột mà tiếp
+  // tục đi cùng tên lửa. Với vật đứng yên, sai số ngược chiều sẽ tự triệt tiêu.
+  panIntegralCommand = clampFloat(
+      panIntegralCommand + panError * TRACKING_INTEGRAL_GAIN * deltaSeconds,
+      -TRACKING_INTEGRAL_LIMIT, TRACKING_INTEGRAL_LIMIT);
+  tiltIntegralCommand = clampFloat(
+      tiltIntegralCommand + tiltError * TRACKING_INTEGRAL_GAIN * deltaSeconds,
+      -TRACKING_INTEGRAL_LIMIT, TRACKING_INTEGRAL_LIMIT);
+  if (panError == 0.0f && panVelocity == 0.0f &&
+      fabsf(panIntegralCommand) < 0.025f) {
+    panIntegralCommand = 0.0f;
+  }
+  if (tiltError == 0.0f && tiltVelocity == 0.0f &&
+      fabsf(tiltIntegralCommand) < 0.025f) {
+    tiltIntegralCommand = 0.0f;
+  }
+
+  const float panCommand = clampFloat(
+      panError * positionBoost + panVelocity * VELOCITY_FEEDFORWARD +
+          panIntegralCommand,
+      -1.0f, 1.0f);
+  const float tiltCommand = clampFloat(
+      tiltError * positionBoost + tiltVelocity * VELOCITY_FEEDFORWARD +
+          tiltIntegralCommand,
+      -1.0f, 1.0f);
+
   panAngleDeg +=
-      PAN_DIRECTION * panError * PAN_MAX_SPEED_DPS * deltaSeconds;
+      PAN_DIRECTION * panCommand * PAN_MAX_SPEED_DPS * deltaSeconds;
   tiltAngleDeg +=
-      TILT_DIRECTION * tiltError * TILT_MAX_SPEED_DPS * deltaSeconds;
+      TILT_DIRECTION * tiltCommand * TILT_MAX_SPEED_DPS * deltaSeconds;
 
   panAngleDeg = clampFloat(panAngleDeg, PAN_MIN_DEG, PAN_MAX_DEG);
   tiltAngleDeg = clampFloat(tiltAngleDeg, TILT_MIN_DEG, TILT_MAX_DEG);
   writeServoAngles();
 }
 
-void acceptTrackingPacket(int x, int y, int confidence) {
+void acceptTrackingPacket(int x, int y, int confidence, int velocityX = 0,
+                          int velocityY = 0) {
   x = constrain(x, 0, 999);
   y = constrain(y, 0, 999);
   confidence = constrain(confidence, 0, 99);
+  velocityX = constrain(velocityX, -99, 99);
+  velocityY = constrain(velocityY, -99, 99);
 
   // Điều kiện ưu tiên cao nhất: thấy đúng >=60% thì dừng chuyển động tìm ngay.
   // Nếu confidence thấp hơn, giữ nguyên searchMode và quỹ đạo trước đó.
@@ -284,6 +345,8 @@ void acceptTrackingPacket(int x, int y, int confidence) {
   latestTargetX = x;
   latestTargetY = y;
   latestConfidence = confidence;
+  latestVelocityX = velocityX;
+  latestVelocityY = velocityY;
   latestTargetAtMs = millis();
   targetAvailable = true;
   portEXIT_CRITICAL(&trackingMux);
@@ -292,9 +355,11 @@ void acceptTrackingPacket(int x, int y, int confidence) {
   if (now - lastTelemetryPrintAtMs >= 250) {
     lastTelemetryPrintAtMs = now;
     Serial.printf(
-        "[TRACK] x=%d y=%d tin-cay=%d | PAN=%.1f TILT=%.1f\n",
+        "[TRACK] x=%d y=%d vx=%d vy=%d tin-cay=%d | PAN=%.1f TILT=%.1f\n",
         x,
         y,
+        velocityX,
+        velocityY,
         confidence,
         panAngleDeg,
         tiltAngleDeg);
@@ -330,6 +395,22 @@ void handlePhoneMessage(String value) {
     int confidence = 0;
     if (sscanf(value.c_str(), "T,%d,%d,%d", &x, &y, &confidence) == 3) {
       acceptTrackingPacket(x, y, confidence);
+    }
+    return;
+  }
+
+  // Gói mới 15 byte từ iPhone: Vxxxyyyccvvvwww. Không có dấu phẩy để luôn
+  // vừa payload BLE 20 byte; vẫn giữ nhánh T phía trên cho app cũ.
+  if (value.length() == 15 && value.startsWith("V")) {
+    if (!trackingSessionActive) return;
+    int x = 0;
+    int y = 0;
+    int confidence = 0;
+    int velocityX = 0;
+    int velocityY = 0;
+    if (sscanf(value.c_str(), "V%3d%3d%2d%3d%3d", &x, &y, &confidence,
+               &velocityX, &velocityY) == 5) {
+      acceptTrackingPacket(x, y, confidence, velocityX, velocityY);
     }
     return;
   }

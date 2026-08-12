@@ -28,7 +28,10 @@ final class BLEManager: NSObject, ObservableObject {
 
         // Tọa độ tracking gửi dày nên dùng writeWithoutResponse. Các lệnh đổi
         // trạng thái servo phải có phản hồi để SEARCH không bị rơi gói BLE.
-        let isTelemetry = message.hasPrefix("T,")
+        // V là gói tracking gọn 15 byte: Vxxxyyyccvvvwww. Gói này có thêm
+        // vận tốc hai trục nhưng vẫn nằm dưới payload BLE mặc định 20 byte.
+        let isVelocityTelemetry = message.hasPrefix("V") && message.utf8.count == 15
+        let isTelemetry = message.hasPrefix("T,") || isVelocityTelemetry
         let canWriteFast = characteristic.properties.contains(.writeWithoutResponse)
         let canWriteConfirmed = characteristic.properties.contains(.write)
         let writeType: CBCharacteristicWriteType

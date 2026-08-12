@@ -92,6 +92,7 @@ struct ContentView: View {
 
                 if camera.stage == .tracking,
                    camera.targetRect != nil {
+                    centerTrackingZone(in: geometry.size)
                     aiTrackingOverlay(in: geometry.size)
                 }
 
@@ -102,6 +103,20 @@ struct ContentView: View {
             }
         }
         .allowsHitTesting(false)
+    }
+
+    /// Vùng mục tiêu an toàn chiếm 1/2 chiều rộng và 1/2 chiều cao màn hình dọc.
+    /// Đây chỉ là overlay SwiftUI nên không xuất hiện trong video được lưu.
+    private func centerTrackingZone(in size: CGSize) -> some View {
+        let zone = CGSize(width: size.width * 0.50, height: size.height * 0.50)
+        return RoundedRectangle(cornerRadius: 28, style: .continuous)
+            .stroke(
+                Color.white.opacity(0.34),
+                style: StrokeStyle(lineWidth: 1.4, dash: [8, 7])
+            )
+            .frame(width: zone.width, height: zone.height)
+            .position(x: size.width / 2, y: size.height / 2)
+            .allowsHitTesting(false)
     }
 
     /// Lớp AR chỉ nằm trong SwiftUI preview. Video được AVCaptureMovieFileOutput ghi
@@ -722,38 +737,52 @@ struct ContentView: View {
     }
 
     private var compactSettings: some View {
-        HStack(spacing: 9) {
-            Menu {
+        VStack(spacing: 6) {
+            HStack(spacing: 5) {
                 ForEach(ScanSubjectKind.allCases) { kind in
+                    let isSelected = camera.scanSubjectKind == kind
                     Button {
                         camera.selectSubjectKind(kind)
                     } label: {
-                        Label(kind.title, systemImage: kind.symbol)
+                        VStack(spacing: 2) {
+                            Image(systemName: kind.symbol)
+                                .font(.system(size: 15, weight: .bold))
+                            Text(kind.compactTitle)
+                                .font(.system(size: 9, weight: .bold, design: .rounded))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.72)
+                        }
+                        .foregroundStyle(isSelected ? .black : .white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 5)
+                        .background(
+                            isSelected ? Color.cyan : Color.white.opacity(0.09),
+                            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        )
                     }
+                    .buttonStyle(.plain)
+                    .disabled(camera.isRecording || camera.stage.isScanning)
+                    .accessibilityLabel(kind.title)
                 }
-            } label: {
-                Label(camera.scanSubjectKind.title, systemImage: camera.scanSubjectKind.symbol)
-                    .lineLimit(1)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(camera.isRecording || camera.stage.isScanning)
 
-            Image(systemName: "viewfinder")
-                .foregroundStyle(.yellow)
-            Slider(value: $camera.scanBoxScale, in: 0.48...0.92)
-                .tint(.yellow)
-            Button {
-                camera.voiceAnnouncementsEnabled.toggle()
-            } label: {
-                Image(systemName: camera.voiceAnnouncementsEnabled
-                      ? "speaker.wave.2.fill"
-                      : "speaker.slash.fill")
-                    .frame(width: 24, height: 24)
+            HStack(spacing: 9) {
+                Image(systemName: "viewfinder")
+                    .foregroundStyle(.yellow)
+                Slider(value: $camera.scanBoxScale, in: 0.48...0.92)
+                    .tint(.yellow)
+                Button {
+                    camera.voiceAnnouncementsEnabled.toggle()
+                } label: {
+                    Image(systemName: camera.voiceAnnouncementsEnabled
+                          ? "speaker.wave.2.fill"
+                          : "speaker.slash.fill")
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(camera.voiceAnnouncementsEnabled ? .green : .gray)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .tint(camera.voiceAnnouncementsEnabled ? .green : .gray)
         }
         .foregroundStyle(.white)
     }

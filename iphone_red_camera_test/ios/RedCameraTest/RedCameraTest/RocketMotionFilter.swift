@@ -106,9 +106,10 @@ struct RocketMotionFilter {
         )
         let speed = hypot(velocity.dx, velocity.dy)
 
-        // 80 ms bù độ trễ cơ bản; mục tiêu càng nhanh thì nhìn trước thêm nhưng
-        // không quá 180 ms để tránh vượt xa tên lửa khi nó đổi hướng.
-        let leadTime: CGFloat = min(0.18, 0.08 + speed * 0.025)
+        // Giá điện thoại + MG995 có độ trễ cơ khí rõ rệt. Nhìn trước theo tốc độ
+        // giúp servo vẫn tiếp tục quay khi tên lửa vừa đi qua tâm ảnh, thay vì
+        // dừng rồi mới đuổi. Giới hạn 260 ms để không vượt quá xa lúc đổi hướng.
+        let leadTime: CGFloat = min(0.26, 0.10 + speed * 0.032)
         let predicted = CGPoint(
             x: Self.clamp(current.x + velocity.dx * leadTime),
             y: Self.clamp(current.y + velocity.dy * leadTime)

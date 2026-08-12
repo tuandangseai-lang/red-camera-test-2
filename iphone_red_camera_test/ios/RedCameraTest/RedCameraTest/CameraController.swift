@@ -10,6 +10,7 @@ import UIKit
 import Vision
 
 enum ScanSubjectKind: String, CaseIterable, Codable, Identifiable {
+    case waterRocket
     case person
     case animal
     case object
@@ -18,6 +19,7 @@ enum ScanSubjectKind: String, CaseIterable, Codable, Identifiable {
 
     var title: String {
         switch self {
+        case .waterRocket: return "Tên lửa nước"
         case .person: return "Người"
         case .animal: return "Thú"
         case .object: return "Vật"
@@ -26,10 +28,15 @@ enum ScanSubjectKind: String, CaseIterable, Codable, Identifiable {
 
     var symbol: String {
         switch self {
+        case .waterRocket: return "rocket.fill"
         case .person: return "person.fill"
         case .animal: return "pawprint.fill"
         case .object: return "shippingbox.fill"
         }
+    }
+
+    var compactTitle: String {
+        self == .waterRocket ? "Tên lửa" : title
     }
 }
 
@@ -122,7 +129,7 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var savedProfiles: [SavedScanProfile] = []
     @Published private(set) var activeProfileID: UUID?
     @Published var scanBoxScale = 0.76
-    @Published var scanSubjectKind: ScanSubjectKind = .object
+    @Published var scanSubjectKind: ScanSubjectKind = .waterRocket
     @Published var voiceAnnouncementsEnabled = true
 
     /// Khóa ngay khi người dùng bấm dừng. Kết quả AI cũ đang chờ trên hàng đợi
@@ -335,7 +342,7 @@ final class CameraController: NSObject, ObservableObject {
     func selectSubjectKind(_ kind: ScanSubjectKind) {
         guard !isRecording, !stage.isScanning else { return }
         guard kind != scanSubjectKind else { return }
-        // Không dùng chéo bộ ảnh Người / Thú / Vật.
+        // Không dùng chéo bộ ảnh Tên lửa nước / Người / Thú / Vật.
         resetProfile()
         scanSubjectKind = kind
         detectedSubjectLabel = kind.title
@@ -1057,7 +1064,7 @@ final class CameraController: NSObject, ObservableObject {
     private func trainingReferenceSelection(
         from pixelBuffer: CVPixelBuffer
     ) -> TrainingReferenceSelection? {
-        if scanSubjectKind == .object,
+        if scanSubjectKind == .waterRocket,
            let rocket = automaticReferenceSelection(from: pixelBuffer) {
             return TrainingReferenceSelection(
                 selection: rocket.selection,
@@ -1065,7 +1072,7 @@ final class CameraController: NSObject, ObservableObject {
                 label: rocket.detection.label.lowercased().contains("bottle")
                     ? "chai nước"
                     : "tên lửa nước",
-                kind: .object
+                kind: .waterRocket
             )
         }
 
@@ -1416,6 +1423,25 @@ final class CameraController: NSObject, ObservableObject {
         // Tab người dùng chọn là nguồn sự thật. AI chỉ đặt tên chi tiết bên
         // trong tab đó, không tự đổi Vật thành Người vì thấy bàn tay đang cầm.
         switch scanSubjectKind {
+        case .waterRocket:
+            if let rocket = detectRocketOrBottle(
+                in: pixelBuffer,
+                minimumConfidence: 0.05,
+                regionOfInterest: rect
+                    .insetBy(dx: -0.06, dy: -0.06)
+                    .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+            ).max(by: { $0.confidence < $1.confidence }) {
+                let isBottle = rocket.label.lowercased().contains("bottle")
+                return (
+                    .waterRocket,
+                    isBottle ? "chai tên lửa" : "tên lửa nước",
+                    rocket.confidence
+                )
+            }
+            // Người dùng đã chủ động chọn tab chuyên dụng; vẫn cho phép chụp
+            // mẫu nhỏ để 7 ảnh + video cá nhân hoàn thiện nhận dạng.
+            return (.waterRocket, "tên lửa nước", 0.10)
+
         case .person:
             let confidence = personRequest.results?
                 .map { Double($0.confidence) }
@@ -1434,20 +1460,7 @@ final class CameraController: NSObject, ObservableObject {
             return (.animal, "thú", 0.10)
 
         case .object:
-            if let rocket = detectRocketOrBottle(
-                in: pixelBuffer,
-                minimumConfidence: 0.08,
-                regionOfInterest: rect
-                    .insetBy(dx: -0.04, dy: -0.04)
-                    .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
-            ).max(by: { $0.confidence < $1.confidence }) {
-                let isBottle = rocket.label.lowercased().contains("bottle")
-                return (
-                    .object,
-                    isBottle ? "chai nước" : "tên lửa nước",
-                    rocket.confidence
-                )
-            }
+            break
         }
 
         guard let image = UIImage(data: referenceJPEG)?.cgImage else {
@@ -2526,6 +2539,16 @@ final class CameraController: NSObject, ObservableObject {
 
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
         switch scanSubjectKind {
+        case .waterRocket:
+            let detections = detectRocketOrBottle(
+                in: pixelBuffer,
+                minimumConfidence: 0.05
+            )
+            return detections
+                .filter { matches($0.rect) }
+                .map(\.confidence)
+                .max()
+
         case .person:
             let request = VNDetectHumanRectanglesRequest()
             request.upperBodyOnly = false
@@ -2557,12 +2580,7 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private var usesRocketSpecificDetector: Bool {
-        guard scanSubjectKind == .object else { return false }
-        let label = detectedSubjectLabel.lowercased()
-        return label.contains("tên lửa")
-            || label.contains("rocket")
-            || label.contains("chai")
-            || label.contains("bottle")
+        scanSubjectKind == .waterRocket
     }
 
     private struct ForegroundCandidate {
@@ -3175,8 +3193,11 @@ final class CameraController: NSObject, ObservableObject {
         // Một tên lửa xa chỉ vài pixel thường có độ tin cậy thấp. Chỉ hạ ngưỡng
         // khi đã có quỹ đạo dự đoán; tìm mới toàn màn hình vẫn giữ ngưỡng cao để
         // cây và cờ không thể tự biến thành mục tiêu.
+        let rocketAcquisitionConfidence = scanSubjectKind == .waterRocket
+            ? 0.24
+            : aiAcquisitionConfidence
         let minimumConfidence = expectedRect == nil
-            ? (isRecoveringLostTarget ? aiReacquisitionConfidence : aiAcquisitionConfidence)
+            ? (isRecoveringLostTarget ? aiReacquisitionConfidence : rocketAcquisitionConfidence)
             : (isTinyContinuation ? 0.05 : aiContinuationConfidence)
         let detections: [WaterRocketDetection]
         if let expectedRect, isTinyContinuation || isRecoveringLostTarget {
@@ -3637,7 +3658,12 @@ final class CameraController: NSObject, ObservableObject {
         // qua vài pixel chuyển động. Chuyển sang mức chính xác và cho detector
         // kiểm tra dày hơn; vật lớn vẫn giữ chế độ nhanh để đảm bảo 60 fps.
         let observedArea = observation.boundingBox.width * observation.boundingBox.height
-        let isTinyTarget = observedArea < 0.0045
+        // Khi quay từ bệ ở khoảng 2–3 m, tên lửa thường chỉ chiếm một vùng nhỏ.
+        // Chế độ riêng chạy tracker chính xác + detector dày ngay từ ngưỡng 1,5% ảnh.
+        let tinyTargetAreaThreshold: CGFloat = scanSubjectKind == .waterRocket
+            ? 0.015
+            : 0.0045
+        let isTinyTarget = observedArea < tinyTargetAreaThreshold
         request.trackingLevel = (isTinyTarget || lowConfidenceFrames > 0) ? .accurate : .fast
 
         do {
@@ -3829,13 +3855,27 @@ final class CameraController: NSObject, ObservableObject {
                 )
             }
 
-            // Ở 60 fps, gửi tâm dự đoán về ESP32 khoảng 20 lần/giây.
+            // Ở 60 fps, gửi tâm dự đoán + vận tốc về ESP32 khoảng 20 lần/giây.
+            // Gói cố định 15 byte luôn nằm dưới giới hạn BLE 20 byte:
+            // V xxxyyy cc vvvwww (x/y 000...999, confidence 00...99,
+            // vx/vy -99...+99). Firmware vẫn nhận cả gói T cũ.
+            let velocityScale: CGFloat = 99.0 / 3.0
+            let telemetryVX = Int(max(
+                -99,
+                min(99, estimate.velocity.dx * velocityScale)
+            ).rounded())
+            let telemetryVY = Int(max(
+                -99,
+                min(99, estimate.velocity.dy * velocityScale)
+            ).rounded())
             let telemetry: String? = trackingFrameCounter % 3 == 0
                 ? String(
-                    format: "T,%03d,%03d,%02d",
+                    format: "V%03d%03d%02d%+03d%+03d",
                     Int(max(0, min(999, predictedPoint.x * 999))),
                     Int(max(0, min(999, predictedPoint.y * 999))),
-                    Int(max(0, min(99, (confidence * 100).rounded())))
+                    Int(max(0, min(99, (confidence * 100).rounded()))),
+                    telemetryVX,
+                    telemetryVY
                 )
                 : nil
 
@@ -4057,6 +4097,18 @@ final class CameraController: NSObject, ObservableObject {
         orientation: CGImagePropertyOrientation
     ) -> Bool {
         switch scanSubjectKind {
+        case .waterRocket:
+            return !detectRocketOrBottle(
+                in: pixelBuffer,
+                minimumConfidence: 0.05,
+                regionOfInterest: CGRect(
+                    x: processingRect.minX,
+                    y: processingRect.minY,
+                    width: processingRect.width,
+                    height: processingRect.height
+                )
+            ).isEmpty
+
         case .object:
             return true
 
