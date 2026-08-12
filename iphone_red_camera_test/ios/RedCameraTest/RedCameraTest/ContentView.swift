@@ -258,7 +258,7 @@ struct ContentView: View {
                 Text(
                     camera.scanIsSufficient
                         ? "ĐÃ ĐỦ"
-                        : (camera.scanHasConfirmedTarget ? "5 GÓC" : "XÁC NHẬN")
+                        : (camera.scanHasConfirmedTarget ? "7 ẢNH" : "XÁC NHẬN")
                 )
                     .font(.system(size: 9, weight: .bold))
             }
@@ -371,7 +371,7 @@ struct ContentView: View {
                     ? "MÔ HÌNH ĐA GÓC • \(camera.scanViewpointCount)/\(camera.referencePhotoTarget)"
                     : "CHẠM VÀO VẬT CẦN CHỤP"
             }
-            return "CHỌN LOẠI • TẠO MẪU 5 ẢNH"
+            return "CHỌN LOẠI • TẠO MẪU 7 ẢNH"
         case .ready, .verifying, .lost:
             return "ĐẶT TÊN LỬA VÀO ĐÂY"
         case .tracking:
@@ -658,18 +658,18 @@ struct ContentView: View {
     private var actionButtons: some View {
         switch camera.stage {
         case .idle:
-            primaryButton("Tạo mô hình 5 góc", systemImage: "camera.on.rectangle") {
+            primaryButton("Tạo mẫu 7 ảnh", systemImage: "camera.on.rectangle") {
                 camera.startShapeScan()
             }
             .disabled(!camera.isReady)
 
         case .waitingFar:
-            primaryButton("Tạo mô hình 5 góc", systemImage: "camera.on.rectangle") {
+            primaryButton("Tạo mẫu 7 ảnh", systemImage: "camera.on.rectangle") {
                 camera.startShapeScan()
             }
 
         case .waitingAround:
-            primaryButton("Tạo mô hình 5 góc", systemImage: "camera.on.rectangle") {
+            primaryButton("Tạo mẫu 7 ảnh", systemImage: "camera.on.rectangle") {
                 camera.startShapeScan()
             }
 
@@ -677,7 +677,7 @@ struct ContentView: View {
             primaryButton("Khóa, bám & quay", systemImage: "scope") {
                 camera.startTrackingAndRecording()
             }
-            secondaryButton("Tạo lại mô hình 5 góc", systemImage: "trash") {
+            secondaryButton("Tạo lại mẫu 7 ảnh", systemImage: "trash") {
                 camera.resetProfile()
             }
 
