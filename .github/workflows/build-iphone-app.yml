@@ -154,6 +154,8 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -d "$APP_PATH/WaterRocketDetector.mlmodelc"
           test -d "$APP_PATH/BottleDetector.mlmodelc"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 3.6" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 31" "$APP_PATH/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP_PATH/Info.plist"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "3.6"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "31"
