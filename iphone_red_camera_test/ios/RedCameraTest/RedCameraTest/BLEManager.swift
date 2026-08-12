@@ -14,6 +14,7 @@ final class BLEManager: NSObject, ObservableObject {
     private var central: CBCentralManager!
     private var trackerPeripheral: CBPeripheral?
     private var statusCharacteristic: CBCharacteristic?
+    private var lifecycleActive = true
 
     override init() {
         super.init()
@@ -54,8 +55,25 @@ final class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    func suspendForBackground() {
+        lifecycleActive = false
+        central.stopScan()
+        connectionText = isConnected
+            ? "ESP32 đang chờ • app đã tạm dừng"
+            : "Bluetooth đã tạm dừng để hạ nhiệt"
+    }
+
+    func resumeFromForeground() {
+        lifecycleActive = true
+        guard trackerPeripheral?.state != .connected else {
+            connectionText = "Đã kết nối ESP32"
+            return
+        }
+        startScanning()
+    }
+
     private func startScanning() {
-        guard central.state == .poweredOn else { return }
+        guard lifecycleActive, central.state == .poweredOn else { return }
         connectionText = "Đang tìm RocketTracker-Test..."
         central.scanForPeripherals(
             withServices: [serviceUUID],
@@ -68,7 +86,7 @@ extension BLEManager: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
         case .poweredOn:
-            startScanning()
+            if lifecycleActive { startScanning() }
         case .poweredOff:
             connectionText = "Bluetooth đang tắt"
         case .unauthorized:
@@ -108,6 +126,7 @@ extension BLEManager: CBCentralManagerDelegate {
         connectionText = "Kết nối lỗi, đang thử lại..."
         trackerPeripheral = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard self?.lifecycleActive == true else { return }
             self?.startScanning()
         }
     }
@@ -122,6 +141,7 @@ extension BLEManager: CBCentralManagerDelegate {
         trackerPeripheral = nil
         connectionText = "ESP32 đã ngắt, đang tìm lại..."
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard self?.lifecycleActive == true else { return }
             self?.startScanning()
         }
     }

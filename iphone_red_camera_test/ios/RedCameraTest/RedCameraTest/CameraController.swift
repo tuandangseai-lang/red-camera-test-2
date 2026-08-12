@@ -209,6 +209,8 @@ final class CameraController: NSObject, ObservableObject {
     private let immediateReacquisitionSimilarity = 0.75
 
     private var videoDevice: AVCaptureDevice?
+    private var efficientPreviewFormat: AVCaptureDevice.Format?
+    private var fastRecordingFormat: AVCaptureDevice.Format?
     private var ultraWideDeviceZoomFactor: CGFloat = 1.0
     private var mainDeviceZoomFactor: CGFloat = 1.96
     private var ultraWideDisplayZoomFactor: CGFloat = 0.5
@@ -219,6 +221,8 @@ final class CameraController: NSObject, ObservableObject {
     private var didRequestStart = false
     private var configured = false
     private var pendingArm = false
+    private let lifecycleLock = NSLock()
+    private var lifecycleActive = false
 
     // Các biến dưới đây chỉ được đọc/ghi trên videoQueue.
     private var processingMode: ProcessingMode = .idle
@@ -260,6 +264,9 @@ final class CameraController: NSObject, ObservableObject {
     private var isRecoveringLostTarget = false
     private var recoverySearchCommand = "SEARCH_START"
     private var lastSearchCommandSentAt: TimeInterval = 0
+    private var lastVerificationAnalysisAt: TimeInterval = 0
+    private var lastTrackingAnalysisAt: TimeInterval = 0
+    private var lastDetectionIdentitySimilarity = 0.0
 
     // Quét 3D gần đúng trên iPhone không LiDAR: ARKit cung cấp vị trí camera và
     // điểm đặc trưng 3D, Vision giữ lại các điểm nằm trên mặt nạ chủ thể.
@@ -320,6 +327,7 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     func start() {
+        setLifecycleActive(true)
         guard !didRequestStart else { return }
         didRequestStart = true
 
@@ -341,6 +349,111 @@ final class CameraController: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    /// Camera 4K/60 + Vision/Core ML sẽ tiếp tục giữ ISP/GPU nếu chỉ ra màn hình
+    /// chính mà không dừng phiên. Hai hàm vòng đời này bảo đảm app ra nền là ngắt
+    /// camera, AI, AR, âm thanh, quay video và lệnh tìm servo thật sự.
+    func suspendForBackground() {
+        guard lifecycleIsActive else { return }
+        setLifecycleActive(false)
+        activeTrackingPreparationID = UUID()
+        profileActivationID = UUID()
+        if isProfilePreparing {
+            isProfilePreparing = false
+            activeProfileID = nil
+        }
+        isStopRequested = true
+        trackingPreparationCountdown = 0
+        cancelZoomSequence()
+        voiceNotifier.stop()
+        onEvent?("SEARCH_STOP")
+        onEvent?("APP_BACKGROUND")
+        arSession.pause()
+
+        videoQueue.async { [weak self] in
+            guard let self else { return }
+            self.processingMode = .idle
+            self.referenceVideoStartedAt = nil
+            self.activeARScanKind = nil
+            self.trackingObservation = nil
+            self.trackingAnchorObservations.removeAll()
+            self.trackingTrianglePoints.removeAll()
+            self.lastTrackingBounds = nil
+            self.previousTrackingCenter = nil
+            self.smoothedTrackingVelocity = .zero
+            self.motionFilter.clear()
+            self.clearPendingAIDetection()
+            self.clearRecoveryState()
+            self.sequenceHandler = VNSequenceRequestHandler()
+        }
+
+        isCapturingReferenceVideo = false
+        referenceVideoDisplayStartedAt = nil
+        targetRect = nil
+        trackingPoints = []
+        predictedTargetPoint = nil
+        servoSearchVector = nil
+        servoSearchAnchor = nil
+        isServoTrajectorySearching = false
+        if stage == .verifying || stage == .tracking || stage == .lost {
+            stage = activeProfileID == nil ? .idle : .ready
+        }
+        isReady = false
+        statusText = "App đã tạm dừng camera và AI để hạ nhiệt"
+
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if self.movieOutput.isRecording {
+                self.movieOutput.stopRecording()
+            }
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+            try? AVAudioSession.sharedInstance().setActive(
+                false,
+                options: .notifyOthersOnDeactivation
+            )
+        }
+    }
+
+    func resumeFromForeground() {
+        setLifecycleActive(true)
+        isStopRequested = false
+        if !didRequestStart {
+            start()
+            return
+        }
+        sessionQueue.async { [weak self] in
+            guard let self, self.configured, self.lifecycleIsActive else { return }
+            self.configureAudioSession(includeAudio: true)
+            if !self.session.isRunning {
+                self.session.startRunning()
+            }
+            DispatchQueue.main.async {
+                guard self.lifecycleIsActive else { return }
+                self.isReady = true
+                if self.activeProfileID != nil {
+                    self.stage = .ready
+                    self.matchText = "MẪU ĐÃ SẴN SÀNG"
+                    self.statusText = "Camera đã mở lại • AI chỉ chạy khi bấm Khóa, bám & quay"
+                } else {
+                    self.statusText = "Camera đã mở lại • hãy chọn tab và tạo mẫu"
+                }
+            }
+        }
+    }
+
+    private func setLifecycleActive(_ active: Bool) {
+        lifecycleLock.lock()
+        lifecycleActive = active
+        lifecycleLock.unlock()
+    }
+
+    private var lifecycleIsActive: Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return lifecycleActive
     }
 
     // ESP32 gửi ARM sẽ dùng mẫu đã học để khóa và bắt đầu quay.
@@ -671,14 +784,24 @@ final class CameraController: NSObject, ObservableObject {
 
     func activateProfile(_ profile: SavedScanProfile) {
         guard !isRecording, !stage.isScanning else { return }
-        if activeProfileID == profile.id, !isProfilePreparing {
+        if activeProfileID == profile.id,
+           !isProfilePreparing,
+           stage == .ready {
             matchText = "ĐÃ CHỌN \(profile.name.uppercased())"
             statusText = "Mẫu này đã sẵn sàng; không cần nạp lại"
             UISelectionFeedbackGenerator().selectionChanged()
             return
         }
+        // Chọn mẫu luôn tạo một phiên sạch. Nếu phiên tìm cũ còn callback Vision/Core ML
+        // đang chờ, `isStopRequested` và hai UUID mới sẽ làm kết quả đó hết hiệu lực.
+        activeTrackingPreparationID = UUID()
         profileActivationID = UUID()
         let activationID = profileActivationID
+        isStopRequested = true
+        trackingPreparationCountdown = 0
+        cancelZoomSequence()
+        voiceNotifier.stop()
+        onEvent?("SEARCH_STOP")
         activeProfileID = profile.id
         stage = .ready
         isProfilePreparing = true
@@ -687,6 +810,21 @@ final class CameraController: NSObject, ObservableObject {
         matchText = "ĐÃ CHỌN \(profile.name.uppercased())"
         statusText = "Đang chuẩn bị dữ liệu AI trong nền..."
         scanSubjectKind = profile.subjectKind
+
+        videoQueue.async { [weak self] in
+            guard let self else { return }
+            self.processingMode = .idle
+            self.trackingObservation = nil
+            self.trackingAnchorObservations.removeAll()
+            self.trackingTrianglePoints.removeAll()
+            self.lastTrackingBounds = nil
+            self.previousTrackingCenter = nil
+            self.smoothedTrackingVelocity = .zero
+            self.motionFilter.clear()
+            self.clearPendingAIDetection()
+            self.clearRecoveryState()
+            self.sequenceHandler = VNSequenceRequestHandler()
+        }
 
         profileQueue.async { [weak self] in
             guard let self else { return }
@@ -737,6 +875,9 @@ final class CameraController: NSObject, ObservableObject {
                 self.scanContextImages = profile.contextImages ?? []
                 self.processingMode = .idle
                 self.trackingObservation = nil
+                self.trackingAnchorObservations.removeAll()
+                self.clearPendingAIDetection()
+                self.clearRecoveryState()
                 self.sequenceHandler = VNSequenceRequestHandler()
                 DispatchQueue.main.async {
                     guard self.profileActivationID == activationID else { return }
@@ -2351,8 +2492,10 @@ final class CameraController: NSObject, ObservableObject {
         guard !configured else { return }
 
         session.beginConfiguration()
-        if session.canSetSessionPreset(.hd4K3840x2160) {
-            session.sessionPreset = .hd4K3840x2160
+        // Tự chọn activeFormat để có preview 1080p/30 nhẹ và chỉ nâng 4K/60
+        // trong lúc ghi. `.inputPriority` ngăn preset ghi đè định dạng đó.
+        if session.canSetSessionPreset(.inputPriority) {
+            session.sessionPreset = .inputPriority
         } else {
             session.sessionPreset = .high
         }
@@ -2412,11 +2555,13 @@ final class CameraController: NSObject, ObservableObject {
 
         session.commitConfiguration()
         configured = true
-        session.startRunning()
+        if lifecycleIsActive {
+            session.startRunning()
+        }
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.isReady = true
+            self.isReady = self.lifecycleIsActive
             self.statusText = "Chọn đúng tab rồi tạo mẫu; camera góc rộng giúp tránh hụt mục tiêu"
             if self.pendingArm {
                 self.pendingArm = false
@@ -2468,14 +2613,24 @@ final class CameraController: NSObject, ObservableObject {
             return dimensions.width == 1920 && dimensions.height == 1080
         }
         let preferredFormat = preferred4KFormat ?? preferredFullHDFormat
+        let preferredPreviewFormat = camera.formats.last { format in
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            return dimensions.width == 1920
+                && dimensions.height == 1080
+                && format.videoSupportedFrameRateRanges.contains {
+                    $0.minFrameRate <= 30 && $0.maxFrameRate >= 30
+                }
+        }
 
         do {
             try camera.lockForConfiguration()
             defer { camera.unlockForConfiguration() }
 
-            if let preferredFormat {
-                camera.activeFormat = preferredFormat
-                let duration = CMTime(value: 1, timescale: 60)
+            fastRecordingFormat = preferredFormat
+            efficientPreviewFormat = preferredPreviewFormat ?? preferredFormat
+            if let initialFormat = efficientPreviewFormat {
+                camera.activeFormat = initialFormat
+                let duration = CMTime(value: 1, timescale: 30)
                 camera.activeVideoMinFrameDuration = duration
                 camera.activeVideoMaxFrameDuration = duration
             }
@@ -2531,7 +2686,7 @@ final class CameraController: NSObject, ObservableObject {
             }
             let mode = isDualWide
                 ? String(
-                    format: "%@ %d fps • zoom %.1f× → %.2f× • không đổi cam",
+                    format: "Xem trước 1080p/30 • quay %@ %d fps • zoom %.1f× → %.2f×",
                     configuredResolution,
                     configuredFPS,
                     ultraWideDisplayZoomFactor,
@@ -2545,6 +2700,37 @@ final class CameraController: NSObject, ObservableObject {
         } catch {
             DispatchQueue.main.async { [weak self] in
                 self?.captureModeText = "Không đặt được 60 fps; đang dùng cấu hình tự động"
+            }
+        }
+    }
+
+    /// Chỉ chuyển sang cấu hình nặng 4K/60 khi movieOutput thật sự ghi file.
+    /// Khi dừng quay, preview trở về 1080p/30 để tránh ISP/GPU chạy tối đa vô ích.
+    private func applyCapturePerformanceMode(recording: Bool) {
+        guard let camera = videoDevice else { return }
+        let format = recording ? fastRecordingFormat : efficientPreviewFormat
+        let fps: Int32 = recording ? 60 : 30
+        guard let format else { return }
+        do {
+            try camera.lockForConfiguration()
+            defer { camera.unlockForConfiguration() }
+            camera.activeFormat = format
+            let ranges = format.videoSupportedFrameRateRanges
+            let selectedFPS = ranges.contains {
+                $0.minFrameRate <= Double(fps) && $0.maxFrameRate >= Double(fps)
+            } ? fps : 30
+            let duration = CMTime(value: 1, timescale: selectedFPS)
+            camera.activeVideoMinFrameDuration = duration
+            camera.activeVideoMaxFrameDuration = duration
+            camera.videoZoomFactor = max(
+                camera.minAvailableVideoZoomFactor,
+                min(camera.videoZoomFactor, camera.maxAvailableVideoZoomFactor)
+            )
+        } catch {
+            DispatchQueue.main.async { [weak self] in
+                self?.statusText = recording
+                    ? "Không chuyển được 4K/60 • vẫn quay bằng cấu hình an toàn"
+                    : "Camera đang dùng cấu hình tự động"
             }
         }
     }
@@ -3555,6 +3741,7 @@ final class CameraController: NSObject, ObservableObject {
         in pixelBuffer: CVPixelBuffer,
         near expectedRect: CGRect?
     ) -> WaterRocketDetection? {
+        lastDetectionIdentitySimilarity = 0
         let expectedArea = expectedRect.map { $0.width * $0.height } ?? 1
         let isTinyContinuation = expectedRect != nil && expectedArea < 0.0035
         // Một tên lửa xa chỉ vài pixel thường có độ tin cậy thấp. Chỉ hạ ngưỡng
@@ -3610,16 +3797,41 @@ final class CameraController: NSObject, ObservableObject {
             }
             if isRecoveringLostTarget {
                 // Khi đã mất mục tiêu, điểm khớp bộ ảnh/video cá nhân là cổng quyết
-                // định. Đạt 75% sẽ trả ứng viên ngay trong frame hiện tại.
-                let verified = onScreen.compactMap { detection -> (WaterRocketDetection, Double)? in
+                // định. Vật đủ lớn còn phải có tiền cảnh độc lập, nhờ vậy hình phản
+                // chiếu trên gương/bảng không thể khóa chỉ vì giống một góc mẫu.
+                let foreground = foregroundCandidates(
+                    from: pixelBuffer,
+                    includeFeaturePrints: false
+                )
+                let verified = onScreen.compactMap { detection -> (WaterRocketDetection, Double, Double)? in
+                    guard hasIndependentForegroundSupport(
+                        for: detection.rect,
+                        in: pixelBuffer,
+                        candidates: foreground
+                    ) else { return nil }
                     let similarity = personalizedSimilarity(
                         in: pixelBuffer,
                         rect: detection.rect
                     ) ?? 0
                     guard similarity >= immediateReacquisitionSimilarity else { return nil }
-                    return (detection, similarity * 0.72 + detection.confidence * 0.28)
+                    return (
+                        detection,
+                        similarity,
+                        similarity * 0.82 + detection.confidence * 0.18
+                    )
                 }
-                return verified.max { $0.1 < $1.1 }?.0
+                let ranked = verified.sorted { $0.2 > $1.2 }
+                guard let winner = ranked.first else {
+                    identityGateStatus = "Chưa thấy vật thật khớp đủ 75%"
+                    return nil
+                }
+                if ranked.count > 1,
+                   winner.1 - ranked[1].1 < 0.035 {
+                    identityGateStatus = "Có hai vật quá giống nhau • AI chưa đổi mục tiêu"
+                    return nil
+                }
+                lastDetectionIdentitySimilarity = winner.1
+                return winner.0
             }
             return bestIdentityAlignedDetection(
                 among: onScreen,
@@ -3742,10 +3954,14 @@ final class CameraController: NSObject, ObservableObject {
         }
 
         let isGenericBottle = detection.label.lowercased().contains("bottle")
-        let personalSimilarity = personalizedSimilarity(
-            in: pixelBuffer,
-            rect: detection.rect
-        ) ?? 0
+        let cachedSimilarity = lastDetectionIdentitySimilarity
+        lastDetectionIdentitySimilarity = 0
+        let personalSimilarity = cachedSimilarity > 0
+            ? cachedSimilarity
+            : (personalizedSimilarity(
+                in: pixelBuffer,
+                rect: detection.rect
+            ) ?? 0)
         // Khi bắt lại, mọi nhãn (kể cả tên lửa chuyên dụng) đều phải giống bộ
         // ảnh/video cá nhân. Không cho ảnh phản chiếu đi đường tắt bằng điểm YOLO.
         let reacquisitionSimilarity = personalSimilarity
@@ -4317,6 +4533,7 @@ final class CameraController: NSObject, ObservableObject {
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.applyCapturePerformanceMode(recording: true)
             self.movieOutput.startRecording(to: url, recordingDelegate: self)
         }
     }
@@ -5037,6 +5254,7 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        guard lifecycleIsActive else { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         frameCounter += 1
 
@@ -5067,6 +5285,17 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             }
 
         case .verifying:
+            // Camera vẫn ghi 60 fps, nhưng Core ML/Vision không cần suy luận 60 lần/giây.
+            // Giới hạn theo thời gian giữ tốc độ bắt lại 10–13 Hz và giảm mạnh tải
+            // Neural Engine/GPU. Khi iOS báo nhiệt cao, tự hạ thêm mà không đổi video.
+            let now = CACurrentMediaTime()
+            let isThermallyLimited = ProcessInfo.processInfo.thermalState == .serious
+                || ProcessInfo.processInfo.thermalState == .critical
+            let minimumInterval: TimeInterval = isThermallyLimited
+                ? 0.18
+                : (isRecoveringLostTarget ? 0.075 : 0.11)
+            guard now - lastVerificationAnalysisAt >= minimumInterval else { return }
+            lastVerificationAnalysisAt = now
             featureFrameCounter += 1
             sendSearchHeartbeatIfNeeded()
             if verifyFreshScanSeed(pixelBuffer: pixelBuffer) {
@@ -5096,6 +5325,14 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             }
 
         case .tracking:
+            // Vision tracker chạy 30 Hz là đủ cho servo; video vẫn được movieOutput
+            // ghi độc lập ở 60 fps. Chạy tracker theo mọi frame chỉ làm nóng máy.
+            let now = CACurrentMediaTime()
+            let isThermallyLimited = ProcessInfo.processInfo.thermalState == .serious
+                || ProcessInfo.processInfo.thermalState == .critical
+            let minimumInterval: TimeInterval = isThermallyLimited ? 1.0 / 15.0 : 1.0 / 30.0
+            guard now - lastTrackingAnalysisAt >= minimumInterval else { return }
+            lastTrackingAnalysisAt = now
             track(pixelBuffer: pixelBuffer)
         }
     }
@@ -5133,6 +5370,9 @@ extension CameraController: AVCaptureFileOutputRecordingDelegate {
             self?.segmentationMissFrames = 0
             self?.previousTrackingCenter = nil
             self?.smoothedTrackingVelocity = .zero
+        }
+        sessionQueue.async { [weak self] in
+            self?.applyCapturePerformanceMode(recording: false)
         }
 
         DispatchQueue.main.async { [weak self] in

@@ -3,6 +3,7 @@ import SwiftUI
 import UIKit
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = CameraController()
     @StateObject private var ble = BLEManager()
     @State private var profileToRename: SavedScanProfile?
@@ -41,6 +42,19 @@ struct ContentView: View {
                 ble?.sendStatus(message)
             }
             camera.start()
+        }
+        .onChange(of: scenePhase) { newPhase in
+            switch newPhase {
+            case .active:
+                ble.resumeFromForeground()
+                camera.resumeFromForeground()
+            case .inactive, .background:
+                camera.suspendForBackground()
+                ble.suspendForBackground()
+            @unknown default:
+                camera.suspendForBackground()
+                ble.suspendForBackground()
+            }
         }
         .alert(
             "Đổi tên mẫu",

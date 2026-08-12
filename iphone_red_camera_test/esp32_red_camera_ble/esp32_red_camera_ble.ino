@@ -39,15 +39,16 @@ constexpr int SERVO_MAX_US = 2400;
 // ======================== THUẬT TOÁN BÁM ========================
 // App gửi x/y từ 000...999; tâm ảnh là 500/500.
 constexpr int IMAGE_CENTER = 500;
-constexpr int DEAD_ZONE = 15;          // 1,5% quanh tâm: chỉ khử rung cơ khí.
+constexpr int DEAD_ZONE = 10;          // 1% quanh tâm: phản hồi sớm nhưng vẫn khử rung.
 constexpr int CENTER_ZONE_HALF = 167;  // Vùng giữa rộng/cao xấp xỉ 1/3 màn hình.
-constexpr int SUPPORT_ZONE_HALF = 80;  // Ra khỏi lõi 16% là tăng phản hồi sớm.
+constexpr int SUPPORT_ZONE_HALF = 60;  // Ra khỏi lõi 12% là tăng phản hồi sớm.
 constexpr int STILL_VELOCITY = 4;      // Dưới mức này xem như vật gần đứng yên.
-// App dùng ngưỡng 60%. Chỉ gói T có confidence >= 60 mới được phép dừng tìm
-// và điều khiển servo; gói yếu hơn không được làm mất vector tìm cuối.
-constexpr int LOCK_CONFIDENCE = 60;    // 00...99.
-constexpr uint32_t TRACK_TIMEOUT_MS = 300;
-constexpr uint32_t CONTROL_PERIOD_MS = 10;  // Tính lệnh mới 100 lần/giây.
+// Khi đã bám, 60% đủ để servo theo liên tục. Riêng đang tìm lại phải có lệnh
+// TARGET_LOCKED hoặc gói >=75%; vật giống một phần không được dừng quỹ đạo tìm.
+constexpr int TRACK_CONFIDENCE = 60;      // 00...99.
+constexpr int REACQUIRE_CONFIDENCE = 75;  // 00...99.
+constexpr uint32_t TRACK_TIMEOUT_MS = 220;
+constexpr uint32_t CONTROL_PERIOD_MS = 8;  // Tính lệnh mới 125 lần/giây.
 
 // Tốc độ góc tối đa; giảm nếu giá điện thoại rung, tăng nếu servo đủ khỏe.
 constexpr float PAN_MAX_SPEED_DPS = 220.0f;
@@ -59,14 +60,14 @@ constexpr float TRACKING_INTEGRAL_GAIN = 2.20f;
 constexpr float TRACKING_INTEGRAL_LIMIT = 0.42f;
 constexpr float TRACKING_INTEGRAL_DECAY = 0.985f;
 
-// Khi mất mục tiêu, đi tiếp theo vector bay cuối trong 0,65 giây. Nếu vẫn chưa
+// Khi mất mục tiêu, đi tiếp theo vector bay cuối trong 0,9 giây. Nếu vẫn chưa
 // thấy, chỉ rà một dải hẹp dọc theo chính quỹ đạo đó, không quét ngẫu nhiên.
-constexpr uint32_t TRAJECTORY_LEAD_MS = 650;
-constexpr float TRAJECTORY_MAX_PAN_SPEED_DPS = 85.0f;
-constexpr float TRAJECTORY_MAX_TILT_SPEED_DPS = 70.0f;
-constexpr float SEARCH_ALONG_SPAN_DEG = 10.0f;
-constexpr float SEARCH_CROSS_SPAN_DEG = 2.5f;
-constexpr float SEARCH_PHASE_SPEED = 3.0f;
+constexpr uint32_t TRAJECTORY_LEAD_MS = 900;
+constexpr float TRAJECTORY_MAX_PAN_SPEED_DPS = 120.0f;
+constexpr float TRAJECTORY_MAX_TILT_SPEED_DPS = 105.0f;
+constexpr float SEARCH_ALONG_SPAN_DEG = 14.0f;
+constexpr float SEARCH_CROSS_SPAN_DEG = 4.0f;
+constexpr float SEARCH_PHASE_SPEED = 4.2f;
 
 constexpr char DEVICE_NAME[] = "RocketTracker-Test";
 constexpr char SERVICE_UUID[] = "7E57A000-8E3A-4D6A-9B2B-13B10A000001";
@@ -270,7 +271,7 @@ void updateServosFromTarget() {
   portEXIT_CRITICAL(&trackingMux);
 
   // Mất BLE, độ tin cậy thấp hoặc gói tọa độ quá cũ: giữ nguyên góc hiện tại.
-  if (!phoneConnected || !available || confidence < LOCK_CONFIDENCE ||
+  if (!phoneConnected || !available || confidence < TRACK_CONFIDENCE ||
       now - receivedAt > TRACK_TIMEOUT_MS) {
     return;
   }
@@ -344,13 +345,16 @@ void acceptTrackingPacket(int x, int y, int confidence, int velocityX = 0,
   velocityX = constrain(velocityX, -99, 99);
   velocityY = constrain(velocityY, -99, 99);
 
-  // Điều kiện ưu tiên cao nhất: thấy đúng >=60% thì dừng chuyển động tìm ngay.
-  // Nếu confidence thấp hơn, giữ nguyên searchMode và quỹ đạo trước đó.
-  if (confidence < LOCK_CONFIDENCE) {
+  const int requiredConfidence = searchMode
+                                     ? REACQUIRE_CONFIDENCE
+                                     : TRACK_CONFIDENCE;
+  // Trong lúc tìm lại, chỉ danh tính >=75% mới được dừng servo. Sau khi app gửi
+  // TARGET_LOCKED, searchMode tắt và luồng bám liên tục trở về ngưỡng 60%.
+  if (confidence < requiredConfidence) {
     if (millis() - lastTelemetryPrintAtMs >= 250) {
       lastTelemetryPrintAtMs = millis();
-      Serial.printf("[TRACK] Bo goi yeu %d%%; tiep tuc tim theo quy dao.\n",
-                    confidence);
+        Serial.printf("[TRACK] Bo goi %d%% (<%d%%); giu quy dao.\n",
+                      confidence, requiredConfidence);
     }
     return;
   }
@@ -442,6 +446,7 @@ void handlePhoneMessage(String value) {
     stopSearchPattern();
     stopTrackingTarget();
   } else if (value == "SEARCH_STOP" || value == "RECORDING_STOPPED" ||
+             value == "APP_BACKGROUND" ||
              value == "PROFILE_RESET" || value == "SCAN_CANCELLED") {
     trackingSessionActive = false;
     stopSearchPattern();
