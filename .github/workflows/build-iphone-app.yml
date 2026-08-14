@@ -1,4 +1,4 @@
-name: Tao IPA Rocket Tracker v14 - smooth servo telemetry
+name: Tao IPA Rocket Tracker v15 - adaptive size servo
 
 on:
   workflow_dispatch:
@@ -156,11 +156,11 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -d "$APP_PATH/WaterRocketDetector.mlmodelc"
           test -d "$APP_PATH/BottleDetector.mlmodelc"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 4.2" "$APP_PATH/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 38" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 4.3" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 39" "$APP_PATH/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP_PATH/Info.plist"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "4.2"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "38"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "4.3"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "39"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"

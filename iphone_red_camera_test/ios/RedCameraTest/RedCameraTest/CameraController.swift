@@ -4454,10 +4454,9 @@ final class CameraController: NSObject, ObservableObject {
                 )
             }
 
-            // Ở 60 fps, gửi tâm dự đoán + vận tốc về ESP32 khoảng 30 lần/giây.
-            // Gói cố định 15 byte luôn nằm dưới giới hạn BLE 20 byte:
-            // V xxxyyy cc vvvwww (x/y 000...999, confidence 00...99,
-            // vx/vy -99...+99). Firmware vẫn nhận cả gói T cũ.
+            // Gửi tâm, kích thước biểu kiến và vận tốc ở mỗi frame. Gói W dài
+            // 18 byte, vẫn nằm trong payload BLE 20 byte mặc định:
+            // W xxxyyy cc sss vvvwww.
             let velocityScale: CGFloat = 99.0 / 3.0
             let telemetryVX = Int(max(
                 -99,
@@ -4470,16 +4469,19 @@ final class CameraController: NSObject, ObservableObject {
             // Gui tam hien tai da loc. predictedPoint chi dung de hien thi/du doan;
             // firmware con co feed-forward nen gui no se bu chuyen dong hai lan.
             let servoPoint = CGPoint(x: targetBounds.midX, y: targetBounds.midY)
-            let telemetry: String? = trackingFrameCounter % 2 == 0
-                ? String(
-                    format: "V%03d%03d%02d%+03d%+03d",
-                    Int(max(0, min(999, servoPoint.x * 999))),
-                    Int(max(0, min(999, servoPoint.y * 999))),
-                    Int(max(0, min(99, (confidence * 100).rounded()))),
-                    telemetryVX,
-                    telemetryVY
-                )
-                : nil
+            let apparentSize = Int(max(
+                1,
+                min(999, max(targetBounds.width, targetBounds.height) * 999)
+            ).rounded())
+            let telemetry = String(
+                format: "W%03d%03d%02d%03d%+03d%+03d",
+                Int(max(0, min(999, servoPoint.x * 999))),
+                Int(max(0, min(999, servoPoint.y * 999))),
+                Int(max(0, min(99, (confidence * 100).rounded()))),
+                apparentSize,
+                telemetryVX,
+                telemetryVY
+            )
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -4488,7 +4490,7 @@ final class CameraController: NSObject, ObservableObject {
                 self.predictedTargetPoint = predictedPoint
                 self.trackingConfidence = confidence
                 if let appearanceText { self.matchText = appearanceText }
-                if let telemetry { self.onEvent?(telemetry) }
+                self.onEvent?(telemetry)
 
                 let isNearEdge = !(0.12...0.88).contains(predictedPoint.x)
                     || !(0.10...0.90).contains(predictedPoint.y)

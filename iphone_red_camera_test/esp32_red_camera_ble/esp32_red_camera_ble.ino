@@ -48,7 +48,6 @@ constexpr int IMAGE_CENTER = 500;
 // Mục tiêu vẫn sát tâm nhưng servo không bật/tắt liên tục vì nhiễu tọa độ.
 constexpr int CENTER_START_HALF = 30;
 constexpr int CENTER_STOP_HALF = 12;
-constexpr int STILL_VELOCITY = 4;
 constexpr int ACTIVE_TRACK_CONFIDENCE = 35;  // Đã khóa thì bám xuyên frame nhòe.
 constexpr int INITIAL_LOCK_CONFIDENCE = 70;  // Khóa mới cần ít nhất 70%.
 constexpr int REACQUIRE_CONFIDENCE = 75;  // 00...99.
@@ -90,6 +89,7 @@ portMUX_TYPE trackingMux = portMUX_INITIALIZER_UNLOCKED;
 int latestTargetX = IMAGE_CENTER;
 int latestTargetY = IMAGE_CENTER;
 int latestConfidence = 0;
+int latestTargetSize = 180;
 int latestVelocityX = 0;
 int latestVelocityY = 0;
 uint32_t latestTargetAtMs = 0;
@@ -109,6 +109,7 @@ float panRateDps = 0.0f;
 float tiltRateDps = 0.0f;
 float filteredTargetX = IMAGE_CENTER;
 float filteredTargetY = IMAGE_CENTER;
+float filteredTargetSize = 180.0f;
 float filteredVelocityX = 0.0f;
 float filteredVelocityY = 0.0f;
 bool targetFilterInitialized = false;
@@ -175,6 +176,7 @@ void stopTrackingTarget() {
   portENTER_CRITICAL(&trackingMux);
   targetAvailable = false;
   latestConfidence = 0;
+  latestTargetSize = 180;
   latestVelocityX = 0;
   latestVelocityY = 0;
   targetFilterInitialized = false;
@@ -294,13 +296,13 @@ void updateStatusLed() {
 }
 
 // Chỉ bỏ qua sai số rất nhỏ quanh tâm để MG995 không rung liên tục.
-float shapedAxisError(int error) {
+float shapedAxisError(int error, int stopHalf) {
   const int magnitude = abs(error);
-  if (magnitude <= CENTER_STOP_HALF) return 0.0f;
+  if (magnitude <= stopHalf) return 0.0f;
 
   const float normalized =
-      static_cast<float>(magnitude - CENTER_STOP_HALF) /
-      static_cast<float>(IMAGE_CENTER - CENTER_STOP_HALF);
+      static_cast<float>(magnitude - stopHalf) /
+      static_cast<float>(IMAGE_CENTER - stopHalf);
   // Khởi động nhẹ tại mép vùng giữ rồi tăng dần khi mục tiêu đi xa hơn.
   const float responsive = 0.10f + 0.90f * powf(
       clampFloat(normalized, 0.0f, 1.0f), 0.72f);
@@ -345,6 +347,7 @@ void updateServosFromTarget() {
 
   int targetX;
   int targetY;
+  int targetSize;
   int confidence;
   int velocityX;
   int velocityY;
@@ -354,6 +357,7 @@ void updateServosFromTarget() {
   portENTER_CRITICAL(&trackingMux);
   targetX = latestTargetX;
   targetY = latestTargetY;
+  targetSize = latestTargetSize;
   confidence = latestConfidence;
   velocityX = latestVelocityX;
   velocityY = latestVelocityY;
@@ -377,36 +381,70 @@ void updateServosFromTarget() {
     return;
   }
 
-  // Chỉ dự đoán một lần từ tâm hiện tại + vận tốc. App không còn gửi sẵn điểm
-  // dự đoán nên servo không bị bù hai lần rồi vượt qua tâm.
+  // Vật nhỏ/xa cần phản ứng nhanh và nhìn trước nhiều hơn. Vật lớn/gần được
+  // giảm tốc để chuyển động cụm iPhone êm, không giật khi sai số chỉ vài pixel.
+  const float sizeRatio = clampFloat(targetSize / 999.0f, 0.01f, 0.95f);
+  const float smallTargetBoost = clampFloat(
+      (0.22f - sizeRatio) / 0.18f, 0.0f, 1.0f);
+  const float largeTargetBrake = clampFloat(
+      (sizeRatio - 0.32f) / 0.40f, 0.0f, 1.0f);
+  const float speedScale = clampFloat(
+      1.0f + 0.36f * smallTargetBoost - 0.24f * largeTargetBrake,
+      0.76f,
+      1.36f);
+  const float leadPixels = clampFloat(
+      VELOCITY_LEAD_PIXELS + 1.4f * smallTargetBoost -
+          0.8f * largeTargetBrake,
+      1.0f,
+      3.4f);
+  const int dynamicStartHalf = static_cast<int>(lroundf(clampFloat(
+      CENTER_START_HALF - 8.0f * smallTargetBoost +
+          7.0f * largeTargetBrake,
+      20.0f,
+      38.0f)));
+  const int dynamicStopHalf = static_cast<int>(lroundf(clampFloat(
+      CENTER_STOP_HALF - 4.0f * smallTargetBoost +
+          5.0f * largeTargetBrake,
+      7.0f,
+      18.0f)));
+
+  // Chỉ dự đoán một lần từ tâm hiện tại + vận tốc.
   const int panOffset = static_cast<int>(lroundf(
-      targetX - IMAGE_CENTER + velocityX * VELOCITY_LEAD_PIXELS));
+      targetX - IMAGE_CENTER + velocityX * leadPixels));
   const int tiltOffset = static_cast<int>(lroundf(
-      targetY - IMAGE_CENTER + velocityY * VELOCITY_LEAD_PIXELS));
+      targetY - IMAGE_CENTER + velocityY * leadPixels));
 
   if (panAxisActive) {
-    if (abs(panOffset) <= CENTER_STOP_HALF) panAxisActive = false;
-  } else if (abs(panOffset) >= CENTER_START_HALF) {
+    if (abs(panOffset) <= dynamicStopHalf) panAxisActive = false;
+  } else if (abs(panOffset) >= dynamicStartHalf) {
     panAxisActive = true;
   }
   if (tiltAxisActive) {
-    if (abs(tiltOffset) <= CENTER_STOP_HALF) tiltAxisActive = false;
-  } else if (abs(tiltOffset) >= CENTER_START_HALF) {
+    if (abs(tiltOffset) <= dynamicStopHalf) tiltAxisActive = false;
+  } else if (abs(tiltOffset) >= dynamicStartHalf) {
     tiltAxisActive = true;
   }
 
-  const float panCommand = panAxisActive ? shapedAxisError(panOffset) : 0.0f;
-  const float tiltCommand = tiltAxisActive ? shapedAxisError(tiltOffset) : 0.0f;
+  const float panCommand = panAxisActive
+                               ? shapedAxisError(panOffset, dynamicStopHalf)
+                               : 0.0f;
+  const float tiltCommand = tiltAxisActive
+                                ? shapedAxisError(tiltOffset, dynamicStopHalf)
+                                : 0.0f;
   const float requestedPanRate =
-      panAxisActive ? PAN_DIRECTION * panCommand * PAN_MAX_SPEED_DPS : 0.0f;
+      panAxisActive
+          ? PAN_DIRECTION * panCommand * PAN_MAX_SPEED_DPS * speedScale
+          : 0.0f;
   const float requestedTiltRate =
-      tiltAxisActive ? TILT_DIRECTION * tiltCommand * TILT_MAX_SPEED_DPS : 0.0f;
+      tiltAxisActive
+          ? TILT_DIRECTION * tiltCommand * TILT_MAX_SPEED_DPS * speedScale
+          : 0.0f;
 
   const float panRateLimit = panAxisActive
-                                 ? PAN_MAX_ACCEL_DPS2
+                                 ? PAN_MAX_ACCEL_DPS2 * speedScale
                                  : PAN_MAX_DECEL_DPS2;
   const float tiltRateLimit = tiltAxisActive
-                                  ? TILT_MAX_ACCEL_DPS2
+                                  ? TILT_MAX_ACCEL_DPS2 * speedScale
                                   : TILT_MAX_DECEL_DPS2;
   panRateDps = approachFloat(
       panRateDps, requestedPanRate, panRateLimit * deltaSeconds);
@@ -422,12 +460,13 @@ void updateServosFromTarget() {
 }
 
 void acceptTrackingPacket(int x, int y, int confidence, int velocityX = 0,
-                          int velocityY = 0) {
+                          int velocityY = 0, int targetSize = 180) {
   x = constrain(x, 0, 999);
   y = constrain(y, 0, 999);
   confidence = constrain(confidence, 0, 99);
   velocityX = constrain(velocityX, -99, 99);
   velocityY = constrain(velocityY, -99, 99);
+  targetSize = constrain(targetSize, 1, 999);
 
   const int requiredConfidence = searchMode
                                      ? REACQUIRE_CONFIDENCE
@@ -450,22 +489,30 @@ void acceptTrackingPacket(int x, int y, int confidence, int velocityX = 0,
   if (!targetFilterInitialized) {
     filteredTargetX = x;
     filteredTargetY = y;
+    filteredTargetSize = targetSize;
     filteredVelocityX = velocityX;
     filteredVelocityY = velocityY;
     targetFilterInitialized = true;
   } else {
     const float movement = hypotf(
         x - filteredTargetX, y - filteredTargetY);
-    // Nhiễu nhỏ được lọc mạnh, di chuyển lớn tăng alpha để bám kịp.
-    const float positionAlpha = 0.18f +
-        0.58f * clampFloat(movement / 180.0f, 0.0f, 1.0f);
+    const float sizeRatio = clampFloat(targetSize / 999.0f, 0.01f, 0.95f);
+    const float smallTargetBoost = clampFloat(
+        (0.22f - sizeRatio) / 0.18f, 0.0f, 1.0f);
+    // Vật nhỏ được giảm độ trễ lọc; khi điểm nhảy xa alpha tự tăng để bắt kịp.
+    const float baseAlpha = 0.20f + 0.10f * smallTargetBoost;
+    const float positionAlpha = baseAlpha +
+        (0.80f - baseAlpha) *
+            clampFloat(movement / 150.0f, 0.0f, 1.0f);
     filteredTargetX += positionAlpha * (x - filteredTargetX);
     filteredTargetY += positionAlpha * (y - filteredTargetY);
-    filteredVelocityX += 0.30f * (velocityX - filteredVelocityX);
-    filteredVelocityY += 0.30f * (velocityY - filteredVelocityY);
+    filteredTargetSize += 0.25f * (targetSize - filteredTargetSize);
+    filteredVelocityX += 0.38f * (velocityX - filteredVelocityX);
+    filteredVelocityY += 0.38f * (velocityY - filteredVelocityY);
   }
   latestTargetX = static_cast<int>(lroundf(filteredTargetX));
   latestTargetY = static_cast<int>(lroundf(filteredTargetY));
+  latestTargetSize = static_cast<int>(lroundf(filteredTargetSize));
   latestConfidence = confidence;
   latestVelocityX = static_cast<int>(lroundf(filteredVelocityX));
   latestVelocityY = static_cast<int>(lroundf(filteredVelocityY));
@@ -477,9 +524,10 @@ void acceptTrackingPacket(int x, int y, int confidence, int velocityX = 0,
   if (now - lastTelemetryPrintAtMs >= 250) {
     lastTelemetryPrintAtMs = now;
     Serial.printf(
-        "[TRACK] x=%d y=%d vx=%d vy=%d tin-cay=%d | PAN=%.1f TILT=%.1f\n",
+        "[TRACK] x=%d y=%d size=%d vx=%d vy=%d tin-cay=%d | PAN=%.1f TILT=%.1f\n",
         x,
         y,
+        targetSize,
         velocityX,
         velocityY,
         confidence,
@@ -525,8 +573,25 @@ void handlePhoneMessage(String value) {
     return;
   }
 
-  // Gói mới 15 byte từ iPhone: Vxxxyyyccvvvwww. Không có dấu phẩy để luôn
-  // vừa payload BLE 20 byte; vẫn giữ nhánh T phía trên cho app cũ.
+  // Gói thích ứng 18 byte: Wxxxyyyccsssvvvwww. sss là cạnh lớn nhất của
+  // mục tiêu trong ảnh; ESP32 dùng nó để đổi gain/tốc độ theo xa-gần.
+  if (value.length() == 18 && value.startsWith("W")) {
+    if (!trackingSessionActive) return;
+    int x = 0;
+    int y = 0;
+    int confidence = 0;
+    int targetSize = 180;
+    int velocityX = 0;
+    int velocityY = 0;
+    if (sscanf(value.c_str(), "W%3d%3d%2d%3d%3d%3d", &x, &y,
+               &confidence, &targetSize, &velocityX, &velocityY) == 6) {
+      acceptTrackingPacket(
+          x, y, confidence, velocityX, velocityY, targetSize);
+    }
+    return;
+  }
+
+  // Gói cũ 15 byte: Vxxxyyyccvvvwww; giữ để tương thích app cũ.
   if (value.length() == 15 && value.startsWith("V")) {
     if (!trackingSessionActive) return;
     int x = 0;

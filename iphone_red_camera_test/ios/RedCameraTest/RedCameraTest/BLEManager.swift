@@ -17,7 +17,9 @@ final class BLEManager: NSObject, ObservableObject {
     private var statusCharacteristic: CBCharacteristic?
     private var lifecycleActive = true
     private var lastTelemetryWriteAt: TimeInterval = 0
-    private let telemetryMinimumInterval: TimeInterval = 1.0 / 32.0
+    // Camera có thể chạy 60 fps. Chỉ chặn nhanh hơn 70 Hz; cờ
+    // canSendWriteWithoutResponse sẽ tự bỏ frame cũ nếu BLE đang bận.
+    private let telemetryMinimumInterval: TimeInterval = 1.0 / 70.0
 
     override init() {
         super.init()
@@ -32,10 +34,13 @@ final class BLEManager: NSObject, ObservableObject {
 
         // Tọa độ tracking gửi dày nên dùng writeWithoutResponse. Các lệnh đổi
         // trạng thái servo phải có phản hồi để SEARCH không bị rơi gói BLE.
-        // V là gói tracking gọn 15 byte: Vxxxyyyccvvvwww. Gói này có thêm
-        // vận tốc hai trục nhưng vẫn nằm dưới payload BLE mặc định 20 byte.
+        // W là gói 18 byte: Wxxxyyyccsssvvvwww, có thêm kích thước mục tiêu.
+        // V 15 byte vẫn được nhận để tương thích firmware/app cũ.
         let isVelocityTelemetry = message.hasPrefix("V") && message.utf8.count == 15
-        let isTelemetry = message.hasPrefix("T,") || isVelocityTelemetry
+        let isAdaptiveTelemetry = message.hasPrefix("W") && message.utf8.count == 18
+        let isTelemetry = message.hasPrefix("T,")
+            || isVelocityTelemetry
+            || isAdaptiveTelemetry
         let canWriteFast = characteristic.properties.contains(.writeWithoutResponse)
         let canWriteConfirmed = characteristic.properties.contains(.write)
         let writeType: CBCharacteristicWriteType
