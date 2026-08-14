@@ -207,6 +207,10 @@ final class CameraController: NSObject, ObservableObject {
     /// Riêng bắt lại danh tính sau khi mất phải đạt 75% từ cả ảnh và video mẫu.
     private let hardTrackingConfidence = 0.60
     private let immediateReacquisitionSimilarity = 0.75
+    /// Khi vừa khóa mục tiêu và camera chuyển sang cấu hình ghi hình, Vision có
+    /// thể hụt vài frame. Không được báo mất mục tiêu trong khoảng chuyển tiếp này.
+    private let recordingTransitionGracePeriod: TimeInterval = 2.0
+    private let normalLowConfidenceFrameLimit = 6
 
     private var videoDevice: AVCaptureDevice?
     private var efficientPreviewFormat: AVCaptureDevice.Format?
@@ -267,6 +271,7 @@ final class CameraController: NSObject, ObservableObject {
     private var lastVerificationAnalysisAt: TimeInterval = 0
     private var lastTrackingAnalysisAt: TimeInterval = 0
     private var lastDetectionIdentitySimilarity = 0.0
+    private var trackingGraceUntil: TimeInterval = 0
 
     // Quét 3D gần đúng trên iPhone không LiDAR: ARKit cung cấp vị trí camera và
     // điểm đặc trưng 3D, Vision giữ lại các điểm nằm trên mặt nạ chủ thể.
@@ -1045,6 +1050,7 @@ final class CameraController: NSObject, ObservableObject {
         onEvent?("RECORDING_STOPPED")
         videoQueue.async { [weak self] in
             self?.processingMode = .idle
+            self?.trackingGraceUntil = 0
             self?.trackingObservation = nil
             self?.trackingAnchorObservations.removeAll()
             self?.trackingTrianglePoints.removeAll()
@@ -3901,6 +3907,7 @@ final class CameraController: NSObject, ObservableObject {
         motionFilter.reset(rect: clippedRect, timestamp: CACurrentMediaTime())
         parachuteDetected = false
         clearRecoveryState()
+        trackingGraceUntil = CACurrentMediaTime() + recordingTransitionGracePeriod
         processingMode = .tracking
 
         let shouldStartRecording = shouldRecordAfterVerification
@@ -4206,8 +4213,29 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    /// Camera đổi format khi bắt đầu ghi có thể làm VNSequenceRequestHandler
+    /// mất chuỗi trong vài frame. Gieo lại tracker từ khung cuối thay vì phát
+    /// TARGET_LOST ngay khi mục tiêu vẫn còn trước camera.
+    private func recoverTrackerDuringRecordingTransition(
+        fallback observation: VNDetectedObjectObservation? = nil
+    ) -> Bool {
+        guard CACurrentMediaTime() <= trackingGraceUntil else { return false }
+        if let observation {
+            trackingObservation = observation
+        } else if let lastTrackingBounds {
+            trackingObservation = self.observation(fromTopLeftRect: lastTrackingBounds)
+        }
+        sequenceHandler = VNSequenceRequestHandler()
+        lowConfidenceFrames = min(
+            normalLowConfidenceFrameLimit - 1,
+            lowConfidenceFrames + 1
+        )
+        return trackingObservation != nil
+    }
+
     private func track(pixelBuffer: CVPixelBuffer) {
         guard let observation = trackingObservation else {
+            if recoverTrackerDuringRecordingTransition() { return }
             markTargetLost()
             return
         }
@@ -4228,14 +4256,27 @@ final class CameraController: NSObject, ObservableObject {
         do {
             try sequenceHandler.perform([request], on: pixelBuffer, orientation: .up)
             guard let result = request.results?.first as? VNDetectedObjectObservation else {
+                if recoverTrackerDuringRecordingTransition(fallback: observation) { return }
+                lowConfidenceFrames += 1
+                if lowConfidenceFrames < normalLowConfidenceFrameLimit {
+                    sequenceHandler = VNSequenceRequestHandler()
+                    trackingObservation = observation
+                    return
+                }
                 markTargetLost()
                 return
             }
             trackingFrameCounter += 1
 
-            // Dưới 60% là tracker không còn đủ chắc để điều khiển servo theo vật.
-            // Chuyển sang tái tìm ngay và dùng Kalman cuối cho lệnh quỹ đạo.
+            // Một frame dưới 60% thường chỉ là nhòe chuyển động hoặc thời điểm
+            // camera bắt đầu ghi. Chỉ báo mất sau nhiều frame liên tiếp.
             if Double(result.confidence) < hardTrackingConfidence {
+                lowConfidenceFrames += 1
+                trackingObservation = result
+                if recoverTrackerDuringRecordingTransition(fallback: result)
+                    || lowConfidenceFrames < normalLowConfidenceFrameLimit {
+                    return
+                }
                 markTargetLost()
                 return
             }
@@ -4455,12 +4496,21 @@ final class CameraController: NSObject, ObservableObject {
                 }
             }
         } catch {
+            if recoverTrackerDuringRecordingTransition(fallback: observation) { return }
+            lowConfidenceFrames += 1
+            if lowConfidenceFrames < normalLowConfidenceFrameLimit {
+                sequenceHandler = VNSequenceRequestHandler()
+                trackingObservation = observation
+                return
+            }
             markTargetLost()
         }
     }
 
     private func markTargetLost() {
         guard !isStopRequested else { return }
+        if recoverTrackerDuringRecordingTransition() { return }
+        trackingGraceUntil = 0
         // Chuyển thẳng sang tìm lại tự động. Không yêu cầu người dùng bấm nút
         // hoặc đưa vật vào vòng tròn lần nữa.
         let lostAt = CACurrentMediaTime()
@@ -4527,6 +4577,14 @@ final class CameraController: NSObject, ObservableObject {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("rocket-track-\(UUID().uuidString).mov")
         statusText = "Đã khóa \(scanSubjectKind.title.lowercased()) — đang bắt đầu quay..."
+
+        videoQueue.async { [weak self] in
+            guard let self else { return }
+            self.trackingGraceUntil = max(
+                self.trackingGraceUntil,
+                CACurrentMediaTime() + self.recordingTransitionGracePeriod
+            )
+        }
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -5357,6 +5415,7 @@ extension CameraController: AVCaptureFileOutputRecordingDelegate {
     ) {
         videoQueue.async { [weak self] in
             self?.processingMode = .idle
+            self?.trackingGraceUntil = 0
             self?.trackingObservation = nil
             self?.trackingAnchorObservations.removeAll()
             self?.trackingTrianglePoints.removeAll()

@@ -1,4 +1,4 @@
-name: Tao IPA Rocket Tracker v12 - trained YOLO hybrid
+name: Tao IPA Rocket Tracker v13 - stable lock and center tracking
 
 on:
   workflow_dispatch:
@@ -156,11 +156,11 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -d "$APP_PATH/WaterRocketDetector.mlmodelc"
           test -d "$APP_PATH/BottleDetector.mlmodelc"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 4.0" "$APP_PATH/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 36" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 4.1" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 37" "$APP_PATH/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP_PATH/Info.plist"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "4.0"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "36"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "4.1"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "37"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"

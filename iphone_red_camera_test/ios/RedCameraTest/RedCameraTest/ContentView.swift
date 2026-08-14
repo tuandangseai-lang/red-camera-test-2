@@ -130,16 +130,21 @@ struct ContentView: View {
         .allowsHitTesting(false)
     }
 
-    /// Vùng mục tiêu an toàn chiếm 1/3 chiều rộng và 1/3 chiều cao màn hình dọc.
-    /// Đây chỉ là overlay SwiftUI nên không xuất hiện trong video được lưu.
+    /// Tâm bám nhỏ giúp người dùng thấy đúng điểm servo đang đưa mục tiêu về.
+    /// Overlay SwiftUI này không xuất hiện trong video được lưu.
     private func centerTrackingZone(in size: CGSize) -> some View {
-        let zone = CGSize(width: size.width / 3.0, height: size.height / 3.0)
-        return RoundedRectangle(cornerRadius: 28, style: .continuous)
-            .stroke(
-                Color.white.opacity(0.34),
-                style: StrokeStyle(lineWidth: 1.4, dash: [8, 7])
-            )
-            .frame(width: zone.width, height: zone.height)
+        let diameter = max(48.0, min(size.width, size.height) * 0.10)
+        return ZStack {
+            Circle()
+                .stroke(
+                    Color.white.opacity(0.52),
+                    style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])
+                )
+            Circle()
+                .fill(Color.white.opacity(0.82))
+                .frame(width: 5, height: 5)
+        }
+            .frame(width: diameter, height: diameter)
             .position(x: size.width / 2, y: size.height / 2)
             .allowsHitTesting(false)
     }
