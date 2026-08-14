@@ -44,21 +44,25 @@ constexpr int SERVO_MAX_US = 2100;
 // ======================== THUẬT TOÁN BÁM ========================
 // App gửi x/y từ 000...999; tâm ảnh là 500/500.
 constexpr int IMAGE_CENTER = 500;
-// Vùng chống rung rất nhỏ quanh tâm (455...545). Ra khỏi vùng này là bám ngay.
-constexpr int CENTER_ZONE_HALF = 45;
+// Hysteresis: ra khỏi vòng 30 thì bắt đầu bám, vào vòng 12 mới dừng.
+// Mục tiêu vẫn sát tâm nhưng servo không bật/tắt liên tục vì nhiễu tọa độ.
+constexpr int CENTER_START_HALF = 30;
+constexpr int CENTER_STOP_HALF = 12;
 constexpr int STILL_VELOCITY = 4;
-constexpr int ACTIVE_TRACK_CONFIDENCE = 60;  // Sau khi khóa, giữ bám từ 60%.
+constexpr int ACTIVE_TRACK_CONFIDENCE = 35;  // Đã khóa thì bám xuyên frame nhòe.
 constexpr int INITIAL_LOCK_CONFIDENCE = 70;  // Khóa mới cần ít nhất 70%.
 constexpr int REACQUIRE_CONFIDENCE = 75;  // 00...99.
-constexpr uint32_t TRACK_TIMEOUT_MS = 220;
+constexpr uint32_t TRACK_TIMEOUT_MS = 650;
 constexpr uint32_t CONTROL_PERIOD_MS = 20;  // Bằng chu kỳ PWM servo 50 Hz.
 
-// Bám đủ nhanh về tâm nhưng vẫn tăng tốc theo ramp để không giật cụm điện thoại.
-constexpr float PAN_MAX_SPEED_DPS = 95.0f;
-constexpr float TILT_MAX_SPEED_DPS = 75.0f;
-constexpr float PAN_MAX_ACCEL_DPS2 = 190.0f;
-constexpr float TILT_MAX_ACCEL_DPS2 = 150.0f;
-constexpr float VELOCITY_FEEDFORWARD = 0.55f;
+// Tăng tốc êm, phanh nhanh hơn để không vượt tâm rồi giật ngược.
+constexpr float PAN_MAX_SPEED_DPS = 125.0f;
+constexpr float TILT_MAX_SPEED_DPS = 105.0f;
+constexpr float PAN_MAX_ACCEL_DPS2 = 260.0f;
+constexpr float TILT_MAX_ACCEL_DPS2 = 220.0f;
+constexpr float PAN_MAX_DECEL_DPS2 = 520.0f;
+constexpr float TILT_MAX_DECEL_DPS2 = 440.0f;
+constexpr float VELOCITY_LEAD_PIXELS = 2.0f;
 
 // Khi mất mục tiêu, đi tiếp theo vector bay cuối trong 0,9 giây. Nếu vẫn chưa
 // thấy, chỉ rà một dải hẹp dọc theo chính quỹ đạo đó, không quét ngẫu nhiên.
@@ -103,6 +107,15 @@ float panAngleDeg = PAN_CENTER_DEG;
 float tiltAngleDeg = TILT_CENTER_DEG;
 float panRateDps = 0.0f;
 float tiltRateDps = 0.0f;
+float filteredTargetX = IMAGE_CENTER;
+float filteredTargetY = IMAGE_CENTER;
+float filteredVelocityX = 0.0f;
+float filteredVelocityY = 0.0f;
+bool targetFilterInitialized = false;
+bool panAxisActive = false;
+bool tiltAxisActive = false;
+int lastPanPulseUs = -1;
+int lastTiltPulseUs = -1;
 float searchOriginPanDeg = PAN_CENTER_DEG;
 float searchOriginTiltDeg = TILT_CENTER_DEG;
 float searchDirectionPan = 0.0f;
@@ -126,9 +139,25 @@ float approachFloat(float current, float target, float maximumDelta) {
   return current;
 }
 
-void writeServoAngles() {
-  panServo.write(static_cast<int>(lroundf(panAngleDeg)));
-  tiltServo.write(static_cast<int>(lroundf(tiltAngleDeg)));
+int angleToPulseUs(float angleDeg) {
+  const float ratio = clampFloat(angleDeg / 180.0f, 0.0f, 1.0f);
+  return static_cast<int>(lroundf(
+      SERVO_MIN_US + ratio * (SERVO_MAX_US - SERVO_MIN_US)));
+}
+
+void writeServoAngles(bool force = false) {
+  const int panPulseUs = angleToPulseUs(panAngleDeg);
+  const int tiltPulseUs = angleToPulseUs(tiltAngleDeg);
+  // Không ghi lại thay đổi xung rất nhỏ do nhiễu tọa độ.
+  if (force || lastPanPulseUs < 0 || abs(panPulseUs - lastPanPulseUs) >= 2) {
+    panServo.writeMicroseconds(panPulseUs);
+    lastPanPulseUs = panPulseUs;
+  }
+  if (force || lastTiltPulseUs < 0 ||
+      abs(tiltPulseUs - lastTiltPulseUs) >= 2) {
+    tiltServo.writeMicroseconds(tiltPulseUs);
+    lastTiltPulseUs = tiltPulseUs;
+  }
 }
 
 void centerServos() {
@@ -136,7 +165,9 @@ void centerServos() {
   tiltRateDps = 0.0f;
   panAngleDeg = PAN_CENTER_DEG;
   tiltAngleDeg = TILT_CENTER_DEG;
-  writeServoAngles();
+  panAxisActive = false;
+  tiltAxisActive = false;
+  writeServoAngles(true);
   Serial.println("[SERVO] Da dua PAN/TILT ve tam 90/90 do.");
 }
 
@@ -146,9 +177,12 @@ void stopTrackingTarget() {
   latestConfidence = 0;
   latestVelocityX = 0;
   latestVelocityY = 0;
+  targetFilterInitialized = false;
   portEXIT_CRITICAL(&trackingMux);
   panRateDps = 0.0f;
   tiltRateDps = 0.0f;
+  panAxisActive = false;
+  tiltAxisActive = false;
 }
 
 void startTrajectorySearch(int predictedX, int predictedY, int velocityX,
@@ -262,14 +296,14 @@ void updateStatusLed() {
 // Chỉ bỏ qua sai số rất nhỏ quanh tâm để MG995 không rung liên tục.
 float shapedAxisError(int error) {
   const int magnitude = abs(error);
-  if (magnitude <= CENTER_ZONE_HALF) return 0.0f;
+  if (magnitude <= CENTER_STOP_HALF) return 0.0f;
 
   const float normalized =
-      static_cast<float>(magnitude - CENTER_ZONE_HALF) /
-      static_cast<float>(IMAGE_CENTER - CENTER_ZONE_HALF);
+      static_cast<float>(magnitude - CENTER_STOP_HALF) /
+      static_cast<float>(IMAGE_CENTER - CENTER_STOP_HALF);
   // Khởi động nhẹ tại mép vùng giữ rồi tăng dần khi mục tiêu đi xa hơn.
-  const float responsive = 0.08f + 0.92f * powf(
-      clampFloat(normalized, 0.0f, 1.0f), 0.85f);
+  const float responsive = 0.10f + 0.90f * powf(
+      clampFloat(normalized, 0.0f, 1.0f), 0.72f);
   return (error < 0 ? -1.0f : 1.0f) * clampFloat(responsive, 0.0f, 1.0f);
 }
 
@@ -330,51 +364,54 @@ void updateServosFromTarget() {
   // Mất BLE, độ tin cậy thấp hoặc gói tọa độ quá cũ: giữ nguyên góc hiện tại.
   if (!phoneConnected || !available || confidence < ACTIVE_TRACK_CONFIDENCE ||
       now - receivedAt > TRACK_TIMEOUT_MS) {
+    // Hãm tốc độ có kiểm soát thay vì đứng khựng rồi tiếp tục bằng tốc độ cũ.
+    panRateDps = approachFloat(
+        panRateDps, 0.0f, PAN_MAX_DECEL_DPS2 * deltaSeconds);
+    tiltRateDps = approachFloat(
+        tiltRateDps, 0.0f, TILT_MAX_DECEL_DPS2 * deltaSeconds);
+    panAngleDeg += panRateDps * deltaSeconds;
+    tiltAngleDeg += tiltRateDps * deltaSeconds;
+    panAngleDeg = clampFloat(panAngleDeg, PAN_MIN_DEG, PAN_MAX_DEG);
+    tiltAngleDeg = clampFloat(tiltAngleDeg, TILT_MIN_DEG, TILT_MAX_DEG);
+    writeServoAngles();
     return;
   }
 
-  const int panOffset = targetX - IMAGE_CENTER;
-  const int tiltOffset = targetY - IMAGE_CENTER;
-  const bool panOutside = abs(panOffset) > CENTER_ZONE_HALF;
-  const bool tiltOutside = abs(tiltOffset) > CENTER_ZONE_HALF;
+  // Chỉ dự đoán một lần từ tâm hiện tại + vận tốc. App không còn gửi sẵn điểm
+  // dự đoán nên servo không bị bù hai lần rồi vượt qua tâm.
+  const int panOffset = static_cast<int>(lroundf(
+      targetX - IMAGE_CENTER + velocityX * VELOCITY_LEAD_PIXELS));
+  const int tiltOffset = static_cast<int>(lroundf(
+      targetY - IMAGE_CENTER + velocityY * VELOCITY_LEAD_PIXELS));
 
-  // Chỉ giữ khi mục tiêu đã gần đúng tâm; ra khỏi vòng tâm là bám ngay.
-  if (!panOutside && !tiltOutside) {
-    panRateDps = 0.0f;
-    tiltRateDps = 0.0f;
-    return;
+  if (panAxisActive) {
+    if (abs(panOffset) <= CENTER_STOP_HALF) panAxisActive = false;
+  } else if (abs(panOffset) >= CENTER_START_HALF) {
+    panAxisActive = true;
+  }
+  if (tiltAxisActive) {
+    if (abs(tiltOffset) <= CENTER_STOP_HALF) tiltAxisActive = false;
+  } else if (abs(tiltOffset) >= CENTER_START_HALF) {
+    tiltAxisActive = true;
   }
 
-  const float panError = panOutside ? shapedAxisError(panOffset) : 0.0f;
-  const float tiltError = tiltOutside ? shapedAxisError(tiltOffset) : 0.0f;
-  const float panVelocity =
-      panOutside && abs(velocityX) > STILL_VELOCITY
-          ? clampFloat(velocityX / 99.0f, -1.0f, 1.0f)
-          : 0.0f;
-  const float tiltVelocity =
-      tiltOutside && abs(velocityY) > STILL_VELOCITY
-          ? clampFloat(velocityY / 99.0f, -1.0f, 1.0f)
-          : 0.0f;
-
-  const float panCommand = clampFloat(
-      panError + panVelocity * VELOCITY_FEEDFORWARD, -1.0f, 1.0f);
-  const float tiltCommand = clampFloat(
-      tiltError + tiltVelocity * VELOCITY_FEEDFORWARD, -1.0f, 1.0f);
-
+  const float panCommand = panAxisActive ? shapedAxisError(panOffset) : 0.0f;
+  const float tiltCommand = tiltAxisActive ? shapedAxisError(tiltOffset) : 0.0f;
   const float requestedPanRate =
-      panOutside ? PAN_DIRECTION * panCommand * PAN_MAX_SPEED_DPS : 0.0f;
+      panAxisActive ? PAN_DIRECTION * panCommand * PAN_MAX_SPEED_DPS : 0.0f;
   const float requestedTiltRate =
-      tiltOutside ? TILT_DIRECTION * tiltCommand * TILT_MAX_SPEED_DPS : 0.0f;
+      tiltAxisActive ? TILT_DIRECTION * tiltCommand * TILT_MAX_SPEED_DPS : 0.0f;
 
-  // Ramp gia tốc để MG995 không giật cụm iPhone khi vừa ra khỏi vùng giữ.
-  panRateDps = panOutside
-                   ? approachFloat(panRateDps, requestedPanRate,
-                                   PAN_MAX_ACCEL_DPS2 * deltaSeconds)
-                   : 0.0f;
-  tiltRateDps = tiltOutside
-                    ? approachFloat(tiltRateDps, requestedTiltRate,
-                                    TILT_MAX_ACCEL_DPS2 * deltaSeconds)
-                    : 0.0f;
+  const float panRateLimit = panAxisActive
+                                 ? PAN_MAX_ACCEL_DPS2
+                                 : PAN_MAX_DECEL_DPS2;
+  const float tiltRateLimit = tiltAxisActive
+                                  ? TILT_MAX_ACCEL_DPS2
+                                  : TILT_MAX_DECEL_DPS2;
+  panRateDps = approachFloat(
+      panRateDps, requestedPanRate, panRateLimit * deltaSeconds);
+  tiltRateDps = approachFloat(
+      tiltRateDps, requestedTiltRate, tiltRateLimit * deltaSeconds);
 
   panAngleDeg += panRateDps * deltaSeconds;
   tiltAngleDeg += tiltRateDps * deltaSeconds;
@@ -397,7 +434,7 @@ void acceptTrackingPacket(int x, int y, int confidence, int velocityX = 0,
                                      : (targetLockConfirmed
                                             ? ACTIVE_TRACK_CONFIDENCE
                                             : INITIAL_LOCK_CONFIDENCE);
-  // Khóa đầu cần 70%, tìm lại cần 75%; đã khóa thì tiếp tục bám từ 60%.
+  // Khóa đầu cần 70%, tìm lại cần 75%; đã khóa thì vẫn bám qua frame nhòe.
   if (confidence < requiredConfidence) {
     if (millis() - lastTelemetryPrintAtMs >= 250) {
       lastTelemetryPrintAtMs = millis();
@@ -410,11 +447,28 @@ void acceptTrackingPacket(int x, int y, int confidence, int velocityX = 0,
   if (confidence >= INITIAL_LOCK_CONFIDENCE) targetLockConfirmed = true;
 
   portENTER_CRITICAL(&trackingMux);
-  latestTargetX = x;
-  latestTargetY = y;
+  if (!targetFilterInitialized) {
+    filteredTargetX = x;
+    filteredTargetY = y;
+    filteredVelocityX = velocityX;
+    filteredVelocityY = velocityY;
+    targetFilterInitialized = true;
+  } else {
+    const float movement = hypotf(
+        x - filteredTargetX, y - filteredTargetY);
+    // Nhiễu nhỏ được lọc mạnh, di chuyển lớn tăng alpha để bám kịp.
+    const float positionAlpha = 0.18f +
+        0.58f * clampFloat(movement / 180.0f, 0.0f, 1.0f);
+    filteredTargetX += positionAlpha * (x - filteredTargetX);
+    filteredTargetY += positionAlpha * (y - filteredTargetY);
+    filteredVelocityX += 0.30f * (velocityX - filteredVelocityX);
+    filteredVelocityY += 0.30f * (velocityY - filteredVelocityY);
+  }
+  latestTargetX = static_cast<int>(lroundf(filteredTargetX));
+  latestTargetY = static_cast<int>(lroundf(filteredTargetY));
   latestConfidence = confidence;
-  latestVelocityX = velocityX;
-  latestVelocityY = velocityY;
+  latestVelocityX = static_cast<int>(lroundf(filteredVelocityX));
+  latestVelocityY = static_cast<int>(lroundf(filteredVelocityY));
   latestTargetAtMs = millis();
   targetAvailable = true;
   portEXIT_CRITICAL(&trackingMux);

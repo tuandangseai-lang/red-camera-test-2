@@ -1,5 +1,6 @@
 import CoreBluetooth
 import Foundation
+import QuartzCore
 
 final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var connectionText = "Đang bật Bluetooth..."
@@ -15,6 +16,8 @@ final class BLEManager: NSObject, ObservableObject {
     private var trackerPeripheral: CBPeripheral?
     private var statusCharacteristic: CBCharacteristic?
     private var lifecycleActive = true
+    private var lastTelemetryWriteAt: TimeInterval = 0
+    private let telemetryMinimumInterval: TimeInterval = 1.0 / 32.0
 
     override init() {
         super.init()
@@ -37,6 +40,14 @@ final class BLEManager: NSObject, ObservableObject {
         let canWriteConfirmed = characteristic.properties.contains(.write)
         let writeType: CBCharacteristicWriteType
         if isTelemetry, canWriteFast {
+            // Khong xep hang toa do cu khi BLE dang ban. Goi cu lam servo duoi theo
+            // vi tri da qua, tao cam giac tre va giat nguoc.
+            let now = CACurrentMediaTime()
+            guard peripheral.canSendWriteWithoutResponse,
+                  now - lastTelemetryWriteAt >= telemetryMinimumInterval else {
+                return
+            }
+            lastTelemetryWriteAt = now
             writeType = .withoutResponse
         } else if canWriteConfirmed {
             writeType = .withResponse
@@ -139,6 +150,7 @@ extension BLEManager: CBCentralManagerDelegate {
         isConnected = false
         statusCharacteristic = nil
         trackerPeripheral = nil
+        lastTelemetryWriteAt = 0
         connectionText = "ESP32 đã ngắt, đang tìm lại..."
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard self?.lifecycleActive == true else { return }

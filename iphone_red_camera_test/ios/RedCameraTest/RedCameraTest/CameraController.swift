@@ -210,7 +210,9 @@ final class CameraController: NSObject, ObservableObject {
     /// Khi vừa khóa mục tiêu và camera chuyển sang cấu hình ghi hình, Vision có
     /// thể hụt vài frame. Không được báo mất mục tiêu trong khoảng chuyển tiếp này.
     private let recordingTransitionGracePeriod: TimeInterval = 2.0
-    private let normalLowConfidenceFrameLimit = 6
+    // Khoang 0,3 giay o 60 fps de tracker vuot qua nhoe chuyen dong ma khong
+    // lam dut luong toa do gui den servo.
+    private let normalLowConfidenceFrameLimit = 18
 
     private var videoDevice: AVCaptureDevice?
     private var efficientPreviewFormat: AVCaptureDevice.Format?
@@ -4272,15 +4274,12 @@ final class CameraController: NSObject, ObservableObject {
             // camera bắt đầu ghi. Chỉ báo mất sau nhiều frame liên tiếp.
             if Double(result.confidence) < hardTrackingConfidence {
                 lowConfidenceFrames += 1
-                trackingObservation = result
-                if recoverTrackerDuringRecordingTransition(fallback: result)
-                    || lowConfidenceFrames < normalLowConfidenceFrameLimit {
-                    return
-                }
-                markTargetLost()
-                return
+            } else {
+                lowConfidenceFrames = 0
             }
-            lowConfidenceFrames = 0
+            // Khong dung xu ly o frame yeu. Detector AI phia duoi van can duoc chay
+            // de hieu chinh muc tieu va duy tri luong telemetry lien tuc.
+            trackingObservation = result
 
             var targetBounds = topLeftRect(from: result)
             let previousBounds = lastTrackingBounds ?? targetBounds
@@ -4468,11 +4467,14 @@ final class CameraController: NSObject, ObservableObject {
                 -99,
                 min(99, estimate.velocity.dy * velocityScale)
             ).rounded())
+            // Gui tam hien tai da loc. predictedPoint chi dung de hien thi/du doan;
+            // firmware con co feed-forward nen gui no se bu chuyen dong hai lan.
+            let servoPoint = CGPoint(x: targetBounds.midX, y: targetBounds.midY)
             let telemetry: String? = trackingFrameCounter % 2 == 0
                 ? String(
                     format: "V%03d%03d%02d%+03d%+03d",
-                    Int(max(0, min(999, predictedPoint.x * 999))),
-                    Int(max(0, min(999, predictedPoint.y * 999))),
+                    Int(max(0, min(999, servoPoint.x * 999))),
+                    Int(max(0, min(999, servoPoint.y * 999))),
                     Int(max(0, min(99, (confidence * 100).rounded()))),
                     telemetryVX,
                     telemetryVY
