@@ -4271,7 +4271,8 @@ final class CameraController: NSObject, ObservableObject {
                     bestCandidate = ForegroundCandidate(
                         rect: rect,
                         feature: feature,
-                        trianglePoints: representativeTrackingPoints(in: rect)
+                        trianglePoints: representativeTrackingPoints(in: rect),
+                        shapeSignature: []
                     )
                 }
             }
