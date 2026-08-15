@@ -1,4 +1,4 @@
-name: Tao IPA SE v5.6 - fixed 0.5x tracking + safe servo directions
+name: Tao IPA SE v5.7 - hand-free learning + fixed 0.5x tracking
 
 on:
   workflow_dispatch:

@@ -1456,6 +1456,31 @@ final class CameraController: NSObject, ObservableObject {
         }
 
         if let detection = selected {
+            // The detector rectangle is useful for locating a rocket, but a raw
+            // rectangular crop can still contain the hand holding it. Re-run the
+            // selected foreground instance at the detected centre so the saved
+            // reference uses the same hand/person subtraction as manual taps.
+            let detectedCenter = CGPoint(
+                x: detection.rect.midX,
+                y: detection.rect.midY
+            )
+            if let maskedSelection = manualSubjectMask(
+                from: pixelBuffer,
+                at: detectedCenter
+            ) {
+                let overlap = maskedSelection.boundingRect.intersection(detection.rect)
+                let detectionArea = max(
+                    0.000_001,
+                    detection.rect.width * detection.rect.height
+                )
+                let overlapRatio = overlap.isNull
+                    ? 0
+                    : overlap.width * overlap.height / detectionArea
+                if overlapRatio >= 0.30 {
+                    return (maskedSelection, detection)
+                }
+            }
+
             let padX = max(0.025, detection.rect.width * 0.10)
             let padY = max(0.030, detection.rect.height * 0.08)
             let padded = detection.rect
@@ -1585,30 +1610,42 @@ final class CameraController: NSObject, ObservableObject {
             guard let points = try? observation.recognizedPoints(.all) else { continue }
             let visible = points.values.filter { $0.confidence >= 0.22 }
             guard visible.count >= 4 else { continue }
-            let columns = visible.map {
-                Int($0.location.x * CGFloat(selectionGridColumns))
+            let columns = visible.map { point in
+                min(
+                    selectionGridColumns - 1,
+                    max(0, Int(point.location.x * CGFloat(selectionGridColumns)))
+                )
             }
-            let rows = visible.map {
-                Int((1.0 - $0.location.y) * CGFloat(selectionGridRows))
+            let rows = visible.map { point in
+                min(
+                    selectionGridRows - 1,
+                    max(0, Int((1.0 - point.location.y) * CGFloat(selectionGridRows)))
+                )
             }
             guard let minimumColumn = columns.min(), let maximumColumn = columns.max(),
                   let minimumRow = rows.min(), let maximumRow = rows.max() else { continue }
 
-            let horizontalPadding = max(5, selectionGridColumns / 12)
-            let verticalPadding = max(7, selectionGridRows / 12)
-            let minColumn = max(0, minimumColumn - horizontalPadding)
-            let maxColumn = min(
-                selectionGridColumns - 1,
-                maximumColumn + horizontalPadding
-            )
-            let minRow = max(0, minimumRow - verticalPadding)
-            let maxRow = min(
-                selectionGridRows - 1,
-                maximumRow + verticalPadding
-            )
-            for row in minRow...maxRow {
-                for column in minColumn...maxColumn {
-                    excluded.insert(row * selectionGridColumns + column)
+            // A single padded bounding box erased a large part of a bottle when
+            // fingers wrapped around it. Paint small overlapping ellipses around
+            // the 21 hand joints instead: dense enough to cover skin/palm, but it
+            // preserves the object pixels between and beyond the fingers.
+            let spreadColumns = max(1, maximumColumn - minimumColumn)
+            let spreadRows = max(1, maximumRow - minimumRow)
+            let radiusX = max(3, min(9, Int(CGFloat(spreadColumns) * 0.16)))
+            let radiusY = max(5, min(15, Int(CGFloat(spreadRows) * 0.14)))
+            for (centerColumn, centerRow) in zip(columns, rows) {
+                let minColumn = max(0, centerColumn - radiusX)
+                let maxColumn = min(selectionGridColumns - 1, centerColumn + radiusX)
+                let minRow = max(0, centerRow - radiusY)
+                let maxRow = min(selectionGridRows - 1, centerRow + radiusY)
+                for row in minRow...maxRow {
+                    for column in minColumn...maxColumn {
+                        let dx = CGFloat(column - centerColumn) / CGFloat(radiusX)
+                        let dy = CGFloat(row - centerRow) / CGFloat(radiusY)
+                        if dx * dx + dy * dy <= 1.0 {
+                            excluded.insert(row * selectionGridColumns + column)
+                        }
+                    }
                 }
             }
         }
@@ -2074,7 +2111,12 @@ final class CameraController: NSObject, ObservableObject {
 
             let originalCells = cells
             let handCells = handExclusionCells(from: pixelBuffer)
-            let personCells = personExclusionCells(from: pixelBuffer)
+            // Hand pose is much cheaper and more precise for an object held near
+            // the camera. Person segmentation is only a fallback for an arm/body
+            // that hand pose could not resolve; running both made capture stutter.
+            let personCells = handCells.isEmpty
+                ? personExclusionCells(from: pixelBuffer)
+                : []
             let humanCells = handCells.union(personCells)
             let withoutHuman = cells.subtracting(humanCells)
             let minimumUsefulCount = max(24, originalCells.count / 12)
@@ -2323,11 +2365,10 @@ final class CameraController: NSObject, ObservableObject {
         }
         acceptedViewMasks.append(selection.cells)
         scanReferenceImages.append(selection.referenceJPEG)
-        let capturedContextJPEG = referenceJPEG(
-            from: pixelBuffer,
-            normalizedTopLeftRect: selection.boundingRect,
-            orientation: .up
-        )
+        // Context used to be a second raw rectangular crop and therefore quietly
+        // taught FeaturePrint the holder's fingers/arm. The cleaned foreground is
+        // now the single source for both appearance channels.
+        let capturedContextJPEG: Data? = selection.referenceJPEG
         var capturedContextFeature: VNFeaturePrintObservation?
         if let contextJPEG = capturedContextJPEG {
             scanContextImages.append(contextJPEG)
@@ -2440,24 +2481,20 @@ final class CameraController: NSObject, ObservableObject {
             lastReferenceVideoSampleAt = now
             lastReferenceVideoRect = selection.boundingRect
             scanReferenceImages.append(selection.referenceJPEG)
-            if let feature = featurePrint(fromJPEGData: selection.referenceJPEG) {
-                featureSamples.append(feature)
-                videoFeatureSamples.append(feature)
+            let capturedFeature = featurePrint(fromJPEGData: selection.referenceJPEG)
+            if let capturedFeature {
+                featureSamples.append(capturedFeature)
+                videoFeatureSamples.append(capturedFeature)
             }
-            if let contextJPEG = referenceJPEG(
-                from: pixelBuffer,
-                normalizedTopLeftRect: selection.boundingRect,
-                orientation: .up
-            ) {
-                scanContextImages.append(contextJPEG)
+            let contextJPEG = selection.referenceJPEG
+            scanContextImages.append(contextJPEG)
                 // Keep every context image, but feature-print alternating frames.
                 // Adjacent context frames are highly redundant; the subject
                 // feature is still generated for every accepted video frame.
-                if capturedReferenceVideoFrames.isMultiple(of: 2),
-                   let feature = featurePrint(fromJPEGData: contextJPEG) {
-                    contextFeatureSamples.append(feature)
-                    videoContextFeatureSamples.append(feature)
-                }
+            if capturedReferenceVideoFrames.isMultiple(of: 2),
+               let capturedFeature {
+                contextFeatureSamples.append(capturedFeature)
+                videoContextFeatureSamples.append(capturedFeature)
             }
             capturedReferenceVideoFrames += 1
             freshScanSeedRect = selection.boundingRect
