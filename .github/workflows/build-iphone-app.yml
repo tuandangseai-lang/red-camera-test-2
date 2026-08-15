@@ -1,4 +1,4 @@
-name: Tao IPA SE v5.7 - hand-free learning + fixed 0.5x tracking
+name: Tao IPA SE v5.8 - zero camera transition + servo jump guard
 
 on:
   workflow_dispatch:

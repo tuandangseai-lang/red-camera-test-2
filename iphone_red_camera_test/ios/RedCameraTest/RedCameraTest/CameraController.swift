@@ -2913,13 +2913,7 @@ final class CameraController: NSObject, ObservableObject {
                 configuredResolution = "tự động"
             }
             let mode = isDualWide
-                ? String(
-                    format: "Xem trước 1080p/30 • quay %@ %d fps • zoom %.1f× → %.2f×",
-                    configuredResolution,
-                    configuredFPS,
-                    ultraWideDisplayZoomFactor,
-                    mainDisplayZoomFactor
-                )
+                ? "Camera cố định 0,5× • không đổi zoom/format khi bấm quay"
                 : "Camera dự phòng • \(configuredResolution) \(configuredFPS) fps"
             DispatchQueue.main.async { [weak self] in
                 self?.captureModeText = mode
@@ -4262,8 +4256,6 @@ final class CameraController: NSObject, ObservableObject {
             self.statusText = statusDescription
             if shouldStartRecording {
                 self.beginRecording()
-            } else if self.isRecording {
-                self.scheduleZoomSequence(after: 0.5)
             }
         }
     }
@@ -4858,6 +4850,39 @@ final class CameraController: NSObject, ObservableObject {
             }
 
             let timestamp = CACurrentMediaTime()
+            // Starting AVCaptureMovieFileOutput can briefly invalidate Vision's
+            // optical coordinate history even when the physical subject has not
+            // moved. Never publish that discontinuity to the ESP32: keep the last
+            // trusted rectangle, re-seed Vision, and wait for a coherent frame.
+            if timestamp <= trackingGraceUntil {
+                let centerJump = hypot(
+                    targetBounds.midX - previousBounds.midX,
+                    targetBounds.midY - previousBounds.midY
+                )
+                let previousArea = max(
+                    0.000_01,
+                    previousBounds.width * previousBounds.height
+                )
+                let candidateArea = max(
+                    0.000_01,
+                    targetBounds.width * targetBounds.height
+                )
+                let areaRatio = candidateArea / previousArea
+                let allowedJump = max(
+                    0.075,
+                    max(previousBounds.width, previousBounds.height) * 0.42
+                )
+                if centerJump > allowedJump
+                    || areaRatio < 0.52
+                    || areaRatio > 1.85 {
+                    trackingObservation = observation(fromTopLeftRect: previousBounds)
+                    sequenceHandler = VNSequenceRequestHandler()
+                    motionFilter.reset(rect: previousBounds, timestamp: timestamp)
+                    lowConfidenceFrames = 0
+                    detectorMissStreak = 0
+                    return
+                }
+            }
             let measuredBounds = targetBounds
             let estimate = motionFilter.update(
                 rect: measuredBounds,
@@ -5054,7 +5079,9 @@ final class CameraController: NSObject, ObservableObject {
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            self.applyCapturePerformanceMode(recording: true)
+            // Keep exactly the same active camera format used while acquiring the
+            // target. Changing 1080p/30 -> 4K/60 here looked like a zoom/crop jump
+            // to Vision and made a stationary target move to the top-left.
             self.movieOutput.startRecording(to: url, recordingDelegate: self)
         }
     }
@@ -5131,8 +5158,6 @@ final class CameraController: NSObject, ObservableObject {
         cancelZoomSequence()
         isZoomedIn = false
         zoomText = String(format: "%.1f×", ultraWideDisplayZoomFactor)
-        onEvent?("CAMERA_ULTRAWIDE")
-        rampZoom(to: ultraWideDeviceZoomFactor, rate: 2.0)
     }
 
     private func rampZoom(to requestedFactor: CGFloat, rate: Float) {
@@ -5897,11 +5922,10 @@ extension CameraController: AVCaptureFileOutputRecordingDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.isRecording = true
-            self.statusText = "Đang quay 4K/60 fps nếu máy hỗ trợ; zoom tối đa 0,98×, không đổi camera"
+            self.statusText = "Đang quay • camera cố định 0,5× • không đổi zoom/format"
             self.zoomText = String(format: "%.1f×", self.ultraWideDisplayZoomFactor)
             self.announce("Bắt đầu quay.", kind: .start)
             self.onEvent?("RECORDING_STARTED")
-            self.scheduleZoomSequence()
         }
     }
 
@@ -5922,14 +5946,9 @@ extension CameraController: AVCaptureFileOutputRecordingDelegate {
             self?.previousTrackingCenter = nil
             self?.smoothedTrackingVelocity = .zero
         }
-        sessionQueue.async { [weak self] in
-            self?.applyCapturePerformanceMode(recording: false)
-        }
-
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.cancelZoomSequence()
-            self.resetZoom()
             self.isRecording = false
             self.isZoomedIn = false
             self.zoomText = String(format: "%.1f×", self.ultraWideDisplayZoomFactor)
