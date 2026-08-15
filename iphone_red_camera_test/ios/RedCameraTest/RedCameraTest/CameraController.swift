@@ -4875,7 +4875,7 @@ final class CameraController: NSObject, ObservableObject {
                 if centerJump > allowedJump
                     || areaRatio < 0.52
                     || areaRatio > 1.85 {
-                    trackingObservation = observation(fromTopLeftRect: previousBounds)
+                    trackingObservation = self.observation(fromTopLeftRect: previousBounds)
                     sequenceHandler = VNSequenceRequestHandler()
                     motionFilter.reset(rect: previousBounds, timestamp: timestamp)
                     lowConfidenceFrames = 0
