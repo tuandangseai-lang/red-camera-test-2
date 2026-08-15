@@ -66,13 +66,16 @@ struct RocketMotionFilter {
         let normalizedConfidence = CGFloat(max(0, min(1, confidence)))
         // Bám tên lửa cần ưu tiên độ trễ thấp. Tracker quang học chạy mỗi frame
         // nên có thể tin phép đo mới mạnh hơn mà vẫn giữ được độ mượt.
-        var alpha: CGFloat = isDetectorMeasurement ? 0.82 : 0.54
+        // Optical tracking is temporally stable, while detector boxes jitter at
+        // their edges. Trust the optical center more and use YOLO as a measured
+        // correction rather than allowing it to jerk the servo every few frames.
+        var alpha: CGFloat = isDetectorMeasurement ? 0.62 : 0.70
         alpha *= 0.55 + normalizedConfidence * 0.45
         if residualLength > max(0.16, max(size.width, size.height) * 1.8),
            confidence < 0.72 {
             alpha *= 0.16
         }
-        let beta: CGFloat = isDetectorMeasurement ? 0.28 : 0.14
+        let beta: CGFloat = isDetectorMeasurement ? 0.14 : 0.20
 
         center = CGPoint(
             x: predictedCenter.x + alpha * residual.dx,
@@ -110,7 +113,9 @@ struct RocketMotionFilter {
 
         // Bù cả độ trễ camera, BLE và MG995. Tên lửa nước có quỹ đạo liên tục nên
         // có thể nhìn trước tối đa 360 ms; bộ lọc nhanh ở trên xử lý lúc đổi hướng.
-        let leadTime: CGFloat = min(0.36, 0.14 + speed * 0.040)
+        // This point is sent directly to the ESP32. About 100-260 ms of lead
+        // compensates camera + BLE + MG995 latency without overshooting wildly.
+        let leadTime: CGFloat = min(0.26, 0.10 + speed * 0.025)
         let predicted = CGPoint(
             x: Self.clamp(current.x + velocity.dx * leadTime),
             y: Self.clamp(current.y + velocity.dy * leadTime)

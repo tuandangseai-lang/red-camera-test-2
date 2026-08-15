@@ -3351,7 +3351,10 @@ final class CameraController: NSObject, ObservableObject {
                 candidates.append(ForegroundCandidate(
                     rect: rect,
                     feature: feature,
-                    trianglePoints: supportPoints(from: cells),
+                    // Preserve the complete ordered foreground boundary. The
+                    // UI and shape tracker can now follow the actual bottle,
+                    // fins and nose instead of a four-point diamond.
+                    trianglePoints: contourPoints(from: cells),
                     shapeSignature: shapeSignature(from: cells)
                 ))
             }
@@ -3452,13 +3455,33 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func representativeTrackingPoints(in rect: CGRect) -> [CGPoint] {
-        [
-            CGPoint(x: rect.midX, y: rect.minY + rect.height * 0.08),
-            CGPoint(x: rect.maxX - rect.width * 0.08, y: rect.midY),
-            CGPoint(x: rect.midX, y: rect.maxY - rect.height * 0.08),
-            CGPoint(x: rect.minX + rect.width * 0.08, y: rect.midY),
-            CGPoint(x: rect.midX, y: rect.midY)
-        ]
+        // Fallback only: draw a smooth capsule around the detector box until
+        // Vision provides the real foreground contour. Never publish the old
+        // top/right/bottom/left diamond as if it were the object's shape.
+        let count = 28
+        return (0..<count).map { index in
+            let angle = -CGFloat.pi / 2
+                + CGFloat(index) / CGFloat(count) * 2 * CGFloat.pi
+            return CGPoint(
+                x: rect.midX + cos(angle) * rect.width * 0.46,
+                y: rect.midY + sin(angle) * rect.height * 0.47
+            )
+        }
+    }
+
+    private func blendedTrackingRect(
+        tracker: CGRect,
+        detector: CGRect,
+        detectorWeight: CGFloat
+    ) -> CGRect {
+        let weight = max(0, min(1, detectorWeight))
+        let inverse = 1 - weight
+        return CGRect(
+            x: tracker.minX * inverse + detector.minX * weight,
+            y: tracker.minY * inverse + detector.minY * weight,
+            width: tracker.width * inverse + detector.width * weight,
+            height: tracker.height * inverse + detector.height * weight
+        ).intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
     }
 
     private func transformedTriangle(
@@ -3567,6 +3590,25 @@ final class CameraController: NSObject, ObservableObject {
             }
         }
         return best
+    }
+
+    private func trackingContour(
+        around bounds: CGRect,
+        in pixelBuffer: CVPixelBuffer
+    ) -> [CGPoint] {
+        let area = bounds.width * bounds.height
+        guard area >= 0.0025,
+              let foreground = bestForegroundCandidate(
+                near: bounds,
+                in: pixelBuffer
+              ), foreground.trianglePoints.count >= 8 else {
+            return representativeTrackingPoints(in: bounds)
+        }
+        return transformedTriangle(
+            foreground.trianglePoints,
+            from: foreground.rect,
+            to: bounds
+        )
     }
 
     private func bestIdentityCandidate(
@@ -4061,7 +4103,7 @@ final class CameraController: NSObject, ObservableObject {
         processingRect = clippedRect
         trackingObservation = observation(fromTopLeftRect: clippedRect)
         trackingAnchorObservations.removeAll()
-        trackingTrianglePoints = trianglePoints.count >= 3
+        trackingTrianglePoints = trianglePoints.count >= 8
             ? trianglePoints
             : representativeTrackingPoints(in: clippedRect)
         if !isContinuingExistingTrack {
@@ -4162,7 +4204,10 @@ final class CameraController: NSObject, ObservableObject {
             }
             lockTarget(
                 rect: detection.rect,
-                trianglePoints: representativeTrackingPoints(in: detection.rect),
+                trianglePoints: trackingContour(
+                    around: detection.rect,
+                    in: pixelBuffer
+                ),
                 confidence: reacquisitionSimilarity,
                 matchDescription: "BẮT LẠI NGAY • KHỚP \(Int(reacquisitionSimilarity * 100))%",
                 statusDescription: "Đã đạt 75% — bám lại ngay"
@@ -4188,7 +4233,10 @@ final class CameraController: NSObject, ObservableObject {
         let wasRecovery = isRecoveringLostTarget
         lockTarget(
             rect: pendingAIDetectionRect ?? detection.rect,
-            trianglePoints: representativeTrackingPoints(in: detection.rect),
+            trianglePoints: trackingContour(
+                around: pendingAIDetectionRect ?? detection.rect,
+                in: pixelBuffer
+            ),
             confidence: detection.confidence,
             matchDescription: wasRecovery
                 ? "AI • đã bắt lại mục tiêu • \(Int(detection.confidence * 100))%"
@@ -4249,7 +4297,7 @@ final class CameraController: NSObject, ObservableObject {
 
         lockTarget(
             rect: seed,
-            trianglePoints: representativeTrackingPoints(in: seed),
+            trianglePoints: trackingContour(around: seed, in: pixelBuffer),
             confidence: 0.98,
             matchDescription: "7 ảnh → tracker • khóa trực tiếp vật vừa chụp",
             statusDescription: "Đã nhận đúng vật vừa tạo mẫu — bắt đầu bám liên tục"
@@ -4436,7 +4484,9 @@ final class CameraController: NSObject, ObservableObject {
             ? 0.015
             : 0.0045
         let isTinyTarget = observedArea < tinyTargetAreaThreshold
-        request.trackingLevel = (isTinyTarget || lowConfidenceFrames > 0) ? .accurate : .fast
+        request.trackingLevel = (scanSubjectKind == .waterRocket
+            || isTinyTarget
+            || lowConfidenceFrames > 0) ? .accurate : .fast
 
         do {
             try sequenceHandler.perform([request], on: pixelBuffer, orientation: .up)
@@ -4508,7 +4558,7 @@ final class CameraController: NSObject, ObservableObject {
                         // Moi 12 frame moi lay foreground mask de tranh nong may.
                         // Chu ky hinh dang tham gia vao phep gan ID, khong chi ve UI.
                         var foregroundSupport: ForegroundCandidate?
-                        if trackingFrameCounter % 12 == 0,
+                        if trackingFrameCounter % 10 == 0,
                            detectionArea >= 0.0035 {
                             foregroundSupport = bestForegroundCandidate(
                                 near: detection.rect,
@@ -4532,12 +4582,27 @@ final class CameraController: NSObject, ObservableObject {
                             highConfidenceStage
                                 || (lowConfidenceStage && identitySupported)
                         ) {
-                            targetBounds = highConfidenceStage
+                            let detectorRect = highConfidenceStage
                                 ? detection.rect
                                 : (pendingAIDetectionRect ?? detection.rect)
+                            // Detector boxes move a few pixels between otherwise
+                            // identical frames. Fuse them with the optical track
+                            // instead of replacing the box and kicking the servo.
+                            let correctionWeight: CGFloat = highConfidenceStage
+                                ? (isTinyTarget ? 0.62 : 0.46)
+                                : 0.30
+                            targetBounds = blendedTrackingRect(
+                                tracker: targetBounds,
+                                detector: detectorRect,
+                                detectorWeight: correctionWeight
+                            )
                             if let foregroundSupport,
-                               foregroundSupport.trianglePoints.count >= 3 {
-                                rawTriangle = foregroundSupport.trianglePoints
+                               foregroundSupport.trianglePoints.count >= 8 {
+                                rawTriangle = transformedTriangle(
+                                    foregroundSupport.trianglePoints,
+                                    from: foregroundSupport.rect,
+                                    to: targetBounds
+                                )
                                 if trackingShapeSignature.isEmpty {
                                     trackingShapeSignature = foregroundSupport.shapeSignature
                                 } else if shapeSimilarity >= 0.52 {
@@ -4604,12 +4669,21 @@ final class CameraController: NSObject, ObservableObject {
                             max(targetBounds.width, targetBounds.height) * 1.25
                         )
                         if closeEnough || confirmsAIDetection(candidate.rect, requiredCount: 2) {
-                            targetBounds = closeEnough
+                            let identityRect = closeEnough
                                 ? candidate.rect
                                 : (pendingAIDetectionRect ?? candidate.rect)
-                            rawTriangle = candidate.trianglePoints.count >= 3
-                                ? candidate.trianglePoints
-                                : representativeTrackingPoints(in: candidate.rect)
+                            targetBounds = blendedTrackingRect(
+                                tracker: targetBounds,
+                                detector: identityRect,
+                                detectorWeight: closeEnough ? 0.42 : 0.30
+                            )
+                            rawTriangle = candidate.trianglePoints.count >= 8
+                                ? transformedTriangle(
+                                    candidate.trianglePoints,
+                                    from: candidate.rect,
+                                    to: targetBounds
+                                )
+                                : representativeTrackingPoints(in: targetBounds)
                             measurementConfidence = max(measurementConfidence, 0.72)
                             isDetectorMeasurement = true
                             trackingObservation = self.observation(fromTopLeftRect: targetBounds)
@@ -4698,9 +4772,10 @@ final class CameraController: NSObject, ObservableObject {
                 -99,
                 min(99, estimate.velocity.dy * velocityScale)
             ).rounded())
-            // Gui tam hien tai da loc. predictedPoint chi dung de hien thi/du doan;
-            // firmware con co feed-forward nen gui no se bu chuyen dong hai lan.
-            let servoPoint = CGPoint(x: targetBounds.midX, y: targetBounds.midY)
+            // Send the Kalman lead point, not the delayed box center. Firmware
+            // applies only a small residual velocity lead, so the pan/tilt
+            // starts before the rocket reaches the edge of the frame.
+            let servoPoint = predictedPoint
             let apparentSize = Int(max(
                 1,
                 min(999, max(targetBounds.width, targetBounds.height) * 999)

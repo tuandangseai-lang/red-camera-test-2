@@ -316,38 +316,36 @@ struct ContentView: View {
                     style: StrokeStyle(lineWidth: 3, lineCap: .square, lineJoin: .miter)
                 )
 
-                // Cac moc nay duoc lay tu foreground mask cua vat, khong phai
-                // ba diem co dinh tren bounding box. Bon diem ngoai tao duong
-                // bao; diem thu nam la tam hinh dang va noi lai thanh skeleton.
-                if supportPoints.count >= 5 {
-                    let outlinePoints = Array(supportPoints.prefix(4))
-                    var skeleton = Path()
-                    skeleton.move(to: outlinePoints[0])
-                    for point in outlinePoints.dropFirst() {
-                        skeleton.addLine(to: point)
-                    }
-                    skeleton.closeSubpath()
-                    let shapeCenter = supportPoints[4]
-                    for point in outlinePoints {
-                        skeleton.move(to: shapeCenter)
-                        skeleton.addLine(to: point)
-                    }
+                // The points are an ordered foreground contour. Draw that
+                // contour directly; do not connect four extrema to the center
+                // (which produced a diamond unrelated to the real rocket).
+                if supportPoints.count >= 8 {
+                    let contour = smoothClosedPath(supportPoints)
                     context.stroke(
-                        skeleton,
-                        with: .color(.cyan.opacity(0.92)),
-                        style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round)
+                        contour,
+                        with: .color(.cyan.opacity(0.96)),
+                        style: StrokeStyle(
+                            lineWidth: 2.2,
+                            lineCap: .round,
+                            lineJoin: .round
+                        )
                     )
-                    for (index, point) in supportPoints.enumerated() {
-                        let radius = index == 4 ? 4.2 : 3.2
+                    let markerStride = max(1, supportPoints.count / 12)
+                    for index in stride(
+                        from: 0,
+                        to: supportPoints.count,
+                        by: markerStride
+                    ) {
+                        let point = supportPoints[index]
                         let dot = CGRect(
-                            x: point.x - radius,
-                            y: point.y - radius,
-                            width: radius * 2,
-                            height: radius * 2
+                            x: point.x - 2.4,
+                            y: point.y - 2.4,
+                            width: 4.8,
+                            height: 4.8
                         )
                         context.fill(
                             Path(ellipseIn: dot),
-                            with: .color(index == 4 ? .yellow : .cyan)
+                            with: .color(.cyan)
                         )
                     }
                 }

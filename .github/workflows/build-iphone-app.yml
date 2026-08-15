@@ -1,4 +1,4 @@
-name: Tao IPA SE v5.1 - lighter AI capture
+name: Tao IPA SE v5.2 - contour + predictive servo
 
 on:
   workflow_dispatch:

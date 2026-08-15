@@ -46,8 +46,8 @@ constexpr int SERVO_MAX_US = 2100;
 constexpr int IMAGE_CENTER = 500;
 // Hysteresis: ra khỏi vòng 30 thì bắt đầu bám, vào vòng 12 mới dừng.
 // Mục tiêu vẫn sát tâm nhưng servo không bật/tắt liên tục vì nhiễu tọa độ.
-constexpr int CENTER_START_HALF = 18;
-constexpr int CENTER_STOP_HALF = 7;
+constexpr int CENTER_START_HALF = 14;
+constexpr int CENTER_STOP_HALF = 6;
 constexpr int ACTIVE_TRACK_CONFIDENCE = 10;  // App da giu mot ID; frame nhoe van phai cap nhat toa do.
 constexpr int INITIAL_LOCK_CONFIDENCE = 70;  // Khóa mới cần ít nhất 70%.
 constexpr int REACQUIRE_CONFIDENCE = 75;  // 00...99.
@@ -55,13 +55,15 @@ constexpr uint32_t TRACK_TIMEOUT_MS = 650;
 constexpr uint32_t CONTROL_PERIOD_MS = 20;  // Bằng chu kỳ PWM servo 50 Hz.
 
 // Tăng tốc êm, phanh nhanh hơn để không vượt tâm rồi giật ngược.
-constexpr float PAN_MAX_SPEED_DPS = 150.0f;
-constexpr float TILT_MAX_SPEED_DPS = 120.0f;
-constexpr float PAN_MAX_ACCEL_DPS2 = 760.0f;
-constexpr float TILT_MAX_ACCEL_DPS2 = 620.0f;
+constexpr float PAN_MAX_SPEED_DPS = 145.0f;
+constexpr float TILT_MAX_SPEED_DPS = 115.0f;
+constexpr float PAN_MAX_ACCEL_DPS2 = 640.0f;
+constexpr float TILT_MAX_ACCEL_DPS2 = 540.0f;
 constexpr float PAN_MAX_DECEL_DPS2 = 980.0f;
 constexpr float TILT_MAX_DECEL_DPS2 = 820.0f;
-constexpr float VELOCITY_LEAD_PIXELS = 1.3f;
+// The app already sends a Kalman-predicted center. Firmware adds only a small
+// residual lead so velocity is not counted twice.
+constexpr float VELOCITY_LEAD_PIXELS = 0.35f;
 constexpr uint32_t SERVO_HOME_HOLD_MS = 900;
 
 // Khi mất mục tiêu, đi tiếp theo vector bay cuối trong 0,9 giây. Nếu vẫn chưa
@@ -152,12 +154,12 @@ void writeServoAngles(bool force = false) {
   const int panPulseUs = angleToPulseUs(panAngleDeg);
   const int tiltPulseUs = angleToPulseUs(tiltAngleDeg);
   // Không ghi lại thay đổi xung rất nhỏ do nhiễu tọa độ.
-  if (force || lastPanPulseUs < 0 || abs(panPulseUs - lastPanPulseUs) >= 2) {
+  if (force || lastPanPulseUs < 0 || abs(panPulseUs - lastPanPulseUs) >= 4) {
     panServo.writeMicroseconds(panPulseUs);
     lastPanPulseUs = panPulseUs;
   }
   if (force || lastTiltPulseUs < 0 ||
-      abs(tiltPulseUs - lastTiltPulseUs) >= 2) {
+      abs(tiltPulseUs - lastTiltPulseUs) >= 4) {
     tiltServo.writeMicroseconds(tiltPulseUs);
     lastTiltPulseUs = tiltPulseUs;
   }
@@ -306,7 +308,7 @@ float shapedAxisError(int error, int stopHalf) {
       static_cast<float>(magnitude - stopHalf) /
       static_cast<float>(IMAGE_CENTER - stopHalf);
   // Khởi động nhẹ tại mép vùng giữ rồi tăng dần khi mục tiêu đi xa hơn.
-  const float responsive = 0.035f + 0.965f * powf(
+  const float responsive = 0.012f + 0.988f * powf(
       clampFloat(normalized, 0.0f, 1.0f), 0.76f);
   return (error < 0 ? -1.0f : 1.0f) * clampFloat(responsive, 0.0f, 1.0f);
 }
@@ -398,20 +400,20 @@ void updateServosFromTarget() {
       0.76f,
       1.36f);
   const float leadPixels = clampFloat(
-      VELOCITY_LEAD_PIXELS + 1.4f * smallTargetBoost -
-          0.8f * largeTargetBrake,
-      1.0f,
-      3.4f);
+      VELOCITY_LEAD_PIXELS + 0.50f * smallTargetBoost -
+          0.15f * largeTargetBrake,
+      0.20f,
+      0.90f);
   const int dynamicStartHalf = static_cast<int>(lroundf(clampFloat(
       CENTER_START_HALF - 8.0f * smallTargetBoost +
           7.0f * largeTargetBrake,
-      12.0f,
-      30.0f)));
+      8.0f,
+      22.0f)));
   const int dynamicStopHalf = static_cast<int>(lroundf(clampFloat(
       CENTER_STOP_HALF - 4.0f * smallTargetBoost +
           5.0f * largeTargetBrake,
-      7.0f,
-      18.0f)));
+      5.0f,
+      12.0f)));
 
   // Chỉ dự đoán một lần từ tâm hiện tại + vận tốc.
   const int panOffset = static_cast<int>(lroundf(
@@ -509,15 +511,17 @@ void acceptTrackingPacket(int x, int y, int confidence, int velocityX = 0,
         (0.22f - sizeRatio) / 0.18f, 0.0f, 1.0f);
     // App da co Kalman/Vision. ESP32 chi loc mot lop mong de khong cong them
     // 0,2-0,5 giay tre, dac biet o truc PAN.
-    const float baseAlpha = 0.46f + 0.12f * smallTargetBoost;
+    // One-Euro-like behavior: strong smoothing while nearly stationary, fast
+    // response as soon as the predicted center actually moves.
+    const float baseAlpha = 0.22f + 0.10f * smallTargetBoost;
     const float positionAlpha = baseAlpha +
-        (0.90f - baseAlpha) *
-            clampFloat(movement / 110.0f, 0.0f, 1.0f);
+        (0.88f - baseAlpha) *
+            clampFloat(movement / 65.0f, 0.0f, 1.0f);
     filteredTargetX += positionAlpha * (x - filteredTargetX);
     filteredTargetY += positionAlpha * (y - filteredTargetY);
     filteredTargetSize += 0.38f * (targetSize - filteredTargetSize);
-    filteredVelocityX += 0.56f * (velocityX - filteredVelocityX);
-    filteredVelocityY += 0.56f * (velocityY - filteredVelocityY);
+    filteredVelocityX += 0.30f * (velocityX - filteredVelocityX);
+    filteredVelocityY += 0.30f * (velocityY - filteredVelocityY);
   }
   latestTargetX = static_cast<int>(lroundf(filteredTargetX));
   latestTargetY = static_cast<int>(lroundf(filteredTargetY));
