@@ -1,4 +1,4 @@
-name: Tao IPA SE v5 - stable ID + real-time servo
+name: Tao IPA SE v5.1 - lighter AI capture
 
 on:
   workflow_dispatch:

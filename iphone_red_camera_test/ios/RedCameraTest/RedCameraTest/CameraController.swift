@@ -303,6 +303,10 @@ final class CameraController: NSObject, ObservableObject {
     private let manualCaptureLock = NSLock()
     private var manualCaptureRequested = false
     private var manualCaptureInFlight = false
+    // Reuse the exact selection briefly when tap-to-select and capture land on
+    // the same camera frame. This avoids repeating the full Vision pipeline.
+    private var cachedManualReference: TrainingReferenceSelection?
+    private var cachedManualReferenceAt: TimeInterval = 0
     private var capturedReferencePhotoCount = 0
     private var referenceVideoStartedAt: TimeInterval?
     private var lastReferenceVideoSampleAt: TimeInterval = 0
@@ -319,7 +323,9 @@ final class CameraController: NSObject, ObservableObject {
     // Sáu hướng quanh vật cộng thêm một ảnh xa để nhận lại khi tên lửa nhỏ.
     private let manualPhotoTarget = 7
     private let referenceVideoDuration: TimeInterval = 10.0
-    private let referenceVideoTargetFrames = 24
+    // Eighteen evenly-spaced frames retain viewpoint diversity while avoiding
+    // redundant near-identical AI samples and excess heat on iPhone 15.
+    private let referenceVideoTargetFrames = 18
     // Lưới đủ mịn để viền không bị vuông nhưng vẫn nhẹ cho iPhone 15.
     private let selectionGridColumns = 96
     private let selectionGridRows = 168
@@ -567,6 +573,8 @@ final class CameraController: NSObject, ObservableObject {
             self.lastAcceptedFeature = nil
             self.voxelOccupancy.removeAll()
             self.manualSelectionRequested = false
+            self.cachedManualReference = nil
+            self.cachedManualReferenceAt = 0
             self.resetManualCaptureRequest()
             self.trackingObservation = nil
             self.trackingAnchorObservations.removeAll()
@@ -655,6 +663,8 @@ final class CameraController: NSObject, ObservableObject {
             self.lastAcceptedFeature = nil
             self.voxelOccupancy.removeAll()
             self.manualSelectionRequested = false
+            self.cachedManualReference = nil
+            self.cachedManualReferenceAt = 0
             self.resetManualCaptureRequest()
             self.capturedReferencePhotoCount = 0
             self.referenceVideoStartedAt = nil
@@ -1178,6 +1188,8 @@ final class CameraController: NSObject, ObservableObject {
             self.lastAcceptedFeature = nil
             self.voxelOccupancy.removeAll()
             self.manualSelectionRequested = false
+            self.cachedManualReference = nil
+            self.cachedManualReferenceAt = 0
             self.capturedReferencePhotoCount = 0
             self.referenceVideoStartedAt = nil
             self.lastReferenceVideoSampleAt = 0
@@ -1421,21 +1433,28 @@ final class CameraController: NSObject, ObservableObject {
             )
         }
 
+        // A tap selection may have been computed from this same preview frame.
+        // The very short lifetime prevents reuse for another viewpoint.
+        let now = CACurrentMediaTime()
+        if let cached = cachedManualReference,
+           cached.kind == scanSubjectKind,
+           now - cachedManualReferenceAt <= 0.15 {
+            cachedManualReference = nil
+            return cached
+        }
+
         guard let selection = manualSubjectMask(
             from: pixelBuffer,
             at: selectedSubjectPoint
         ), selection.isCentered else { return nil }
-        let classification = classifySubject(
-            in: pixelBuffer,
-            rect: selection.boundingRect,
-            referenceJPEG: selection.referenceJPEG
-        )
-        guard classification.kind == scanSubjectKind else { return nil }
+        // The selected tab is the source of truth. classifySubject already
+        // falls back to that tab at low confidence, so repeating it for every
+        // photo/video sample only spends CPU without adding a rejection gate.
         return TrainingReferenceSelection(
             selection: selection,
-            confidence: classification.confidence,
-            label: classification.label,
-            kind: classification.kind
+            confidence: 1.0,
+            label: scanSubjectKind.title,
+            kind: scanSubjectKind
         )
     }
 
@@ -1811,14 +1830,6 @@ final class CameraController: NSObject, ObservableObject {
             width: rect.width,
             height: rect.height
         )
-        let personRequest = VNDetectHumanRectanglesRequest()
-        personRequest.regionOfInterest = visionRect
-        personRequest.upperBodyOnly = false
-        let animalRequest = VNRecognizeAnimalsRequest()
-        animalRequest.regionOfInterest = visionRect
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
-        try? handler.perform([personRequest, animalRequest])
-
         // Tab người dùng chọn là nguồn sự thật. AI chỉ đặt tên chi tiết bên
         // trong tab đó, không tự đổi Vật thành Người vì thấy bàn tay đang cầm.
         switch scanSubjectKind {
@@ -1842,12 +1853,27 @@ final class CameraController: NSObject, ObservableObject {
             return (.waterRocket, "tên lửa nước", 0.10)
 
         case .person:
+            let personRequest = VNDetectHumanRectanglesRequest()
+            personRequest.regionOfInterest = visionRect
+            personRequest.upperBodyOnly = false
+            let handler = VNImageRequestHandler(
+                cvPixelBuffer: pixelBuffer,
+                orientation: .up
+            )
+            try? handler.perform([personRequest])
             let confidence = personRequest.results?
                 .map { Double($0.confidence) }
                 .max() ?? 0.10
             return (.person, "người", confidence)
 
         case .animal:
+            let animalRequest = VNRecognizeAnimalsRequest()
+            animalRequest.regionOfInterest = visionRect
+            let handler = VNImageRequestHandler(
+                cvPixelBuffer: pixelBuffer,
+                orientation: .up
+            )
+            try? handler.perform([animalRequest])
             if let animal = animalRequest.results?.max(by: { $0.confidence < $1.confidence }),
                let label = animal.labels.first {
                 return (
@@ -1952,7 +1978,8 @@ final class CameraController: NSObject, ObservableObject {
             // Với lớp tên lửa nước đã học sẵn, dùng hộp AI để cắt bớt tay và
             // nền ngay từ lúc người dùng chọn mẫu. Vision vẫn cung cấp viền mềm,
             // còn AI chỉ giới hạn đúng vùng của tên lửa ở tâm.
-            let centeredRocket = aiDetector.detect(
+            if scanSubjectKind == .waterRocket {
+                let centeredRocket = aiDetector.detect(
                 in: pixelBuffer,
                 orientation: .up,
                 minimumConfidence: 0.12
@@ -1965,13 +1992,14 @@ final class CameraController: NSObject, ObservableObject {
                 )
                 return containsTap || centerDistance < 0.23
             }
-            if let centeredRocket {
-                let rocketArea = gridCells(
-                    in: centeredRocket.rect.insetBy(dx: -0.025, dy: -0.025)
-                )
-                let focusedRocket = cells.intersection(rocketArea)
-                if focusedRocket.count >= 18 {
-                    cells = focusedRocket
+                if let centeredRocket {
+                    let rocketArea = gridCells(
+                        in: centeredRocket.rect.insetBy(dx: -0.025, dy: -0.025)
+                    )
+                    let focusedRocket = cells.intersection(rocketArea)
+                    if focusedRocket.count >= 18 {
+                        cells = focusedRocket
+                    }
                 }
             }
 
@@ -2156,6 +2184,13 @@ final class CameraController: NSObject, ObservableObject {
             rect: selection.boundingRect,
             referenceJPEG: selection.referenceJPEG
         )
+        cachedManualReference = TrainingReferenceSelection(
+            selection: selection,
+            confidence: classification.confidence,
+            label: classification.label,
+            kind: classification.kind
+        )
+        cachedManualReferenceAt = CACurrentMediaTime()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.hasSelectedSubject = true
@@ -2325,9 +2360,9 @@ final class CameraController: NSObject, ObservableObject {
         let elapsed = max(0, now - startedAt)
         let progress = min(1, elapsed / referenceVideoDuration)
 
-        // Lấy tối đa khoảng 24 frame trong 10 giây. Mỗi frame phải đúng loại
+        // Lấy tối đa khoảng 18 frame trong 10 giây. Mỗi frame phải đúng loại
         // Người / Thú / Vật đã chọn; tên lửa dạng chai dùng model chuyên dụng.
-        if now - lastReferenceVideoSampleAt >= 0.38,
+        if now - lastReferenceVideoSampleAt >= 0.52,
            capturedReferenceVideoFrames < referenceVideoTargetFrames,
            let reference = trainingReferenceSelection(from: pixelBuffer) {
             let selection = reference.selection
@@ -2346,7 +2381,11 @@ final class CameraController: NSObject, ObservableObject {
                 orientation: .up
             ) {
                 scanContextImages.append(contextJPEG)
-                if let feature = featurePrint(fromJPEGData: contextJPEG) {
+                // Keep every context image, but feature-print alternating frames.
+                // Adjacent context frames are highly redundant; the subject
+                // feature is still generated for every accepted video frame.
+                if capturedReferenceVideoFrames.isMultiple(of: 2),
+                   let feature = featurePrint(fromJPEGData: contextJPEG) {
                     contextFeatureSamples.append(feature)
                     videoContextFeatureSamples.append(feature)
                 }
