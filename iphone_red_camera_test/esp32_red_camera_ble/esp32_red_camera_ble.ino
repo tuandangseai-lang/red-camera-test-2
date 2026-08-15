@@ -7,8 +7,10 @@
 
 // ======================= CHÂN KẾT NỐI =======================
 // Servo PAN quay trái/phải; servo TILT quay lên/xuống.
-constexpr uint8_t PAN_SERVO_PIN = 18;
-constexpr uint8_t TILT_SERVO_PIN = 19;
+// Actual bracket wiring: horizontal axis on GPIO19, vertical axis on GPIO18.
+// Keep logical axes correct so Home and trajectory prediction are not swapped.
+constexpr uint8_t PAN_SERVO_PIN = 19;
+constexpr uint8_t TILT_SERVO_PIN = 18;
 constexpr uint8_t STATUS_LED_PIN = 25;
 constexpr uint8_t PHONE_CHARGE_RELAY_PIN = 26;
 

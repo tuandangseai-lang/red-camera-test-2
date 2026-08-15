@@ -3939,7 +3939,8 @@ final class CameraController: NSObject, ObservableObject {
     private func detectRocketOrBottle(
         in pixelBuffer: CVPixelBuffer,
         minimumConfidence: Double,
-        regionOfInterest: CGRect? = nil
+        regionOfInterest: CGRect? = nil,
+        allowBottleFallback: Bool = true
     ) -> [WaterRocketDetection] {
         var detections = aiDetector.detect(
             in: pixelBuffer,
@@ -3948,7 +3949,7 @@ final class CameraController: NSObject, ObservableObject {
         )
         // Chỉ gọi model chai khi model chuyên tên lửa hụt để không chạy hai
         // mạng 640×640 ở mọi frame lúc tên lửa đang bay nhanh.
-        if detections.isEmpty, bottleDetector.isAvailable {
+        if detections.isEmpty, allowBottleFallback, bottleDetector.isAvailable {
             detections.append(contentsOf: bottleDetector.detect(
                 in: pixelBuffer,
                 minimumConfidence: max(0.10, minimumConfidence * 0.72),
@@ -3994,27 +3995,26 @@ final class CameraController: NSObject, ObservableObject {
             let roi = searchROI(around: expectedRect)
             // Nhánh toàn khung giữ được dù/parachute lớn. Nếu nhánh này hụt mục tiêu
             // gần quỹ đạo, nhánh ROI mới phóng to vùng 3–6 px để cứu frame đó.
-            let global = detectRocketOrBottle(
+            let allowSecondaryModel = isRecoveringLostTarget
+                || trackingFrameCounter % 30 == 0
+            let focused = detectRocketOrBottle(
                 in: pixelBuffer,
-                minimumConfidence: isTinyContinuation ? 0.07 : minimumConfidence
+                minimumConfidence: minimumConfidence,
+                regionOfInterest: roi,
+                allowBottleFallback: allowSecondaryModel
             )
-            let hasGlobalNearTrajectory = global.contains { detection in
-                let center = CGPoint(x: detection.rect.midX, y: detection.rect.midY)
-                return roi.contains(center)
-                    && hypot(
-                        center.x - expectedRect.midX,
-                        center.y - expectedRect.midY
-                    ) <= max(0.13, max(expectedRect.width, expectedRect.height) * 3.5)
-            }
-            if hasGlobalNearTrajectory {
-                detections = global
+            if !focused.isEmpty {
+                detections = focused
             } else {
-                let focused = detectRocketOrBottle(
+                let shouldScanFullFrame = isRecoveringLostTarget
+                    || lowConfidenceFrames > 0
+                    || detectorMissStreak >= 2
+                    || trackingFrameCounter % 30 == 0
+                detections = shouldScanFullFrame ? detectRocketOrBottle(
                     in: pixelBuffer,
-                    minimumConfidence: minimumConfidence,
-                    regionOfInterest: roi
-                )
-                detections = focused + global
+                    minimumConfidence: isTinyContinuation ? 0.07 : minimumConfidence,
+                    allowBottleFallback: allowSecondaryModel
+                ) : []
             }
         } else {
             detections = detectRocketOrBottle(
@@ -4579,9 +4579,12 @@ final class CameraController: NSObject, ObservableObject {
             ? 0.015
             : 0.0045
         let isTinyTarget = observedArea < tinyTargetAreaThreshold
-        request.trackingLevel = (scanSubjectKind == .waterRocket
-            || isTinyTarget
-            || lowConfidenceFrames > 0) ? .accurate : .fast
+        // A stable lock uses the light optical path. A tiny target receives an
+        // accurate correction periodically, while a weak lock gets one now.
+        let needsAccurateOpticalTrack = lowConfidenceFrames > 0
+            || detectorMissStreak >= 2
+            || (isTinyTarget && trackingFrameCounter % 3 == 0)
+        request.trackingLevel = needsAccurateOpticalTrack ? .accurate : .fast
 
         do {
             try sequenceHandler.perform([request], on: pixelBuffer, orientation: .up)
@@ -4622,9 +4625,22 @@ final class CameraController: NSObject, ObservableObject {
             if usesRocketSpecificDetector && aiDetector.isAvailable {
                 // Detector chạy khoảng 15 lần/giây ở camera 60 fps. Tracker chạy
                 // các frame xen giữa; khi tracker yếu, detector được gọi ngay.
-                let shouldRunDetector = (isTinyTarget && trackingFrameCounter % 2 == 0)
-                    || trackingFrameCounter % 4 == 0
-                    || lowConfidenceFrames > 0
+                // Vision supplies the real-time centre. Core ML only validates
+                // identity and corrects drift, so adapt its rate to lock health.
+                let thermalState = ProcessInfo.processInfo.thermalState
+                let isThermallyLimited = thermalState == .serious
+                    || thermalState == .critical
+                let detectorNeedsHelp = lowConfidenceFrames > 0
+                    || detectorMissStreak >= 2
+                let detectorStride: Int
+                if isThermallyLimited {
+                    detectorStride = detectorNeedsHelp ? 3 : 10
+                } else if detectorNeedsHelp {
+                    detectorStride = 2
+                } else {
+                    detectorStride = isTinyTarget ? 5 : 8
+                }
+                let shouldRunDetector = trackingFrameCounter % detectorStride == 0
                 if shouldRunDetector {
                     let expectedRect = motionFilter.isInitialized
                         ? motionFilter.estimate(at: CACurrentMediaTime()).filteredRect
@@ -4653,7 +4669,8 @@ final class CameraController: NSObject, ObservableObject {
                         // Moi 12 frame moi lay foreground mask de tranh nong may.
                         // Chu ky hinh dang tham gia vao phep gan ID, khong chi ve UI.
                         var foregroundSupport: ForegroundCandidate?
-                        if trackingFrameCounter % 10 == 0,
+                        let foregroundStride = detectorNeedsHelp ? 12 : 30
+                        if trackingFrameCounter % foregroundStride == 0,
                            detectionArea >= 0.0035 {
                             foregroundSupport = bestForegroundCandidate(
                                 near: detection.rect,
@@ -5756,11 +5773,16 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             // Giới hạn theo thời gian giữ tốc độ bắt lại 10–13 Hz và giảm mạnh tải
             // Neural Engine/GPU. Khi iOS báo nhiệt cao, tự hạ thêm mà không đổi video.
             let now = CACurrentMediaTime()
-        let isThermallyLimited = ProcessInfo.processInfo.thermalState == .serious
-            || ProcessInfo.processInfo.thermalState == .critical
-            let minimumInterval: TimeInterval = isThermallyLimited
-                ? 0.18
-                : (isRecoveringLostTarget ? 0.075 : 0.11)
+            let thermalState = ProcessInfo.processInfo.thermalState
+            let minimumInterval: TimeInterval
+            switch thermalState {
+            case .serious, .critical:
+                minimumInterval = 0.22
+            case .fair:
+                minimumInterval = isRecoveringLostTarget ? 0.12 : 0.16
+            default:
+                minimumInterval = isRecoveringLostTarget ? 0.09 : 0.14
+            }
             guard now - lastVerificationAnalysisAt >= minimumInterval else { return }
             lastVerificationAnalysisAt = now
             featureFrameCounter += 1
@@ -5792,16 +5814,16 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             // Vision tracker chạy 30 Hz là đủ cho servo; video vẫn được movieOutput
             // ghi độc lập ở 60 fps. Chạy tracker theo mọi frame chỉ làm nóng máy.
             let now = CACurrentMediaTime()
-            let isThermallyLimited = ProcessInfo.processInfo.thermalState == .serious
-                || ProcessInfo.processInfo.thermalState == .critical
+            let thermalState = ProcessInfo.processInfo.thermalState
             let minimumInterval: TimeInterval
-            if isThermallyLimited {
-                minimumInterval = 1.0 / 15.0
-            } else if scanSubjectKind == .waterRocket {
-                // 45 Hz gives PAN/TILT a fresh center every ~22 ms, close to the
-                // 20 ms servo PWM period, while movie recording remains 60 fps.
-                minimumInterval = 1.0 / 45.0
-            } else {
+            switch thermalState {
+            case .serious, .critical:
+                minimumInterval = 1.0 / 12.0
+            case .fair:
+                minimumInterval = 1.0 / 24.0
+            default:
+                // 30 Hz is already faster than the physical MG995 response;
+                // firmware keeps interpolating at its 50 Hz PWM control rate.
                 minimumInterval = 1.0 / 30.0
             }
             guard now - lastTrackingAnalysisAt >= minimumInterval else { return }

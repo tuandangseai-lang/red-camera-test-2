@@ -1,4 +1,4 @@
-name: Tao IPA SE v5.4 - fast profiles + real-time guarded servo
+name: Tao IPA SE v5.5 - corrected axes + cooler adaptive AI
 
 on:
   workflow_dispatch:
