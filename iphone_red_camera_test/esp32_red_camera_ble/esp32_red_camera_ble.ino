@@ -36,7 +36,7 @@ constexpr float TILT_MIN_DEG = 35.0f;
 constexpr float TILT_MAX_DEG = 145.0f;
 
 // Nếu servo chạy ngược hướng, đổi 1.0f thành -1.0f ở đúng trục.
-constexpr float PAN_DIRECTION = 1.0f;
+constexpr float PAN_DIRECTION = -1.0f;
 constexpr float TILT_DIRECTION = 1.0f;
 
 // Giới hạn xung hẹp hơn để tránh MG995 ép vào điểm dừng cơ khí.

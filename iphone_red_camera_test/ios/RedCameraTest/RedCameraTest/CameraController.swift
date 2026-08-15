@@ -5023,6 +5023,23 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func scheduleZoomSequence(after delay: TimeInterval = 0.5) {
+        // Never change the camera crop while Vision is following a live target.
+        // Direct hardware testing showed that the 0.5x -> 0.98x ramp can move a
+        // stationary box to another object before Vision has re-established its
+        // coordinate system. A fixed ultra-wide field of view is also the safer
+        // choice for a fast water rocket.
+        cancelZoomSequence()
+        hasCompletedOneTimeZoom = true
+        isZoomedIn = false
+        zoomText = String(
+            format: "%.1f× • cố định để tracking ổn định",
+            ultraWideDisplayZoomFactor
+        )
+        resetZoom()
+        return
+
+        /* Automatic optical zoom is intentionally disabled until tracking can
+           be re-seeded from calibrated frames at every point of the ramp.
         guard !hasCompletedOneTimeZoom else { return }
         cancelZoomSequence()
 
@@ -5063,6 +5080,7 @@ final class CameraController: NSObject, ObservableObject {
 
         zoomInWorkItem = zoomIn
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: zoomIn)
+        */
     }
 
     private func cancelZoomSequence() {
