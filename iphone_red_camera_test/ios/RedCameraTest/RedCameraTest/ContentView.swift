@@ -302,15 +302,13 @@ struct ContentView: View {
 
     private func aiTrackingOverlay(in size: CGSize) -> some View {
         let rawRect = mappedRect(camera.targetRect ?? .zero, in: size)
-        let supportPoints = camera.trackingPoints.map { mappedPoint($0, in: size) }
-        // Cho vật nhỏ một vùng nhìn rõ tối thiểu, nhưng tâm và kích thước thực
-        // vẫn do detector/tracker quyết định chứ không còn tam giác đứng sai chỗ.
+        let side = max(40, max(rawRect.width, rawRect.height) + 10)
         let box = CGRect(
-            x: rawRect.midX - max(20, rawRect.width / 2),
-            y: rawRect.midY - max(20, rawRect.height / 2),
-            width: max(40, rawRect.width),
-            height: max(40, rawRect.height)
-        ).insetBy(dx: -5, dy: -5)
+            x: rawRect.midX - side / 2,
+            y: rawRect.midY - side / 2,
+            width: side,
+            height: side
+        )
         let confidence = Int(max(0, min(1, camera.trackingConfidence)) * 100)
 
         return ZStack(alignment: .topLeading) {
@@ -336,52 +334,8 @@ struct ContentView: View {
                     style: StrokeStyle(lineWidth: 3, lineCap: .square, lineJoin: .miter)
                 )
 
-                // The points are an ordered foreground contour. Draw that
-                // contour directly; do not connect four extrema to the center
-                // (which produced a diamond unrelated to the real rocket).
-                if supportPoints.count >= 8 {
-                    let contour = smoothClosedPath(supportPoints)
-                    context.stroke(
-                        contour,
-                        with: .color(.cyan.opacity(0.96)),
-                        style: StrokeStyle(
-                            lineWidth: 2.2,
-                            lineCap: .round,
-                            lineJoin: .round
-                        )
-                    )
-                    let markerStride = max(1, supportPoints.count / 12)
-                    for index in stride(
-                        from: 0,
-                        to: supportPoints.count,
-                        by: markerStride
-                    ) {
-                        let point = supportPoints[index]
-                        let dot = CGRect(
-                            x: point.x - 2.4,
-                            y: point.y - 2.4,
-                            width: 4.8,
-                            height: 4.8
-                        )
-                        context.fill(
-                            Path(ellipseIn: dot),
-                            with: .color(.cyan)
-                        )
-                    }
-                }
-
-                if let predicted = camera.predictedTargetPoint {
-                    let target = mappedPoint(predicted, in: size)
-                    let center = CGPoint(x: box.midX, y: box.midY)
-                    var direction = Path()
-                    direction.move(to: center)
-                    direction.addLine(to: target)
-                    context.stroke(
-                        direction,
-                        with: .color(.yellow.opacity(0.90)),
-                        style: StrokeStyle(lineWidth: 1.8, lineCap: .round, dash: [5, 4])
-                    )
-                }
+                // Deliberately show one square only. A decorative contour or
+                // prediction arrow must not look like a second target.
             }
 
             Text("ID:\(camera.targetTrackID)  \(camera.detectedSubjectLabel.uppercased())  \(confidence)%")

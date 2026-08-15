@@ -75,7 +75,9 @@ constexpr float PAN_MIN_EFFECTIVE_SPEED_DPS = 13.0f;
 constexpr float TILT_MIN_EFFECTIVE_SPEED_DPS = 8.0f;
 // The app already sends a Kalman-predicted center. Firmware adds only a small
 // residual lead so velocity is not counted twice.
-constexpr float VELOCITY_LEAD_PIXELS = 0.35f;
+// App sends the centre of the identity-verified square. Do not add a second
+// prediction layer in firmware; double-leading was a source of oscillation.
+constexpr float VELOCITY_LEAD_PIXELS = 0.0f;
 constexpr uint32_t SERVO_HOME_HOLD_MS = 900;
 
 // Khi mất mục tiêu, đi tiếp theo vector bay cuối trong 0,9 giây. Nếu vẫn chưa
@@ -429,11 +431,7 @@ void updateServosFromTarget() {
       1.0f + 0.36f * smallTargetBoost - 0.24f * largeTargetBrake,
       0.76f,
       1.36f);
-  const float leadPixels = clampFloat(
-      VELOCITY_LEAD_PIXELS + 0.50f * smallTargetBoost -
-          0.15f * largeTargetBrake,
-      0.20f,
-      0.90f);
+  const float leadPixels = VELOCITY_LEAD_PIXELS;
   const int dynamicStartHalf = static_cast<int>(lroundf(clampFloat(
       CENTER_START_HALF - 8.0f * smallTargetBoost +
           7.0f * largeTargetBrake,
@@ -621,6 +619,19 @@ void handlePhoneMessage(String value) {
     servoHomeHoldUntilMs = millis() + SERVO_HOME_HOLD_MS;
     centerServos();
     Serial.println("[HOME] PAN/TILT ve tam; giu 0,9 giay roi moi nhan lai track >=70%.");
+    return;
+  }
+
+  if (value == "TRACK_HOLD") {
+    // The app rejected the current Vision rectangle. Keep BLE/session alive so
+    // reacquisition can be immediate, but brake both axes and wait for a new
+    // TARGET_LOCKED plus stable coordinate packets.
+    stopSearchPattern();
+    stopTrackingTarget();
+    targetLockConfirmed = false;
+    servoTrackingArmed = false;
+    requireStableServoLock(CAMERA_TRANSITION_SETTLE_MS);
+    Serial.println("[SAFE] Hop tracking khong hop le; giu nguyen hai servo.");
     return;
   }
 

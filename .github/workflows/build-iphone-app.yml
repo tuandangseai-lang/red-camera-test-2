@@ -1,4 +1,4 @@
-name: Tao IPA SE v5.8 - zero camera transition + servo jump guard
+name: Tao IPA SE v5.9 - verified square tracking + hand rejection
 
 on:
   workflow_dispatch:
@@ -156,11 +156,11 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -d "$APP_PATH/WaterRocketDetector.mlmodelc"
           test -d "$APP_PATH/BottleDetector.mlmodelc"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 5.0" "$APP_PATH/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 40" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 5.9" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 49" "$APP_PATH/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP_PATH/Info.plist"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "5.0"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "40"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "5.9"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "49"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"

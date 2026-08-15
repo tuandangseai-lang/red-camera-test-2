@@ -289,6 +289,10 @@ final class CameraController: NSObject, ObservableObject {
     private var detectorHitStreak = 0
     private var detectorMissStreak = 0
     private var lastTrackingBounds: CGRect?
+    /// Last identity-verified geometry. Optical confidence alone is not trusted:
+    /// Vision can keep reporting 95-99% after drifting onto a hand or background.
+    private var trackingReferenceBounds: CGRect?
+    private var rejectedTrackingGeometryFrames = 0
     private var segmentationMissFrames = 0
     private var motionFilter = RocketMotionFilter()
     private var aiDetectionMisses = 0
@@ -299,7 +303,7 @@ final class CameraController: NSObject, ObservableObject {
     private var recoverySeedEstimate: RocketMotionEstimate?
     private var recoveryStartedAt: TimeInterval = 0
     private var isRecoveringLostTarget = false
-    private var recoverySearchCommand = "SEARCH_START"
+    private var recoverySearchCommand = "TRACK_HOLD"
     private var lastSearchCommandSentAt: TimeInterval = 0
     private var lastVerificationAnalysisAt: TimeInterval = 0
     private var lastTrackingAnalysisAt: TimeInterval = 0
@@ -1494,6 +1498,18 @@ final class CameraController: NSObject, ObservableObject {
                 width: cropWidth,
                 height: cropHeight
             ).intersection(guide)
+            // Never teach the personal FeaturePrint from a raw rectangle that
+            // still contains the hand. The masked path above may keep the held
+            // object, but if separation failed this frame must be photographed
+            // again instead of silently learning fingers and arm.
+            let handCells = handExclusionCells(from: pixelBuffer)
+            let cropCells = gridCells(in: crop)
+            guard handCells.intersection(cropCells).isEmpty else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.statusText = "AI thấy tay còn dính vào vật • đổi vị trí cầm rồi chụp lại"
+                }
+                return nil
+            }
             guard let selection = rawSubjectSelection(
                 from: pixelBuffer,
                 rect: crop
@@ -1631,8 +1647,8 @@ final class CameraController: NSObject, ObservableObject {
             // preserves the object pixels between and beyond the fingers.
             let spreadColumns = max(1, maximumColumn - minimumColumn)
             let spreadRows = max(1, maximumRow - minimumRow)
-            let radiusX = max(3, min(9, Int(CGFloat(spreadColumns) * 0.16)))
-            let radiusY = max(5, min(15, Int(CGFloat(spreadRows) * 0.14)))
+            let radiusX = max(4, min(12, Int(CGFloat(spreadColumns) * 0.20)))
+            let radiusY = max(6, min(18, Int(CGFloat(spreadRows) * 0.18)))
             for (centerColumn, centerRow) in zip(columns, rows) {
                 let minColumn = max(0, centerColumn - radiusX)
                 let maxColumn = min(selectionGridColumns - 1, centerColumn + radiusX)
@@ -1645,6 +1661,23 @@ final class CameraController: NSObject, ObservableObject {
                         if dx * dx + dy * dy <= 1.0 {
                             excluded.insert(row * selectionGridColumns + column)
                         }
+                    }
+                }
+            }
+
+            // Joint dots leave the palm between the fingers. Fill one compact
+            // palm ellipse too. Losing a few target pixels at the grip is safer
+            // than storing the user's hand as the target identity.
+            let palmColumn = columns.reduce(0, +) / max(1, columns.count)
+            let palmRow = rows.reduce(0, +) / max(1, rows.count)
+            let palmRadiusX = max(5, min(16, Int(CGFloat(spreadColumns) * 0.58) + 2))
+            let palmRadiusY = max(7, min(22, Int(CGFloat(spreadRows) * 0.52) + 3))
+            for row in max(0, palmRow - palmRadiusY)...min(selectionGridRows - 1, palmRow + palmRadiusY) {
+                for column in max(0, palmColumn - palmRadiusX)...min(selectionGridColumns - 1, palmColumn + palmRadiusX) {
+                    let dx = CGFloat(column - palmColumn) / CGFloat(palmRadiusX)
+                    let dy = CGFloat(row - palmRow) / CGFloat(palmRadiusY)
+                    if dx * dx + dy * dy <= 1.0 {
+                        excluded.insert(row * selectionGridColumns + column)
                     }
                 }
             }
@@ -3781,7 +3814,7 @@ final class CameraController: NSObject, ObservableObject {
         recoverySeedEstimate = nil
         recoveryStartedAt = 0
         isRecoveringLostTarget = false
-        recoverySearchCommand = "SEARCH_START"
+        recoverySearchCommand = "TRACK_HOLD"
         lastSearchCommandSentAt = 0
     }
 
@@ -3827,6 +3860,57 @@ final class CameraController: NSObject, ObservableObject {
             guard let self, !self.isStopRequested else { return }
             self.onEvent?(command)
         }
+    }
+
+    /// Reject tracker drift before coordinates reach the phone mount. Vision's
+    /// optical confidence can remain very high after the box has attached to a
+    /// hand, wall, or nearly the full image, so geometry is a separate gate.
+    private func isPlausibleTrackingGeometry(
+        _ candidate: CGRect,
+        previous: CGRect
+    ) -> Bool {
+        let frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let candidate = candidate.intersection(frame)
+        guard !candidate.isNull,
+              candidate.width >= 0.006,
+              candidate.height >= 0.006 else { return false }
+
+        let candidateArea = candidate.width * candidate.height
+        let previousArea = max(0.000_01, previous.width * previous.height)
+        let frameToFrameArea = candidateArea / previousArea
+        guard candidateArea <= 0.58,
+              (0.52...1.72).contains(frameToFrameArea) else { return false }
+
+        let previousAspect = previous.width / max(0.0001, previous.height)
+        let candidateAspect = candidate.width / max(0.0001, candidate.height)
+        let aspectRatio = max(previousAspect, candidateAspect)
+            / max(0.0001, min(previousAspect, candidateAspect))
+        guard aspectRatio <= 1.72 else { return false }
+
+        let centerJump = hypot(
+            candidate.midX - previous.midX,
+            candidate.midY - previous.midY
+        )
+        let knownSpeed = hypot(smoothedTrackingVelocity.dx, smoothedTrackingVelocity.dy)
+        let allowedJump = max(
+            0.045,
+            max(previous.width, previous.height) * 0.52
+                + min(0.10, knownSpeed * 0.08)
+        )
+        guard centerJump <= allowedJump else { return false }
+
+        if let reference = trackingReferenceBounds {
+            let referenceArea = max(0.000_01, reference.width * reference.height)
+            let referenceSide = max(reference.width, reference.height)
+            let candidateSide = max(candidate.width, candidate.height)
+            // A flying target may shrink rapidly. It must not gradually absorb
+            // 2.4x its verified area while pretending to keep the same identity.
+            if candidateArea > referenceArea * 2.40,
+               candidateSide > referenceSide * 1.48 {
+                return false
+            }
+        }
+        return true
     }
 
     private func recoveryExpectedRect(at timestamp: TimeInterval) -> CGRect? {
@@ -4217,6 +4301,8 @@ final class CameraController: NSObject, ObservableObject {
         }
         let publishedTrackID = activeTargetTrackID
         lastTrackingBounds = clippedRect
+        trackingReferenceBounds = clippedRect
+        rejectedTrackingGeometryFrames = 0
         segmentationMissFrames = 0
         aiDetectionMisses = 0
         identityGateStatus = ""
@@ -4236,7 +4322,6 @@ final class CameraController: NSObject, ObservableObject {
         processingMode = .tracking
 
         let shouldStartRecording = shouldRecordAfterVerification
-        let initialPoints = trackingTrianglePoints
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             guard !self.isStopRequested else { return }
@@ -4249,7 +4334,7 @@ final class CameraController: NSObject, ObservableObject {
             self.stage = .tracking
             self.targetTrackID = publishedTrackID
             self.targetRect = clippedRect
-            self.trackingPoints = initialPoints
+            self.trackingPoints = []
             self.predictedTargetPoint = CGPoint(x: clippedRect.midX, y: clippedRect.midY)
             self.trackingConfidence = confidence
             self.matchText = matchDescription
@@ -4299,6 +4384,22 @@ final class CameraController: NSObject, ObservableObject {
                 in: pixelBuffer,
                 rect: detection.rect
             ) ?? 0)
+        // 75% is intentional: an IdentityEvidenceMatch that fails the required
+        // photo+video votes is capped at 74%, so a single similar view can never
+        // lock a different object.
+        let requiredPersonalSimilarity = immediateReacquisitionSimilarity
+        guard personalSimilarity >= requiredPersonalSimilarity else {
+            clearPendingAIDetection()
+            publishSearchProgress(
+                message: String(
+                    format: "AI thấy %@ nhưng chỉ khớp mẫu %.0f%% / cần %.0f%%",
+                    scanSubjectKind.title.lowercased(),
+                    personalSimilarity * 100,
+                    requiredPersonalSimilarity * 100
+                )
+            )
+            return true
+        }
         // Khi bắt lại, mọi nhãn (kể cả tên lửa chuyên dụng) đều phải giống bộ
         // ảnh/video cá nhân. Không cho ảnh phản chiếu đi đường tắt bằng điểm YOLO.
         let reacquisitionSimilarity = personalSimilarity
@@ -4375,10 +4476,7 @@ final class CameraController: NSObject, ObservableObject {
     /// pattern. After one real lock, recovery is allowed across the full frame.
     private func isEligibleForInitialAcquisition(_ rect: CGRect) -> Bool {
         if isRecoveringLostTarget || hasLockedTargetInSession { return true }
-        let guide = acquisitionGuideRect.insetBy(
-            dx: -acquisitionGuideRect.width * 0.18,
-            dy: -acquisitionGuideRect.height * 0.18
-        )
+        let guide = acquisitionGuideRect
         return guide.contains(CGPoint(x: rect.midX, y: rect.midY))
     }
 
@@ -4448,44 +4546,9 @@ final class CameraController: NSObject, ObservableObject {
         // Nhánh cá nhân không phụ thuộc YOLO hay tách nền. Mỗi lần chỉ thử hai
         // cửa sổ để giữ 60 fps; sau vài frame sẽ phủ vùng giữa, trái và phải.
         // Các feature ở đây được so với crop thật của bảy ảnh người dùng.
-        if bestCandidate == nil, !contextFeatureSamples.isEmpty {
-            let searchWindows = (isRecoveringLostTarget || hasLockedTargetInSession)
-                ? [
-                    CGRect(x: 0.04, y: 0.02, width: 0.92, height: 0.96),
-                    CGRect(x: 0.12, y: 0.06, width: 0.76, height: 0.88),
-                    CGRect(x: 0.22, y: 0.10, width: 0.56, height: 0.80),
-                    CGRect(x: 0.30, y: 0.15, width: 0.40, height: 0.70),
-                    CGRect(x: 0.03, y: 0.10, width: 0.62, height: 0.82),
-                    CGRect(x: 0.35, y: 0.10, width: 0.62, height: 0.82)
-                ]
-                : [acquisitionGuideRect]
-            let stride = isRecoveringLostTarget ? 6 : 12
-            let start = ((featureFrameCounter / stride) * 2) % searchWindows.count
-            for offset in 0..<min(2, searchWindows.count) {
-                let rect = searchWindows[(start + offset) % searchWindows.count]
-                guard isEligibleForInitialAcquisition(rect) else { continue }
-                guard let feature = featurePrint(
-                    from: pixelBuffer,
-                    normalizedTopLeftRect: rect
-                ), let match = identityEvidenceMatch(
-                    to: feature,
-                    useContextSamples: true
-                ) else { continue }
-                if closestRejected == nil || match.score < closestRejected!.score {
-                    closestRejected = match
-                }
-                guard match.isAccepted else { continue }
-                if bestMatch == nil || match.score < bestMatch!.score {
-                    bestMatch = match
-                    bestCandidate = ForegroundCandidate(
-                        rect: rect,
-                        feature: feature,
-                        trianglePoints: representativeTrackingPoints(in: rect),
-                        shapeSignature: []
-                    )
-                }
-            }
-        }
+        // A search window is only a region to inspect; it is never an object
+        // box. Promoting these large windows caused the 60-98% full-frame drift
+        // observed in the live ESP32 telemetry.
         guard let candidate = bestCandidate, let match = bestMatch else {
             if let rejected = closestRejected {
                 publishSearchProgress(
@@ -4850,6 +4913,31 @@ final class CameraController: NSObject, ObservableObject {
             }
 
             let timestamp = CACurrentMediaTime()
+            guard isPlausibleTrackingGeometry(
+                targetBounds,
+                previous: previousBounds
+            ) else {
+                rejectedTrackingGeometryFrames += 1
+                trackingObservation = self.observation(fromTopLeftRect: previousBounds)
+                sequenceHandler = VNSequenceRequestHandler()
+                motionFilter.reset(rect: previousBounds, timestamp: timestamp)
+                lowConfidenceFrames += 1
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.targetRect = previousBounds
+                    self.trackingPoints = []
+                    self.predictedTargetPoint = nil
+                    self.trackingConfidence = 0
+                    self.matchText = "Hộp tracking sai hình học • servo đang giữ yên"
+                    self.onEvent?("TRACK_HOLD")
+                }
+                if rejectedTrackingGeometryFrames >= 3,
+                   timestamp > trackingGraceUntil {
+                    markTargetLost()
+                }
+                return
+            }
+            rejectedTrackingGeometryFrames = 0
             // Starting AVCaptureMovieFileOutput can briefly invalidate Vision's
             // optical coordinate history even when the physical subject has not
             // moved. Never publish that discontinuity to the ESP32: keep the last
@@ -4946,16 +5034,12 @@ final class CameraController: NSObject, ObservableObject {
                 -99,
                 min(99, estimate.velocity.dy * velocityScale)
             ).rounded())
-            // A stationary/noisy target should use its filtered center; a fast
-            // rocket should progressively use more of the Kalman lead. This
-            // avoids the old all-or-nothing prediction that made MG995 twitch.
+            // Servo follows the centre of the verified box only. A predicted
+            // point is useful for diagnostics/reacquisition, but feeding it to
+            // the mount made a wrong velocity estimate move the phone away from
+            // an otherwise centred stationary target.
             let filteredCenter = CGPoint(x: targetBounds.midX, y: targetBounds.midY)
-            let targetSpeed = hypot(estimate.velocity.dx, estimate.velocity.dy)
-            let leadBlend = min(0.84, max(0.16, targetSpeed * 0.62))
-            let servoPoint = CGPoint(
-                x: filteredCenter.x * (1 - leadBlend) + predictedPoint.x * leadBlend,
-                y: filteredCenter.y * (1 - leadBlend) + predictedPoint.y * leadBlend
-            )
+            let servoPoint = filteredCenter
             let apparentSize = Int(max(
                 1,
                 min(999, max(targetBounds.width, targetBounds.height) * 999)
@@ -4973,7 +5057,7 @@ final class CameraController: NSObject, ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.targetRect = targetBounds
-                self.trackingPoints = publishedPoints
+                self.trackingPoints = []
                 self.predictedTargetPoint = predictedPoint
                 self.trackingConfidence = confidence
                 if let appearanceText { self.matchText = appearanceText }
@@ -5019,9 +5103,9 @@ final class CameraController: NSObject, ObservableObject {
         }
         recoveryStartedAt = lostAt
         isRecoveringLostTarget = true
-        recoverySearchCommand = trajectorySearchCommand(for: recoverySeedEstimate)
-        let screenSearchVector = trajectoryScreenVector(for: recoverySeedEstimate)
-        let screenSearchAnchor = recoverySeedEstimate?.predictedPoint
+        // Safety-first recovery: AI may scan the image, but the heavy phone
+        // mount stays still until the same identity is verified again.
+        recoverySearchCommand = "TRACK_HOLD"
         lastSearchCommandSentAt = lostAt
         let searchCommand = recoverySearchCommand
         processingMode = .verifying
@@ -5031,6 +5115,8 @@ final class CameraController: NSObject, ObservableObject {
         trackingAnchorObservations.removeAll()
         trackingTrianglePoints.removeAll()
         lastTrackingBounds = nil
+        trackingReferenceBounds = nil
+        rejectedTrackingGeometryFrames = 0
         segmentationMissFrames = 0
         previousTrackingCenter = nil
         smoothedTrackingVelocity = .zero
@@ -5049,13 +5135,13 @@ final class CameraController: NSObject, ObservableObject {
             self.trackingPoints = []
             self.predictedTargetPoint = nil
             self.trackingConfidence = 0
-            self.servoSearchVector = screenSearchVector
-            self.servoSearchAnchor = screenSearchAnchor
-            self.isServoTrajectorySearching = screenSearchVector != nil
+            self.servoSearchVector = nil
+            self.servoSearchAnchor = nil
+            self.isServoTrajectorySearching = false
             self.matchText = self.aiDetector.isAvailable
-                ? "Mất mục tiêu • AI và servo đang đi tiếp theo quỹ đạo cuối"
+                ? "Mất mục tiêu • AI đang tìm lại • servo giữ yên"
                 : "Mất mục tiêu • đang tự tìm lại mô hình đa góc"
-            self.statusText = "Servo đi theo hướng bay trước đó; AI quét toàn màn hình để khóa lại"
+            self.statusText = "Chỉ chạy servo sau khi hộp vuông khớp lại đúng mục tiêu"
             self.returnToUltraWide()
             self.announce("Mất mục tiêu. Đang tự tìm lại.", kind: .warning)
             self.onEvent?(searchCommand)
@@ -5875,12 +5961,9 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
                 // nhịp thấp hơn, nên YOLO hụt vật gần hoặc chai trong suốt cũng
                 // không còn chặn toàn bộ bảy ảnh người dùng.
                 verifyWithAIDetector(pixelBuffer: pixelBuffer)
-                // Feature-print đa góc là đường dự phòng nặng. Lúc cứu mục tiêu chỉ
-                // chạy thưa để không chặn detector Core ML đang quét từng frame.
-                let personalizedStride = isRecoveringLostTarget ? 5 : 8
-                if featureFrameCounter % personalizedStride == 1 {
-                    verifyAndLock(pixelBuffer: pixelBuffer)
-                }
+                // The detector rectangle is the only legal water-rocket lock.
+                // FeaturePrint still validates that rectangle inside
+                // verifyWithAIDetector; it must never invent a full-frame box.
             } else {
                 // Người / Thú / Vật dùng Vision phân loại + bộ ảnh/video cá nhân.
                 // Khi đang tìm lại, chạy mỗi frame để ứng viên >=75% khóa tức thì.
