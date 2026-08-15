@@ -4867,10 +4867,16 @@ final class CameraController: NSObject, ObservableObject {
                 -99,
                 min(99, estimate.velocity.dy * velocityScale)
             ).rounded())
-            // Send the Kalman lead point, not the delayed box center. Firmware
-            // applies only a small residual velocity lead, so the pan/tilt
-            // starts before the rocket reaches the edge of the frame.
-            let servoPoint = predictedPoint
+            // A stationary/noisy target should use its filtered center; a fast
+            // rocket should progressively use more of the Kalman lead. This
+            // avoids the old all-or-nothing prediction that made MG995 twitch.
+            let filteredCenter = CGPoint(x: targetBounds.midX, y: targetBounds.midY)
+            let targetSpeed = hypot(estimate.velocity.dx, estimate.velocity.dy)
+            let leadBlend = min(0.84, max(0.16, targetSpeed * 0.62))
+            let servoPoint = CGPoint(
+                x: filteredCenter.x * (1 - leadBlend) + predictedPoint.x * leadBlend,
+                y: filteredCenter.y * (1 - leadBlend) + predictedPoint.y * leadBlend
+            )
             let apparentSize = Int(max(
                 1,
                 min(999, max(targetBounds.width, targetBounds.height) * 999)
@@ -5788,7 +5794,16 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             let now = CACurrentMediaTime()
             let isThermallyLimited = ProcessInfo.processInfo.thermalState == .serious
                 || ProcessInfo.processInfo.thermalState == .critical
-            let minimumInterval: TimeInterval = isThermallyLimited ? 1.0 / 15.0 : 1.0 / 30.0
+            let minimumInterval: TimeInterval
+            if isThermallyLimited {
+                minimumInterval = 1.0 / 15.0
+            } else if scanSubjectKind == .waterRocket {
+                // 45 Hz gives PAN/TILT a fresh center every ~22 ms, close to the
+                // 20 ms servo PWM period, while movie recording remains 60 fps.
+                minimumInterval = 1.0 / 45.0
+            } else {
+                minimumInterval = 1.0 / 30.0
+            }
             guard now - lastTrackingAnalysisAt >= minimumInterval else { return }
             lastTrackingAnalysisAt = now
             track(pixelBuffer: pixelBuffer)

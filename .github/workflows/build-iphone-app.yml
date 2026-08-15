@@ -1,4 +1,4 @@
-name: Tao IPA SE v5.3 - fast profiles + guarded servo
+name: Tao IPA SE v5.4 - fast profiles + real-time guarded servo
 
 on:
   workflow_dispatch:

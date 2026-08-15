@@ -61,6 +61,11 @@ constexpr float PAN_MAX_ACCEL_DPS2 = 640.0f;
 constexpr float TILT_MAX_ACCEL_DPS2 = 540.0f;
 constexpr float PAN_MAX_DECEL_DPS2 = 980.0f;
 constexpr float TILT_MAX_DECEL_DPS2 = 820.0f;
+// MG995 PAN carries the entire phone and has more static friction than TILT.
+// Once an axis is genuinely outside the center dead band, guarantee enough
+// angular speed to start moving instead of accumulating tiny invisible pulses.
+constexpr float PAN_MIN_EFFECTIVE_SPEED_DPS = 13.0f;
+constexpr float TILT_MIN_EFFECTIVE_SPEED_DPS = 8.0f;
 // The app already sends a Kalman-predicted center. Firmware adds only a small
 // residual lead so velocity is not counted twice.
 constexpr float VELOCITY_LEAD_PIXELS = 0.35f;
@@ -158,12 +163,12 @@ void writeServoAngles(bool force = false) {
   const int panPulseUs = angleToPulseUs(panAngleDeg);
   const int tiltPulseUs = angleToPulseUs(tiltAngleDeg);
   // Không ghi lại thay đổi xung rất nhỏ do nhiễu tọa độ.
-  if (force || lastPanPulseUs < 0 || abs(panPulseUs - lastPanPulseUs) >= 4) {
+  if (force || lastPanPulseUs < 0 || abs(panPulseUs - lastPanPulseUs) >= 2) {
     panServo.writeMicroseconds(panPulseUs);
     lastPanPulseUs = panPulseUs;
   }
   if (force || lastTiltPulseUs < 0 ||
-      abs(tiltPulseUs - lastTiltPulseUs) >= 4) {
+      abs(tiltPulseUs - lastTiltPulseUs) >= 2) {
     tiltServo.writeMicroseconds(tiltPulseUs);
     lastTiltPulseUs = tiltPulseUs;
   }
@@ -442,14 +447,20 @@ void updateServosFromTarget() {
   const float tiltCommand = tiltAxisActive
                                 ? shapedAxisError(tiltOffset, dynamicStopHalf)
                                 : 0.0f;
-  const float requestedPanRate =
-      panAxisActive
-          ? PAN_DIRECTION * panCommand * PAN_MAX_SPEED_DPS * speedScale
-          : 0.0f;
-  const float requestedTiltRate =
-      tiltAxisActive
-          ? TILT_DIRECTION * tiltCommand * TILT_MAX_SPEED_DPS * speedScale
-          : 0.0f;
+  float requestedPanRate = panAxisActive
+                               ? PAN_DIRECTION * panCommand *
+                                     PAN_MAX_SPEED_DPS * speedScale
+                               : 0.0f;
+  float requestedTiltRate = tiltAxisActive
+                                ? TILT_DIRECTION * tiltCommand *
+                                      TILT_MAX_SPEED_DPS * speedScale
+                                : 0.0f;
+  if (panAxisActive && fabsf(requestedPanRate) < PAN_MIN_EFFECTIVE_SPEED_DPS) {
+    requestedPanRate = copysignf(PAN_MIN_EFFECTIVE_SPEED_DPS, requestedPanRate);
+  }
+  if (tiltAxisActive && fabsf(requestedTiltRate) < TILT_MIN_EFFECTIVE_SPEED_DPS) {
+    requestedTiltRate = copysignf(TILT_MIN_EFFECTIVE_SPEED_DPS, requestedTiltRate);
+  }
 
   const bool panReversing = panRateDps * requestedPanRate < 0.0f;
   const bool tiltReversing = tiltRateDps * requestedTiltRate < 0.0f;
