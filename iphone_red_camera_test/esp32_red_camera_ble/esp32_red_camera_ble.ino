@@ -46,22 +46,23 @@ constexpr int SERVO_MAX_US = 2100;
 constexpr int IMAGE_CENTER = 500;
 // Hysteresis: ra khỏi vòng 30 thì bắt đầu bám, vào vòng 12 mới dừng.
 // Mục tiêu vẫn sát tâm nhưng servo không bật/tắt liên tục vì nhiễu tọa độ.
-constexpr int CENTER_START_HALF = 30;
-constexpr int CENTER_STOP_HALF = 12;
-constexpr int ACTIVE_TRACK_CONFIDENCE = 35;  // Đã khóa thì bám xuyên frame nhòe.
+constexpr int CENTER_START_HALF = 18;
+constexpr int CENTER_STOP_HALF = 7;
+constexpr int ACTIVE_TRACK_CONFIDENCE = 10;  // App da giu mot ID; frame nhoe van phai cap nhat toa do.
 constexpr int INITIAL_LOCK_CONFIDENCE = 70;  // Khóa mới cần ít nhất 70%.
 constexpr int REACQUIRE_CONFIDENCE = 75;  // 00...99.
 constexpr uint32_t TRACK_TIMEOUT_MS = 650;
 constexpr uint32_t CONTROL_PERIOD_MS = 20;  // Bằng chu kỳ PWM servo 50 Hz.
 
 // Tăng tốc êm, phanh nhanh hơn để không vượt tâm rồi giật ngược.
-constexpr float PAN_MAX_SPEED_DPS = 125.0f;
-constexpr float TILT_MAX_SPEED_DPS = 105.0f;
-constexpr float PAN_MAX_ACCEL_DPS2 = 260.0f;
-constexpr float TILT_MAX_ACCEL_DPS2 = 220.0f;
-constexpr float PAN_MAX_DECEL_DPS2 = 520.0f;
-constexpr float TILT_MAX_DECEL_DPS2 = 440.0f;
-constexpr float VELOCITY_LEAD_PIXELS = 2.0f;
+constexpr float PAN_MAX_SPEED_DPS = 150.0f;
+constexpr float TILT_MAX_SPEED_DPS = 120.0f;
+constexpr float PAN_MAX_ACCEL_DPS2 = 760.0f;
+constexpr float TILT_MAX_ACCEL_DPS2 = 620.0f;
+constexpr float PAN_MAX_DECEL_DPS2 = 980.0f;
+constexpr float TILT_MAX_DECEL_DPS2 = 820.0f;
+constexpr float VELOCITY_LEAD_PIXELS = 1.3f;
+constexpr uint32_t SERVO_HOME_HOLD_MS = 900;
 
 // Khi mất mục tiêu, đi tiếp theo vector bay cuối trong 0,9 giây. Nếu vẫn chưa
 // thấy, chỉ rà một dải hẹp dọc theo chính quỹ đạo đó, không quét ngẫu nhiên.
@@ -127,6 +128,7 @@ float searchPhase = 0.0f;
 uint32_t searchStartedAtMs = 0;
 uint32_t lastControlAtMs = 0;
 uint32_t lastTelemetryPrintAtMs = 0;
+uint32_t servoHomeHoldUntilMs = 0;
 
 float clampFloat(float value, float minimum, float maximum) {
   if (value < minimum) return minimum;
@@ -304,8 +306,8 @@ float shapedAxisError(int error, int stopHalf) {
       static_cast<float>(magnitude - stopHalf) /
       static_cast<float>(IMAGE_CENTER - stopHalf);
   // Khởi động nhẹ tại mép vùng giữ rồi tăng dần khi mục tiêu đi xa hơn.
-  const float responsive = 0.10f + 0.90f * powf(
-      clampFloat(normalized, 0.0f, 1.0f), 0.72f);
+  const float responsive = 0.035f + 0.965f * powf(
+      clampFloat(normalized, 0.0f, 1.0f), 0.76f);
   return (error < 0 ? -1.0f : 1.0f) * clampFloat(responsive, 0.0f, 1.0f);
 }
 
@@ -326,19 +328,22 @@ void updateServosFromTarget() {
     const float predictedTilt =
         searchOriginTiltDeg + searchTiltSpeedDps * leadSeconds;
 
-    if (searchAgeMs <= TRAJECTORY_LEAD_MS) {
-      panAngleDeg = predictedPan;
-      tiltAngleDeg = predictedTilt;
-    } else {
+    float desiredPan = predictedPan;
+    float desiredTilt = predictedTilt;
+    if (searchAgeMs > TRAJECTORY_LEAD_MS) {
       // Rà dọc quỹ đạo; phương vuông góc chỉ lệch rất nhỏ để bù sai số dự đoán.
       searchPhase += SEARCH_PHASE_SPEED * deltaSeconds;
       const float along = SEARCH_ALONG_SPAN_DEG * sinf(searchPhase);
       const float cross = SEARCH_CROSS_SPAN_DEG * sinf(searchPhase * 0.53f);
-      panAngleDeg = predictedPan + searchDirectionPan * along -
-                    searchDirectionTilt * cross;
-      tiltAngleDeg = predictedTilt + searchDirectionTilt * along +
-                     searchDirectionPan * cross;
+      desiredPan = predictedPan + searchDirectionPan * along -
+                   searchDirectionTilt * cross;
+      desiredTilt = predictedTilt + searchDirectionTilt * along +
+                    searchDirectionPan * cross;
     }
+    panAngleDeg = approachFloat(
+        panAngleDeg, desiredPan, TRAJECTORY_MAX_PAN_SPEED_DPS * deltaSeconds);
+    tiltAngleDeg = approachFloat(
+        tiltAngleDeg, desiredTilt, TRAJECTORY_MAX_TILT_SPEED_DPS * deltaSeconds);
     panAngleDeg = clampFloat(panAngleDeg, PAN_MIN_DEG, PAN_MAX_DEG);
     tiltAngleDeg = clampFloat(tiltAngleDeg, TILT_MIN_DEG, TILT_MAX_DEG);
     writeServoAngles();
@@ -400,8 +405,8 @@ void updateServosFromTarget() {
   const int dynamicStartHalf = static_cast<int>(lroundf(clampFloat(
       CENTER_START_HALF - 8.0f * smallTargetBoost +
           7.0f * largeTargetBrake,
-      20.0f,
-      38.0f)));
+      12.0f,
+      30.0f)));
   const int dynamicStopHalf = static_cast<int>(lroundf(clampFloat(
       CENTER_STOP_HALF - 4.0f * smallTargetBoost +
           5.0f * largeTargetBrake,
@@ -440,10 +445,12 @@ void updateServosFromTarget() {
           ? TILT_DIRECTION * tiltCommand * TILT_MAX_SPEED_DPS * speedScale
           : 0.0f;
 
-  const float panRateLimit = panAxisActive
+  const bool panReversing = panRateDps * requestedPanRate < 0.0f;
+  const bool tiltReversing = tiltRateDps * requestedTiltRate < 0.0f;
+  const float panRateLimit = panAxisActive && !panReversing
                                  ? PAN_MAX_ACCEL_DPS2 * speedScale
                                  : PAN_MAX_DECEL_DPS2;
-  const float tiltRateLimit = tiltAxisActive
+  const float tiltRateLimit = tiltAxisActive && !tiltReversing
                                   ? TILT_MAX_ACCEL_DPS2 * speedScale
                                   : TILT_MAX_DECEL_DPS2;
   panRateDps = approachFloat(
@@ -461,6 +468,7 @@ void updateServosFromTarget() {
 
 void acceptTrackingPacket(int x, int y, int confidence, int velocityX = 0,
                           int velocityY = 0, int targetSize = 180) {
+  if (static_cast<int32_t>(millis() - servoHomeHoldUntilMs) < 0) return;
   x = constrain(x, 0, 999);
   y = constrain(y, 0, 999);
   confidence = constrain(confidence, 0, 99);
@@ -499,16 +507,17 @@ void acceptTrackingPacket(int x, int y, int confidence, int velocityX = 0,
     const float sizeRatio = clampFloat(targetSize / 999.0f, 0.01f, 0.95f);
     const float smallTargetBoost = clampFloat(
         (0.22f - sizeRatio) / 0.18f, 0.0f, 1.0f);
-    // Vật nhỏ được giảm độ trễ lọc; khi điểm nhảy xa alpha tự tăng để bắt kịp.
-    const float baseAlpha = 0.20f + 0.10f * smallTargetBoost;
+    // App da co Kalman/Vision. ESP32 chi loc mot lop mong de khong cong them
+    // 0,2-0,5 giay tre, dac biet o truc PAN.
+    const float baseAlpha = 0.46f + 0.12f * smallTargetBoost;
     const float positionAlpha = baseAlpha +
-        (0.80f - baseAlpha) *
-            clampFloat(movement / 150.0f, 0.0f, 1.0f);
+        (0.90f - baseAlpha) *
+            clampFloat(movement / 110.0f, 0.0f, 1.0f);
     filteredTargetX += positionAlpha * (x - filteredTargetX);
     filteredTargetY += positionAlpha * (y - filteredTargetY);
-    filteredTargetSize += 0.25f * (targetSize - filteredTargetSize);
-    filteredVelocityX += 0.38f * (velocityX - filteredVelocityX);
-    filteredVelocityY += 0.38f * (velocityY - filteredVelocityY);
+    filteredTargetSize += 0.38f * (targetSize - filteredTargetSize);
+    filteredVelocityX += 0.56f * (velocityX - filteredVelocityX);
+    filteredVelocityY += 0.56f * (velocityY - filteredVelocityY);
   }
   latestTargetX = static_cast<int>(lroundf(filteredTargetX));
   latestTargetY = static_cast<int>(lroundf(filteredTargetY));
@@ -539,6 +548,16 @@ void acceptTrackingPacket(int x, int y, int confidence, int velocityX = 0,
 void handlePhoneMessage(String value) {
   value.trim();
   if (value.length() == 0) return;
+
+  if (value == "SERVO_HOME") {
+    stopSearchPattern();
+    stopTrackingTarget();
+    targetLockConfirmed = false;
+    servoHomeHoldUntilMs = millis() + SERVO_HOME_HOLD_MS;
+    centerServos();
+    Serial.println("[HOME] PAN/TILT ve tam; giu 0,9 giay roi moi nhan lai track >=70%.");
+    return;
+  }
 
   if (value.startsWith("S,")) {
     if (!trackingSessionActive) {

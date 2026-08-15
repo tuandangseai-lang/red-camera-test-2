@@ -282,6 +282,7 @@ struct ContentView: View {
 
     private func aiTrackingOverlay(in size: CGSize) -> some View {
         let rawRect = mappedRect(camera.targetRect ?? .zero, in: size)
+        let supportPoints = camera.trackingPoints.map { mappedPoint($0, in: size) }
         // Cho vật nhỏ một vùng nhìn rõ tối thiểu, nhưng tâm và kích thước thực
         // vẫn do detector/tracker quyết định chứ không còn tam giác đứng sai chỗ.
         let box = CGRect(
@@ -315,6 +316,42 @@ struct ContentView: View {
                     style: StrokeStyle(lineWidth: 3, lineCap: .square, lineJoin: .miter)
                 )
 
+                // Cac moc nay duoc lay tu foreground mask cua vat, khong phai
+                // ba diem co dinh tren bounding box. Bon diem ngoai tao duong
+                // bao; diem thu nam la tam hinh dang va noi lai thanh skeleton.
+                if supportPoints.count >= 5 {
+                    let outlinePoints = Array(supportPoints.prefix(4))
+                    var skeleton = Path()
+                    skeleton.move(to: outlinePoints[0])
+                    for point in outlinePoints.dropFirst() {
+                        skeleton.addLine(to: point)
+                    }
+                    skeleton.closeSubpath()
+                    let shapeCenter = supportPoints[4]
+                    for point in outlinePoints {
+                        skeleton.move(to: shapeCenter)
+                        skeleton.addLine(to: point)
+                    }
+                    context.stroke(
+                        skeleton,
+                        with: .color(.cyan.opacity(0.92)),
+                        style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round)
+                    )
+                    for (index, point) in supportPoints.enumerated() {
+                        let radius = index == 4 ? 4.2 : 3.2
+                        let dot = CGRect(
+                            x: point.x - radius,
+                            y: point.y - radius,
+                            width: radius * 2,
+                            height: radius * 2
+                        )
+                        context.fill(
+                            Path(ellipseIn: dot),
+                            with: .color(index == 4 ? .yellow : .cyan)
+                        )
+                    }
+                }
+
                 if let predicted = camera.predictedTargetPoint {
                     let target = mappedPoint(predicted, in: size)
                     let center = CGPoint(x: box.midX, y: box.midY)
@@ -329,7 +366,7 @@ struct ContentView: View {
                 }
             }
 
-            Text("\(camera.detectedSubjectLabel.uppercased())  \(confidence)%")
+            Text("ID:\(camera.targetTrackID)  \(camera.detectedSubjectLabel.uppercased())  \(confidence)%")
                 .font(.system(size: 11, weight: .black, design: .monospaced))
                 .foregroundStyle(.black)
                 .padding(.horizontal, 7)
@@ -894,6 +931,18 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .tint(camera.voiceAnnouncementsEnabled ? .green : .gray)
+
+                Button {
+                    camera.returnServosHome()
+                } label: {
+                    Image(systemName: "house.fill")
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(.orange)
+                .disabled(!ble.isConnected)
+                .accessibilityLabel("Đưa hai servo về vị trí Home")
             }
         }
         .foregroundStyle(.white)

@@ -124,6 +124,7 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var isARScanning = false
     @Published private(set) var targetRect: CGRect?
     @Published private(set) var trackingPoints: [CGPoint] = []
+    @Published private(set) var targetTrackID = 0
     @Published private(set) var predictedTargetPoint: CGPoint?
     @Published private(set) var trackingConfidence = 0.0
     /// Hướng chuẩn hóa trên màn hình mà app đang gửi cho ESP32 khi tìm lại mục tiêu.
@@ -256,7 +257,14 @@ final class CameraController: NSObject, ObservableObject {
     private var shouldRecordAfterVerification = true
     private var previousTrackingCenter: CGPoint?
     private var smoothedTrackingVelocity = CGVector.zero
+    // Cac diem nay la moc hinh hoc that lay tu foreground mask. Giua hai lan
+    // segmentation, chung duoc Vision tracker bien doi theo hop muc tieu.
     private var trackingTrianglePoints: [CGPoint] = []
+    private var trackingShapeSignature: [CGFloat] = []
+    private var nextTargetTrackID = 0
+    private var activeTargetTrackID = 0
+    private var detectorHitStreak = 0
+    private var detectorMissStreak = 0
     private var lastTrackingBounds: CGRect?
     private var segmentationMissFrames = 0
     private var motionFilter = RocketMotionFilter()
@@ -946,6 +954,7 @@ final class CameraController: NSObject, ObservableObject {
         stage = .verifying
         targetRect = nil
         trackingPoints = []
+        targetTrackID = 0
         predictedTargetPoint = nil
         trackingConfidence = 0
         trackingPreparationCountdown = 3
@@ -958,6 +967,7 @@ final class CameraController: NSObject, ObservableObject {
             // FeaturePrint đã có sẵn trong RAM hoặc cache của mẫu. Ba giây này chỉ
             // khóa trạng thái và hợp nhất bộ lọc, không chạy lại Vision cho 60+ ảnh.
             self.processingRect = fullFrame
+            self.activeTargetTrackID = 0
             self.featureFrameCounter = 0
             self.aiDetectionMisses = 0
             self.identityGateStatus = ""
@@ -996,6 +1006,17 @@ final class CameraController: NSObject, ObservableObject {
                 self?.processingMode = .verifying
             }
         }
+    }
+
+    /// Dua hai servo ve goc giua ngay lap tuc. Firmware giu tai Home trong mot
+    /// khoang ngan, sau do chi nhan lai muc tieu neu track hien tai du tin cay.
+    func returnServosHome() {
+        servoSearchVector = nil
+        servoSearchAnchor = nil
+        isServoTrajectorySearching = false
+        statusText = "Đang đưa PAN/TILT về tâm..."
+        onEvent?("SERVO_HOME")
+        announce("Servo về vị trí giữa.", kind: .start)
     }
 
     func reacquireTarget() {
@@ -1700,6 +1721,60 @@ final class CameraController: NSObject, ObservableObject {
             atan2($0.y - center.y, $0.x - center.x)
                 < atan2($1.y - center.y, $1.x - center.x)
         }
+    }
+
+    /// Nam moc hinh dang: dinh, phai, day, trai va tam khoi foreground.
+    /// Khac voi tam giac hop cu, cac diem nay nam tren mask cua vat that.
+    private func supportPoints(from cells: Set<Int>) -> [CGPoint] {
+        let outline = contourPoints(from: cells)
+        guard outline.count >= 4 else { return [] }
+        let center = CGPoint(
+            x: outline.map(\.x).reduce(0, +) / CGFloat(outline.count),
+            y: outline.map(\.y).reduce(0, +) / CGFloat(outline.count)
+        )
+        guard let top = outline.min(by: { $0.y < $1.y }),
+              let right = outline.max(by: { $0.x < $1.x }),
+              let bottom = outline.max(by: { $0.y < $1.y }),
+              let left = outline.min(by: { $0.x < $1.x }) else { return [] }
+        return [top, right, bottom, left, center]
+    }
+
+    /// Chu ky ban kinh 12 huong cua foreground, da chuan hoa theo kich thuoc.
+    /// No khong phai mo hinh 3D, nhung la dau van hinh dang de ngan tracker nhay
+    /// sang bang, guong hoac vat co mot goc nhin giong muc tieu.
+    private func shapeSignature(from cells: Set<Int>) -> [CGFloat] {
+        let outline = contourPoints(from: cells)
+        guard outline.count >= 8 else { return [] }
+        let center = CGPoint(
+            x: outline.map(\.x).reduce(0, +) / CGFloat(outline.count),
+            y: outline.map(\.y).reduce(0, +) / CGFloat(outline.count)
+        )
+        let bucketCount = 12
+        var radii = [CGFloat](repeating: 0, count: bucketCount)
+        for point in outline {
+            let dx = point.x - center.x
+            let dy = point.y - center.y
+            var angle = atan2(dy, dx)
+            if angle < 0 { angle += 2 * .pi }
+            let bucket = min(
+                bucketCount - 1,
+                Int(angle / (2 * .pi) * CGFloat(bucketCount))
+            )
+            radii[bucket] = max(radii[bucket], hypot(dx, dy))
+        }
+        guard let maximum = radii.max(), maximum > 0.0001 else { return [] }
+        return radii.map { $0 / maximum }
+    }
+
+    private func shapeSignatureSimilarity(
+        _ first: [CGFloat],
+        _ second: [CGFloat]
+    ) -> Double {
+        guard first.count == second.count, !first.isEmpty else { return 0 }
+        let meanError = zip(first, second)
+            .map { abs($0 - $1) }
+            .reduce(0, +) / CGFloat(first.count)
+        return Double(max(0, min(1, 1 - meanError * 1.8)))
     }
 
     private func friendlyClassificationName(_ identifier: String) -> String {
@@ -3150,6 +3225,7 @@ final class CameraController: NSObject, ObservableObject {
         let rect: CGRect
         let feature: VNFeaturePrintObservation?
         let trianglePoints: [CGPoint]
+        let shapeSignature: [CGFloat]
     }
 
     private func foregroundCandidates(
@@ -3236,7 +3312,8 @@ final class CameraController: NSObject, ObservableObject {
                 candidates.append(ForegroundCandidate(
                     rect: rect,
                     feature: feature,
-                    trianglePoints: trianglePoints(from: cells)
+                    trianglePoints: supportPoints(from: cells),
+                    shapeSignature: shapeSignature(from: cells)
                 ))
             }
             return candidates
@@ -3337,9 +3414,11 @@ final class CameraController: NSObject, ObservableObject {
 
     private func representativeTrackingPoints(in rect: CGRect) -> [CGPoint] {
         [
-            CGPoint(x: rect.midX, y: rect.minY + rect.height * 0.10),
-            CGPoint(x: rect.minX + rect.width * 0.12, y: rect.maxY - rect.height * 0.10),
-            CGPoint(x: rect.maxX - rect.width * 0.12, y: rect.maxY - rect.height * 0.10)
+            CGPoint(x: rect.midX, y: rect.minY + rect.height * 0.08),
+            CGPoint(x: rect.maxX - rect.width * 0.08, y: rect.midY),
+            CGPoint(x: rect.midX, y: rect.maxY - rect.height * 0.08),
+            CGPoint(x: rect.minX + rect.width * 0.08, y: rect.midY),
+            CGPoint(x: rect.midX, y: rect.midY)
         ]
     }
 
@@ -3348,7 +3427,7 @@ final class CameraController: NSObject, ObservableObject {
         from oldRect: CGRect,
         to newRect: CGRect
     ) -> [CGPoint] {
-        guard points.count == 3, oldRect.width > 0.001, oldRect.height > 0.001 else {
+        guard points.count >= 3, oldRect.width > 0.001, oldRect.height > 0.001 else {
             return representativeTrackingPoints(in: newRect)
         }
         return points.map { point in
@@ -3386,24 +3465,23 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func smoothedTriangle(_ points: [CGPoint]) -> [CGPoint] {
-        guard points.count == 3 else { return trackingTrianglePoints }
-        guard trackingTrianglePoints.count == 3 else {
+        guard points.count >= 3 else { return trackingTrianglePoints }
+        guard trackingTrianglePoints.count == points.count else {
             trackingTrianglePoints = points
             return points
         }
-        let aligned = alignedTriangle(points, to: trackingTrianglePoints)
         var displacement: CGFloat = 0
-        for index in 0..<3 {
+        for index in points.indices {
             displacement += hypot(
-                aligned[index].x - trackingTrianglePoints[index].x,
-                aligned[index].y - trackingTrianglePoints[index].y
+                points[index].x - trackingTrianglePoints[index].x,
+                points[index].y - trackingTrianglePoints[index].y
             )
         }
-        let alpha: CGFloat = displacement / 3 > 0.025 ? 0.82 : 0.52
-        let filtered = (0..<3).map { index in
+        let alpha: CGFloat = displacement / CGFloat(points.count) > 0.025 ? 0.82 : 0.52
+        let filtered = points.indices.map { index in
             CGPoint(
-                x: trackingTrianglePoints[index].x * (1 - alpha) + aligned[index].x * alpha,
-                y: trackingTrianglePoints[index].y * (1 - alpha) + aligned[index].y * alpha
+                x: trackingTrianglePoints[index].x * (1 - alpha) + points[index].x * alpha,
+                y: trackingTrianglePoints[index].y * (1 - alpha) + points[index].y * alpha
             )
         }
         trackingTrianglePoints = filtered
@@ -3879,6 +3957,59 @@ final class CameraController: NSObject, ObservableObject {
         return best
     }
 
+    /// Diem lien ket mot detector box vao ID dang song. Day la bien the mot
+    /// muc tieu cua y tuong ByteTrack: hop tin cay cao duoc gan truoc; hop tin
+    /// cay thap chi duoc giu neu khop quy dao + kich thuoc + ty le hinh.
+    private func continuationAssociationScore(
+        detection: WaterRocketDetection,
+        expectedRect: CGRect,
+        trackerRect: CGRect
+    ) -> Double {
+        let overlapExpected = intersectionOverUnion(detection.rect, expectedRect)
+        let overlapTracker = intersectionOverUnion(detection.rect, trackerRect)
+        let overlap = max(overlapExpected, overlapTracker)
+        let centerDistance = hypot(
+            detection.rect.midX - expectedRect.midX,
+            detection.rect.midY - expectedRect.midY
+        )
+        let scale = max(0.025, max(expectedRect.width, expectedRect.height))
+        let motionScore = exp(-Double(centerDistance / (scale * 2.4)))
+
+        let detectedArea = max(0.00001, detection.rect.width * detection.rect.height)
+        let expectedArea = max(0.00001, expectedRect.width * expectedRect.height)
+        let areaRatio = max(detectedArea, expectedArea) / min(detectedArea, expectedArea)
+        let areaScore = exp(-abs(log(Double(areaRatio))) * 0.72)
+        let detectedAspect = detection.rect.width / max(0.0001, detection.rect.height)
+        let expectedAspect = expectedRect.width / max(0.0001, expectedRect.height)
+        let aspectRatio = max(detectedAspect, expectedAspect)
+            / max(0.0001, min(detectedAspect, expectedAspect))
+        let aspectScore = exp(-abs(log(Double(aspectRatio))) * 0.90)
+
+        var directionScore = 1.0
+        let speed = hypot(smoothedTrackingVelocity.dx, smoothedTrackingVelocity.dy)
+        if speed > 0.025 {
+            let displacement = CGVector(
+                dx: detection.rect.midX - trackerRect.midX,
+                dy: detection.rect.midY - trackerRect.midY
+            )
+            let displacementLength = hypot(displacement.dx, displacement.dy)
+            if displacementLength > 0.006 {
+                let cosine = (
+                    displacement.dx * smoothedTrackingVelocity.dx
+                        + displacement.dy * smoothedTrackingVelocity.dy
+                ) / max(0.0001, displacementLength * speed)
+                directionScore = Double(max(0.05, min(1, (cosine + 1) / 2)))
+            }
+        }
+
+        return Double(overlap) * 0.31
+            + motionScore * 0.30
+            + areaScore * 0.16
+            + aspectScore * 0.11
+            + directionScore * 0.06
+            + max(0, min(1, detection.confidence)) * 0.06
+    }
+
     private func lockTarget(
         rect: CGRect,
         trianglePoints: [CGPoint],
@@ -3886,13 +4017,24 @@ final class CameraController: NSObject, ObservableObject {
         matchDescription: String,
         statusDescription: String
     ) {
+        let isContinuingExistingTrack = isRecoveringLostTarget && activeTargetTrackID > 0
         let clippedRect = rect.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
         processingRect = clippedRect
         trackingObservation = observation(fromTopLeftRect: clippedRect)
         trackingAnchorObservations.removeAll()
-        trackingTrianglePoints = trianglePoints.count == 3
+        trackingTrianglePoints = trianglePoints.count >= 3
             ? trianglePoints
             : representativeTrackingPoints(in: clippedRect)
+        if !isContinuingExistingTrack {
+            trackingShapeSignature.removeAll()
+        }
+        detectorHitStreak = 0
+        detectorMissStreak = 0
+        if !isContinuingExistingTrack {
+            nextTargetTrackID += 1
+            activeTargetTrackID = nextTargetTrackID
+        }
+        let publishedTrackID = activeTargetTrackID
         lastTrackingBounds = clippedRect
         segmentationMissFrames = 0
         aiDetectionMisses = 0
@@ -3923,6 +4065,7 @@ final class CameraController: NSObject, ObservableObject {
             self.servoSearchAnchor = nil
             self.isServoTrajectorySearching = false
             self.stage = .tracking
+            self.targetTrackID = publishedTrackID
             self.targetRect = clippedRect
             self.trackingPoints = initialPoints
             self.predictedTargetPoint = CGPoint(x: clippedRect.midX, y: clippedRect.midY)
@@ -4302,45 +4445,94 @@ final class CameraController: NSObject, ObservableObject {
                         ? motionFilter.estimate(at: CACurrentMediaTime()).filteredRect
                         : targetBounds
                     if let detection = bestAIDetection(in: pixelBuffer, near: expectedRect) {
-                        let centerDistance = hypot(
-                            detection.rect.midX - expectedRect.midX,
-                            detection.rect.midY - expectedRect.midY
-                        )
-                        let closeEnough = centerDistance <= max(
-                            0.055,
-                            max(expectedRect.width, expectedRect.height) * 1.05
-                        ) || intersectionOverUnion(detection.rect, expectedRect) > 0.18
-
                         let detectionArea = detection.rect.width * detection.rect.height
-                        let identitySupported = closeEnough
-                            || detectionArea < 0.0035
-                            || bestIdentityAlignedDetection(
-                                among: [detection],
-                                in: pixelBuffer
-                            ) != nil
+                        let association = continuationAssociationScore(
+                            detection: detection,
+                            expectedRect: expectedRect,
+                            trackerRect: targetBounds
+                        )
+                        let highConfidenceStage = detection.confidence >= 0.42
+                            && association >= 0.47
+                        let lowConfidenceStage = association >= 0.54
+                            && confirmsAIDetection(detection.rect, requiredCount: 2)
+                        var identitySupported = highConfidenceStage
+                        if !identitySupported && lowConfidenceStage {
+                            identitySupported = detectionArea < 0.0035
+                                || association >= 0.68
+                                || bestIdentityAlignedDetection(
+                                    among: [detection],
+                                    in: pixelBuffer
+                                ) != nil
+                        }
 
-                        // Kết quả gần quỹ đạo được dùng ngay. Kết quả ở xa phải
-                        // lặp lại hai lần, tránh đổi sang vật giống tên lửa.
-                        if closeEnough || (
-                            identitySupported
-                                && confirmsAIDetection(detection.rect, requiredCount: 3)
+                        // Moi 12 frame moi lay foreground mask de tranh nong may.
+                        // Chu ky hinh dang tham gia vao phep gan ID, khong chi ve UI.
+                        var foregroundSupport: ForegroundCandidate?
+                        if trackingFrameCounter % 12 == 0,
+                           detectionArea >= 0.0035 {
+                            foregroundSupport = bestForegroundCandidate(
+                                near: detection.rect,
+                                in: pixelBuffer
+                            )
+                        }
+                        let shapeSimilarity = foregroundSupport.map {
+                            shapeSignatureSimilarity(
+                                trackingShapeSignature,
+                                $0.shapeSignature
+                            )
+                        } ?? 1
+                        let shapeSupported = trackingShapeSignature.isEmpty
+                            || foregroundSupport == nil
+                            || shapeSimilarity >= 0.52
+                            || intersectionOverUnion(detection.rect, targetBounds) >= 0.36
+
+                        // Stage 1: detection manh va khop track. Stage 2: detection
+                        // yeu chi duoc noi vao cung ID sau hai frame lien tiep.
+                        if shapeSupported && (
+                            highConfidenceStage
+                                || (lowConfidenceStage && identitySupported)
                         ) {
-                            targetBounds = closeEnough
+                            targetBounds = highConfidenceStage
                                 ? detection.rect
                                 : (pendingAIDetectionRect ?? detection.rect)
-                            rawTriangle = representativeTrackingPoints(in: targetBounds)
+                            if let foregroundSupport,
+                               foregroundSupport.trianglePoints.count >= 3 {
+                                rawTriangle = foregroundSupport.trianglePoints
+                                if trackingShapeSignature.isEmpty {
+                                    trackingShapeSignature = foregroundSupport.shapeSignature
+                                } else if shapeSimilarity >= 0.52 {
+                                    trackingShapeSignature = zip(
+                                        trackingShapeSignature,
+                                        foregroundSupport.shapeSignature
+                                    ).map { pair in
+                                        pair.0 * 0.78 + pair.1 * 0.22
+                                    }
+                                }
+                            } else {
+                                rawTriangle = transformedTriangle(
+                                    trackingTrianglePoints,
+                                    from: previousBounds,
+                                    to: targetBounds
+                                )
+                            }
                             measurementConfidence = detection.confidence
                             isDetectorMeasurement = true
                             trackingObservation = self.observation(fromTopLeftRect: targetBounds)
                             sequenceHandler = VNSequenceRequestHandler()
                             aiDetectionMisses = 0
+                            detectorMissStreak = 0
+                            detectorHitStreak += 1
                             lowConfidenceFrames = 0
                             clearPendingAIDetection()
                         } else {
+                            detectorHitStreak = 0
+                            detectorMissStreak += 1
                             trackingObservation = result
                         }
                     } else {
                         aiDetectionMisses += 1
+                        detectorHitStreak = 0
+                        detectorMissStreak += 1
                         pendingAIDetectionCount = max(0, pendingAIDetectionCount - 1)
                         trackingObservation = result
                     }
@@ -4375,7 +4567,7 @@ final class CameraController: NSObject, ObservableObject {
                             targetBounds = closeEnough
                                 ? candidate.rect
                                 : (pendingAIDetectionRect ?? candidate.rect)
-                            rawTriangle = candidate.trianglePoints.count == 3
+                            rawTriangle = candidate.trianglePoints.count >= 3
                                 ? candidate.trianglePoints
                                 : representativeTrackingPoints(in: candidate.rect)
                             measurementConfidence = max(measurementConfidence, 0.72)

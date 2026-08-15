@@ -68,6 +68,8 @@ final class BLEManager: NSObject, ObservableObject {
             connectionText = "ESP32 đã dừng tìm và giữ nguyên góc"
         } else if message == "TRACKING_STARTED" {
             connectionText = "ESP32 sẵn sàng nhận dữ liệu bám"
+        } else if message == "SERVO_HOME" {
+            connectionText = "PAN/TILT đang về Home"
         }
     }
 
