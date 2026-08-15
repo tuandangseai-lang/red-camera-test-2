@@ -115,6 +115,26 @@ struct ContentView: View {
 
                 }
 
+                if camera.showsInitialAcquisitionGuide {
+                    let rect = mappedRect(camera.acquisitionGuideRect, in: geometry.size)
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .stroke(
+                            Color.yellow,
+                            style: StrokeStyle(lineWidth: 3, dash: [9, 5])
+                        )
+                        .frame(width: rect.width, height: rect.height)
+                        .position(x: rect.midX, y: rect.midY)
+                        .shadow(color: .black.opacity(0.55), radius: 3)
+
+                    Text("KHUNG NGẮM • 1/20 MÀN HÌNH")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.yellow, in: Capsule())
+                        .position(x: rect.midX, y: max(18, rect.minY - 16))
+                }
+
                 if camera.stage == .tracking,
                    camera.targetRect != nil {
                     centerTrackingZone(in: geometry.size)
@@ -995,7 +1015,11 @@ struct ContentView: View {
 
         case .verifying:
             VStack(spacing: 10) {
-                ProgressView("Tự tìm liên tục theo quỹ đạo cuối...")
+                ProgressView(
+                    camera.hasLockedTargetInSession
+                        ? "Đang bắt lại theo quỹ đạo cuối..."
+                        : "Đang khóa vật trong khung vuông..."
+                )
                     .tint(.white)
                     .foregroundStyle(.white)
                 if camera.isRecording {

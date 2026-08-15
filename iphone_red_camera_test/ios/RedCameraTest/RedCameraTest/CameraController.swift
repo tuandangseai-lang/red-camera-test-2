@@ -132,6 +132,10 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var servoSearchVector: CGPoint?
     @Published private(set) var servoSearchAnchor: CGPoint?
     @Published private(set) var isServoTrajectorySearching = false
+    /// `true` only after this tracking session has actually locked a target.
+    /// It separates initial acquisition from trajectory recovery, so the ESP32
+    /// never starts a blind search before the app knows what it is following.
+    @Published private(set) var hasLockedTargetInSession = false
     @Published private(set) var matchText = "Chưa có mẫu"
     @Published private(set) var frameAspectRatio: CGFloat = 9.0 / 16.0
     @Published private(set) var savedProfiles: [SavedScanProfile] = []
@@ -161,6 +165,25 @@ final class CameraController: NSObject, ObservableObject {
             width: width,
             height: height
         )
+    }
+
+    /// Center guide whose area is approximately 1/20 of the portrait preview.
+    /// The normalized width compensates for the 9:16 camera aspect so SwiftUI
+    /// renders a real square rather than a tall rectangle.
+    var acquisitionGuideRect: CGRect {
+        let aspect = max(0.1, frameAspectRatio)
+        let width = min(0.38, sqrt(0.05 / aspect))
+        let height = width * aspect
+        return CGRect(
+            x: (1.0 - width) / 2.0,
+            y: (1.0 - height) / 2.0,
+            width: width,
+            height: height
+        )
+    }
+
+    var showsInitialAcquisitionGuide: Bool {
+        !hasLockedTargetInSession && (stage == .ready || stage == .verifying)
     }
 
     private enum ScanKind: Equatable {
@@ -623,6 +646,7 @@ final class CameraController: NSObject, ObservableObject {
         servoSearchVector = nil
         servoSearchAnchor = nil
         isServoTrajectorySearching = false
+        hasLockedTargetInSession = false
         trackingConfidence = 0
         matchText = "Chưa có mẫu"
         activeProfileID = nil
@@ -829,6 +853,7 @@ final class CameraController: NSObject, ObservableObject {
         onEvent?("SEARCH_STOP")
         activeProfileID = profile.id
         stage = .ready
+        hasLockedTargetInSession = false
         isProfilePreparing = true
         learnedSamples = profile.referenceImages.count
         scanIsSufficient = true
@@ -854,6 +879,55 @@ final class CameraController: NSObject, ObservableObject {
         profileQueue.async { [weak self] in
             guard let self else { return }
             var cachedProfiles: [SavedScanProfile]?
+            // Fast path: decode only the seven deliberately framed photos first.
+            // This makes an old tab usable almost immediately; the 10-second
+            // video's extra views are merged below without blocking the UI.
+            let fastReferenceCount = min(
+                profile.photoReferenceCount ?? self.manualPhotoTarget,
+                profile.referenceImages.count
+            )
+            let fastContextCount = min(
+                profile.photoContextCount ?? self.manualPhotoTarget,
+                (profile.contextImages ?? []).count
+            )
+            let fastObservations: [VNFeaturePrintObservation]
+            if let encoded = profile.referenceFeaturePrints,
+               encoded.count >= fastReferenceCount {
+                fastObservations = Array(encoded.prefix(fastReferenceCount))
+                    .compactMap(self.decodeFeaturePrint)
+            } else {
+                fastObservations = Array(profile.referenceImages.prefix(fastReferenceCount))
+                    .compactMap { self.featurePrint(fromJPEGData: $0) }
+            }
+            let fastContextObservations: [VNFeaturePrintObservation]
+            if let encoded = profile.contextFeaturePrints,
+               encoded.count >= fastContextCount {
+                fastContextObservations = Array(encoded.prefix(fastContextCount))
+                    .compactMap(self.decodeFeaturePrint)
+            } else {
+                fastContextObservations = Array((profile.contextImages ?? []).prefix(fastContextCount))
+                    .compactMap { self.featurePrint(fromJPEGData: $0) }
+            }
+            if !fastObservations.isEmpty {
+                self.videoQueue.async {
+                    guard self.profileActivationID == activationID else { return }
+                    self.featureSamples = fastObservations
+                    self.contextFeatureSamples = fastContextObservations
+                    self.photoFeatureSamples = fastObservations
+                    self.videoFeatureSamples = []
+                    self.photoContextFeatureSamples = fastContextObservations
+                    self.videoContextFeatureSamples = []
+                    self.scanContextImages = Array((profile.contextImages ?? []).prefix(fastContextCount))
+                    DispatchQueue.main.async {
+                        guard self.profileActivationID == activationID else { return }
+                        self.learnedSamples = fastObservations.count
+                        self.isProfilePreparing = false
+                        self.stage = .ready
+                        self.matchText = "Đã nạp nhanh \(profile.name) • \(fastObservations.count) ảnh chính"
+                        self.statusText = "Có thể ngắm và khóa ngay • video mẫu đang được bổ sung trong nền"
+                    }
+                }
+            }
             let observations = self.decodeFeaturePrints(profile.referenceFeaturePrints)
                 ?? profile.referenceImages.compactMap { self.featurePrint(fromJPEGData: $0) }
             let contextObservations = self.decodeFeaturePrints(profile.contextFeaturePrints)
@@ -898,12 +972,6 @@ final class CameraController: NSObject, ObservableObject {
                 self.photoContextFeatureSamples = Array(contextObservations.prefix(storedPhotoContextCount))
                 self.videoContextFeatureSamples = Array(contextObservations.dropFirst(storedPhotoContextCount))
                 self.scanContextImages = profile.contextImages ?? []
-                self.processingMode = .idle
-                self.trackingObservation = nil
-                self.trackingAnchorObservations.removeAll()
-                self.clearPendingAIDetection()
-                self.clearRecoveryState()
-                self.sequenceHandler = VNSequenceRequestHandler()
                 DispatchQueue.main.async {
                     guard self.profileActivationID == activationID else { return }
                     if let cachedProfiles {
@@ -921,11 +989,12 @@ final class CameraController: NSObject, ObservableObject {
                 self.scanIsSufficient = true
                 self.scanNeedsNewAngle = false
                 self.selectedSubjectRect = nil
-                self.stage = .ready
                 self.isProfilePreparing = false
-                self.matchText = "Đã mở \(profile.name) • \(observations.count) góc"
-                self.statusText = "Mẫu đã sẵn sàng để khóa, bám và quay"
-                self.announce("Đã mở mẫu. Sẵn sàng bám mục tiêu.", kind: .success)
+                if self.stage == .ready {
+                    self.matchText = "Đã mở \(profile.name) • \(observations.count) góc"
+                    self.statusText = "Đã ghép đủ ảnh + video • sẵn sàng khóa, bám và quay"
+                    self.announce("Đã mở mẫu. Sẵn sàng bám mục tiêu.", kind: .success)
+                }
                 self.onEvent?("PROFILE_LOADED")
                 }
             }
@@ -962,6 +1031,7 @@ final class CameraController: NSObject, ObservableObject {
         let fullFrame = CGRect(x: 0, y: 0, width: 1, height: 1)
         let recordAfterLock = !isRecording
         stage = .verifying
+        hasLockedTargetInSession = false
         targetRect = nil
         trackingPoints = []
         targetTrackID = 0
@@ -981,12 +1051,10 @@ final class CameraController: NSObject, ObservableObject {
             self.featureFrameCounter = 0
             self.aiDetectionMisses = 0
             self.identityGateStatus = ""
-            // Mẫu vừa chụp đã có tọa độ đáng tin cậy. Giữ tọa độ đó cho frame
-            // xác nhận đầu tiên thay vì vứt bỏ rồi bắt YOLO tìm lại từ số 0.
-            let seedAge = CACurrentMediaTime() - self.freshScanSeedTimestamp
-            self.pendingFreshScanSeedRect = (0...15).contains(seedAge)
-                ? self.freshScanSeedRect
-                : nil
+            // Sau khi tạo mẫu, người dùng thường lùi máy ra 2–3 m. Không khóa
+            // lại tọa độ chụp cận cảnh cũ; lần khóa đầu phải đi qua khung ngắm
+            // 1/20 màn hình và bộ nhận diện hiện tại.
+            self.pendingFreshScanSeedRect = nil
             self.clearPendingAIDetection()
             self.clearRecoveryState()
             self.shouldRecordAfterVerification = recordAfterLock
@@ -1024,9 +1092,9 @@ final class CameraController: NSObject, ObservableObject {
         servoSearchVector = nil
         servoSearchAnchor = nil
         isServoTrajectorySearching = false
-        statusText = "Đang đưa PAN/TILT về tâm..."
+        statusText = "Đã về trạng thái ban đầu • PAN/TILT ở vị trí giữa"
         onEvent?("SERVO_HOME")
-        announce("Servo về vị trí giữa.", kind: .start)
+        announce("Đã về lại trạng thái ban đầu.", kind: .success)
     }
 
     func reacquireTarget() {
@@ -1077,6 +1145,7 @@ final class CameraController: NSObject, ObservableObject {
         cancelZoomSequence()
         voiceNotifier.stop()
         stage = .ready
+        hasLockedTargetInSession = false
         matchText = "ĐÃ DỪNG BÁM MỤC TIÊU"
         statusText = "Đang dừng và lưu video..."
         onEvent?("SEARCH_STOP")
@@ -4145,6 +4214,7 @@ final class CameraController: NSObject, ObservableObject {
             self.servoSearchVector = nil
             self.servoSearchAnchor = nil
             self.isServoTrajectorySearching = false
+            self.hasLockedTargetInSession = true
             self.stage = .tracking
             self.targetTrackID = publishedTrackID
             self.targetRect = clippedRect
@@ -4180,6 +4250,14 @@ final class CameraController: NSObject, ObservableObject {
                     ? "AI đang tìm ứng viên trên toàn màn hình..."
                     : identityGateStatus)
             publishSearchProgress(message: message)
+            return true
+        }
+
+        guard isEligibleForInitialAcquisition(detection.rect) else {
+            clearPendingAIDetection()
+            publishSearchProgress(
+                message: "Đưa \(scanSubjectKind.title.lowercased()) vào khung vuông giữa màn hình"
+            )
             return true
         }
 
@@ -4264,6 +4342,17 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    /// Initial acquisition is deliberately centered and never drives a search
+    /// pattern. After one real lock, recovery is allowed across the full frame.
+    private func isEligibleForInitialAcquisition(_ rect: CGRect) -> Bool {
+        if isRecoveringLostTarget || hasLockedTargetInSession { return true }
+        let guide = acquisitionGuideRect.insetBy(
+            dx: -acquisitionGuideRect.width * 0.18,
+            dy: -acquisitionGuideRect.height * 0.18
+        )
+        return guide.contains(CGPoint(x: rect.midX, y: rect.midY))
+    }
+
     /// Chuyển thẳng vùng vật ở ảnh mẫu thứ năm sang tracker. Đây là một khóa
     /// một lần, chỉ hợp lệ trong 15 giây, và vẫn kiểm tra feature của crop hiện
     /// tại để tránh khóa vào nền nếu người dùng đã đưa vật ra khỏi chỗ cũ.
@@ -4314,6 +4403,7 @@ final class CameraController: NSObject, ObservableObject {
         var bestMatch: IdentityEvidenceMatch?
         var closestRejected: IdentityEvidenceMatch?
         for candidate in foregroundCandidates(from: pixelBuffer) {
+            guard isEligibleForInitialAcquisition(candidate.rect) else { continue }
             guard let feature = candidate.feature,
                   let match = identityEvidenceMatch(to: feature) else { continue }
             if closestRejected == nil || match.score < closestRejected!.score {
@@ -4330,18 +4420,21 @@ final class CameraController: NSObject, ObservableObject {
         // cửa sổ để giữ 60 fps; sau vài frame sẽ phủ vùng giữa, trái và phải.
         // Các feature ở đây được so với crop thật của bảy ảnh người dùng.
         if bestCandidate == nil, !contextFeatureSamples.isEmpty {
-            let searchWindows = [
-                CGRect(x: 0.04, y: 0.02, width: 0.92, height: 0.96),
-                CGRect(x: 0.12, y: 0.06, width: 0.76, height: 0.88),
-                CGRect(x: 0.22, y: 0.10, width: 0.56, height: 0.80),
-                CGRect(x: 0.30, y: 0.15, width: 0.40, height: 0.70),
-                CGRect(x: 0.03, y: 0.10, width: 0.62, height: 0.82),
-                CGRect(x: 0.35, y: 0.10, width: 0.62, height: 0.82)
-            ]
+            let searchWindows = (isRecoveringLostTarget || hasLockedTargetInSession)
+                ? [
+                    CGRect(x: 0.04, y: 0.02, width: 0.92, height: 0.96),
+                    CGRect(x: 0.12, y: 0.06, width: 0.76, height: 0.88),
+                    CGRect(x: 0.22, y: 0.10, width: 0.56, height: 0.80),
+                    CGRect(x: 0.30, y: 0.15, width: 0.40, height: 0.70),
+                    CGRect(x: 0.03, y: 0.10, width: 0.62, height: 0.82),
+                    CGRect(x: 0.35, y: 0.10, width: 0.62, height: 0.82)
+                ]
+                : [acquisitionGuideRect]
             let stride = isRecoveringLostTarget ? 6 : 12
             let start = ((featureFrameCounter / stride) * 2) % searchWindows.count
-            for offset in 0..<2 {
+            for offset in 0..<min(2, searchWindows.count) {
                 let rect = searchWindows[(start + offset) % searchWindows.count]
+                guard isEligibleForInitialAcquisition(rect) else { continue }
                 guard let feature = featurePrint(
                     from: pixelBuffer,
                     normalizedTopLeftRect: rect
@@ -4442,7 +4535,9 @@ final class CameraController: NSObject, ObservableObject {
             guard !self.isStopRequested else { return }
             self.stage = .verifying
             self.matchText = message
-            self.statusText = "Không cần đưa vào khung • app đang quét toàn màn hình"
+            self.statusText = self.hasLockedTargetInSession
+                ? "Đang bắt lại theo quỹ đạo cũ trên toàn màn hình"
+                : "Đưa mục tiêu vào khung vuông giữa màn hình • servo đang giữ yên"
         }
     }
 

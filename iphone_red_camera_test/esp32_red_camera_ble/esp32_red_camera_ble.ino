@@ -101,6 +101,10 @@ volatile bool searchMode = false;
 volatile bool trackingSessionActive = false;
 volatile bool recordingActive = false;
 volatile bool targetLockConfirmed = false;
+// Search is legal only after this session has received a real TARGET_LOCKED.
+// This prevents the pan/tilt from wandering while the user is merely aiming
+// the first target inside the center guide.
+volatile bool targetLockedOnceThisSession = false;
 
 bool phoneChargeIsCut = false;
 bool chargeResumePending = false;
@@ -564,8 +568,8 @@ void handlePhoneMessage(String value) {
   }
 
   if (value.startsWith("S,")) {
-    if (!trackingSessionActive) {
-      Serial.println("[SEARCH] Bo goi tim cu vi phien tracking da dung.");
+    if (!trackingSessionActive || !targetLockedOnceThisSession) {
+      Serial.println("[SEARCH] Bo goi tim: phien nay chua tung khoa muc tieu.");
       return;
     }
     if (targetLockConfirmed) {
@@ -632,6 +636,7 @@ void handlePhoneMessage(String value) {
   if (value == "TRACKING_STARTED") {
     trackingSessionActive = true;
     targetLockConfirmed = false;
+    targetLockedOnceThisSession = false;
     stopSearchPattern();
     stopTrackingTarget();
   } else if (value == "RECORDING_STARTED") {
@@ -640,12 +645,13 @@ void handlePhoneMessage(String value) {
     recordingActive = true;
     cutPhoneChargingForRecording();
   } else if (value == "SEARCH_START" || value == "TARGET_LOST") {
-    if (!trackingSessionActive) return;
+    if (!trackingSessionActive || !targetLockedOnceThisSession) return;
     targetLockConfirmed = false;
     startSearchPattern();
   } else if (value == "TARGET_LOCKED") {
     trackingSessionActive = true;
     targetLockConfirmed = true;
+    targetLockedOnceThisSession = true;
     stopSearchPattern();
     panRateDps = 0.0f;
     tiltRateDps = 0.0f;
@@ -654,6 +660,7 @@ void handlePhoneMessage(String value) {
              value == "SCAN_CANCELLED") {
     trackingSessionActive = false;
     targetLockConfirmed = false;
+    targetLockedOnceThisSession = false;
     stopSearchPattern();
     stopTrackingTarget();
     if (value == "RECORDING_STOPPED" || value == "APP_BACKGROUND") {
@@ -676,6 +683,7 @@ class TrackerServerCallbacks : public BLEServerCallbacks {
     trackingSessionActive = false;
     recordingActive = false;
     targetLockConfirmed = false;
+    targetLockedOnceThisSession = false;
     searchMode = false;
     stopTrackingTarget();
     schedulePhoneChargingResume();

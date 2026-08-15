@@ -1,4 +1,4 @@
-name: Tao IPA SE v5.2 - contour + predictive servo
+name: Tao IPA SE v5.3 - fast profiles + guarded servo
 
 on:
   workflow_dispatch:
