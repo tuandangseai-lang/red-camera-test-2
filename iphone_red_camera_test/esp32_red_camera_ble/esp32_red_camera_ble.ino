@@ -50,9 +50,14 @@ constexpr int IMAGE_CENTER = 500;
 // Mục tiêu vẫn sát tâm nhưng servo không bật/tắt liên tục vì nhiễu tọa độ.
 constexpr int CENTER_START_HALF = 14;
 constexpr int CENTER_STOP_HALF = 6;
-constexpr int ACTIVE_TRACK_CONFIDENCE = 10;  // App da giu mot ID; frame nhoe van phai cap nhat toa do.
+constexpr int ACTIVE_TRACK_CONFIDENCE = 60;  // Under 60%: hold pose, do not chase.
 constexpr int INITIAL_LOCK_CONFIDENCE = 70;  // Khóa mới cần ít nhất 70%.
 constexpr int REACQUIRE_CONFIDENCE = 75;  // 00...99.
+constexpr int SERVO_ARM_CONFIDENCE = 75;
+constexpr int SERVO_ARM_STABLE_PACKETS = 3;
+constexpr int SERVO_ARM_MAX_PACKET_DELTA = 120;
+constexpr uint32_t START_TRACK_SETTLE_MS = 500;
+constexpr uint32_t CAMERA_TRANSITION_SETTLE_MS = 350;
 constexpr uint32_t TRACK_TIMEOUT_MS = 650;
 constexpr uint32_t CONTROL_PERIOD_MS = 20;  // Bằng chu kỳ PWM servo 50 Hz.
 
@@ -142,6 +147,11 @@ uint32_t searchStartedAtMs = 0;
 uint32_t lastControlAtMs = 0;
 uint32_t lastTelemetryPrintAtMs = 0;
 uint32_t servoHomeHoldUntilMs = 0;
+uint32_t servoSettleUntilMs = 0;
+bool servoTrackingArmed = false;
+int servoArmStablePackets = 0;
+int servoArmCandidateX = IMAGE_CENTER;
+int servoArmCandidateY = IMAGE_CENTER;
 
 float clampFloat(float value, float minimum, float maximum) {
   if (value < minimum) return minimum;
@@ -200,6 +210,15 @@ void stopTrackingTarget() {
   tiltRateDps = 0.0f;
   panAxisActive = false;
   tiltAxisActive = false;
+}
+
+void requireStableServoLock(uint32_t settleMs) {
+  servoTrackingArmed = false;
+  servoArmStablePackets = 0;
+  servoArmCandidateX = IMAGE_CENTER;
+  servoArmCandidateY = IMAGE_CENTER;
+  servoSettleUntilMs = millis() + settleMs;
+  stopTrackingTarget();
 }
 
 void startTrajectorySearch(int predictedX, int predictedY, int velocityX,
@@ -495,6 +514,28 @@ void acceptTrackingPacket(int x, int y, int confidence, int velocityX = 0,
   velocityY = constrain(velocityY, -99, 99);
   targetSize = constrain(targetSize, 1, 999);
 
+  // Movie start and zoom changes can briefly invalidate Vision coordinates.
+  // Keep the current mechanical pose until three strong, coherent packets
+  // arrive; one 14-34% frame can no longer throw the phone mount.
+  if (static_cast<int32_t>(millis() - servoSettleUntilMs) < 0) return;
+  if (!servoTrackingArmed) {
+    if (confidence < SERVO_ARM_CONFIDENCE) {
+      servoArmStablePackets = 0;
+      return;
+    }
+    const bool coherent = servoArmStablePackets == 0
+        || (abs(x - servoArmCandidateX) <= SERVO_ARM_MAX_PACKET_DELTA
+            && abs(y - servoArmCandidateY) <= SERVO_ARM_MAX_PACKET_DELTA);
+    servoArmStablePackets = coherent ? servoArmStablePackets + 1 : 1;
+    servoArmCandidateX = x;
+    servoArmCandidateY = y;
+    if (servoArmStablePackets < SERVO_ARM_STABLE_PACKETS) return;
+    servoTrackingArmed = true;
+    stopTrackingTarget();
+    Serial.printf("[SAFE] Servo mo khoa sau %d goi on dinh >=%d%%.\n",
+                  SERVO_ARM_STABLE_PACKETS, SERVO_ARM_CONFIDENCE);
+  }
+
   const int requiredConfidence = searchMode
                                      ? REACQUIRE_CONFIDENCE
                                      : (targetLockConfirmed
@@ -502,6 +543,8 @@ void acceptTrackingPacket(int x, int y, int confidence, int velocityX = 0,
                                             : INITIAL_LOCK_CONFIDENCE);
   // Khóa đầu cần 70%, tìm lại cần 75%; đã khóa thì vẫn bám qua frame nhòe.
   if (confidence < requiredConfidence) {
+    // Do not keep executing the previous off-centre rate after a weak frame.
+    stopTrackingTarget();
     if (millis() - lastTelemetryPrintAtMs >= 250) {
       lastTelemetryPrintAtMs = millis();
         Serial.printf("[TRACK] Bo goi %d%% (<%d%%); giu quy dao.\n",
@@ -574,6 +617,7 @@ void handlePhoneMessage(String value) {
     stopSearchPattern();
     stopTrackingTarget();
     targetLockConfirmed = false;
+    requireStableServoLock(SERVO_HOME_HOLD_MS);
     servoHomeHoldUntilMs = millis() + SERVO_HOME_HOLD_MS;
     centerServos();
     Serial.println("[HOME] PAN/TILT ve tam; giu 0,9 giay roi moi nhan lai track >=70%.");
@@ -651,11 +695,12 @@ void handlePhoneMessage(String value) {
     targetLockConfirmed = false;
     targetLockedOnceThisSession = false;
     stopSearchPattern();
-    stopTrackingTarget();
+    requireStableServoLock(START_TRACK_SETTLE_MS);
   } else if (value == "RECORDING_STARTED") {
     // Không xóa khóa mục tiêu khi camera bắt đầu ghi; tránh servo tìm lại vô cớ.
     trackingSessionActive = true;
     recordingActive = true;
+    requireStableServoLock(CAMERA_TRANSITION_SETTLE_MS);
     cutPhoneChargingForRecording();
   } else if (value == "SEARCH_START" || value == "TARGET_LOST") {
     if (!trackingSessionActive || !targetLockedOnceThisSession) return;
@@ -666,14 +711,16 @@ void handlePhoneMessage(String value) {
     targetLockConfirmed = true;
     targetLockedOnceThisSession = true;
     stopSearchPattern();
-    panRateDps = 0.0f;
-    tiltRateDps = 0.0f;
+    requireStableServoLock(CAMERA_TRANSITION_SETTLE_MS);
+  } else if (value == "ZOOM_098" || value == "CAMERA_ULTRAWIDE") {
+    requireStableServoLock(CAMERA_TRANSITION_SETTLE_MS);
   } else if (value == "SEARCH_STOP" || value == "RECORDING_STOPPED" ||
              value == "APP_BACKGROUND" || value == "PROFILE_RESET" ||
              value == "SCAN_CANCELLED") {
     trackingSessionActive = false;
     targetLockConfirmed = false;
     targetLockedOnceThisSession = false;
+    servoTrackingArmed = false;
     stopSearchPattern();
     stopTrackingTarget();
     if (value == "RECORDING_STOPPED" || value == "APP_BACKGROUND") {
@@ -697,6 +744,7 @@ class TrackerServerCallbacks : public BLEServerCallbacks {
     recordingActive = false;
     targetLockConfirmed = false;
     targetLockedOnceThisSession = false;
+    servoTrackingArmed = false;
     searchMode = false;
     stopTrackingTarget();
     schedulePhoneChargingResume();
