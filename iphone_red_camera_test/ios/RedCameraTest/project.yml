@@ -13,7 +13,13 @@ targets:
     type: application
     platform: iOS
     sources:
-      - path: RedCameraTest
+      - path: RedCameraTest/RedCameraTestApp.swift
+      - path: RedCameraTest/ContentView.swift
+      - path: RedCameraTest/CameraPreview.swift
+      - path: RedCameraTest/CameraController.swift
+      - path: RedCameraTest/BLEManager.swift
+      - path: RedCameraTest/VoiceNotifier.swift
+      - path: RedCameraTest/Assets.xcassets
     info:
       path: RedCameraTest/Info.plist
       properties:
