@@ -10,7 +10,7 @@ import math
 import os
 
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 MODEL_PATH = "/root/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
 
@@ -149,13 +149,7 @@ class RocketTracker:
             self.detector.input_format(),
         )
         self.display = display.Display()
-        self.byte_tracker = tracker.ByteTracker(
-            35,   # retain identity briefly when detections disappear
-            0.18,
-            0.28,
-            0.76,
-            12,
-        )
+        self.byte_tracker = self._new_byte_tracker()
         self.serial = self._open_uart()
         self.filter = AlphaBetaBox()
         self.enabled = False
@@ -175,6 +169,15 @@ class RocketTracker:
 
         # COCO fallback uses bottle only.  A converted custom model has one class.
         self.valid_class_ids = [0] if self.custom_model else [39]
+
+    def _new_byte_tracker(self):
+        return tracker.ByteTracker(
+            35,   # retain identity briefly when detections disappear
+            0.18,
+            0.28,
+            0.76,
+            12,
+        )
 
     def _open_uart(self):
         err.check_raise(pinmap.set_pin_function(UART_TX_PIN, "UART1_TX"), "UART TX mapping failed")
@@ -223,6 +226,10 @@ class RocketTracker:
                 self._write("A,{0},PONG,{1}".format(parts[1], APP_VERSION))
 
     def _clear_target(self):
+        # ByteTrack keeps identities internally. Recreate it at each ARM/STOP/
+        # HOME boundary so a previous session can never pull the gimbal toward
+        # a stale position on the first frame of a new recording.
+        self.byte_tracker = self._new_byte_tracker()
         self.target_id = -1
         self.confirm_count = 0
         self.missing_frames = 0
