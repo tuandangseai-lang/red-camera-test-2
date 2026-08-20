@@ -1,1055 +1,259 @@
-import Foundation
 import SwiftUI
-import UIKit
 
 struct ContentView: View {
-    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = CameraController()
-    @StateObject private var ble = BLEManager()
-    @State private var profileToRename: SavedScanProfile?
-    @State private var renameDraft = ""
+    @StateObject private var bluetooth = BLEManager()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        ZStack {
-            if camera.isARScanning {
-                ARScanPreview(session: camera.arSession)
-                    .ignoresSafeArea()
-            } else {
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.ignoresSafeArea()
                 CameraPreview(session: camera.session)
                     .ignoresSafeArea()
-            }
 
-            trackingOverlay
+                LinearGradient(
+                    colors: [.black.opacity(0.72), .clear, .black.opacity(0.78)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
                 .ignoresSafeArea()
+                .allowsHitTesting(false)
 
-            VStack(spacing: 12) {
-                statusPanel
-                Spacer()
+                trackingOverlay(in: geometry.size)
                 controls
             }
-            .padding()
-
-            if camera.trackingPreparationCountdown > 0 {
-                trackingPreparationCountdownOverlay
-            }
         }
-        .background(Color.black)
+        .preferredColorScheme(.dark)
         .onAppear {
-            ble.onArm = { [weak camera] in
-                camera?.arm()
-            }
-            camera.onEvent = { [weak ble] message in
-                ble?.sendStatus(message)
-            }
-            camera.start()
+            camera.prepare()
+            bluetooth.resumeFromForeground()
         }
-        .onChange(of: scenePhase) { newPhase in
-            switch newPhase {
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
             case .active:
-                ble.resumeFromForeground()
-                camera.resumeFromForeground()
+                camera.resume()
+                bluetooth.resumeFromForeground()
             case .inactive, .background:
-                camera.suspendForBackground()
-                ble.suspendForBackground()
+                camera.suspend()
+                bluetooth.suspendForBackground()
             @unknown default:
-                camera.suspendForBackground()
-                ble.suspendForBackground()
+                break
             }
         }
-        .alert(
-            "Đổi tên mẫu",
-            isPresented: Binding(
-                get: { profileToRename != nil },
-                set: { if !$0 { profileToRename = nil } }
-            )
-        ) {
-            TextField("Tên mới", text: $renameDraft)
-            Button("Lưu") {
-                if let profileToRename {
-                    camera.renameProfile(profileToRename, to: renameDraft)
-                }
-                profileToRename = nil
-            }
-            Button("Hủy", role: .cancel) {
-                profileToRename = nil
-            }
-        } message: {
-            Text("Tối đa 28 ký tự")
-        }
     }
 
-    private var trackingOverlay: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .topLeading) {
-                if camera.stage.showsGuide {
-                    let rect = mappedRect(camera.scanRect, in: geometry.size)
-                    let guideColor: Color = camera.stage.isScanning
-                        ? scanStatusColor
-                        : (camera.stage == .ready ? .green : .yellow)
-                    let diameter = min(rect.width, rect.height)
-                    Circle()
-                        .stroke(
-                            guideColor,
-                            style: StrokeStyle(
-                                lineWidth: camera.stage.isScanning ? 4 : 3,
-                                dash: camera.hasSelectedSubject ? [] : [10, 6]
-                            )
-                        )
-                        .frame(width: diameter, height: diameter)
-                        .position(x: rect.midX, y: rect.midY)
-
-                    Text(guideLabel)
-                        .font(.caption.bold())
-                        .foregroundStyle(.black)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(guideColor, in: Capsule())
-                        .position(x: rect.midX, y: max(18, rect.minY - 16))
-
-                    if camera.isCapturingReferenceVideo {
-                        referenceVideoTimerOverlay(
-                            diameter: diameter,
-                            center: CGPoint(x: rect.midX, y: rect.midY)
-                        )
-                    }
-
-                }
-
-                if camera.showsInitialAcquisitionGuide {
-                    let rect = mappedRect(camera.acquisitionGuideRect, in: geometry.size)
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .stroke(
-                            Color.yellow,
-                            style: StrokeStyle(lineWidth: 3, dash: [9, 5])
-                        )
-                        .frame(width: rect.width, height: rect.height)
-                        .position(x: rect.midX, y: rect.midY)
-                        .shadow(color: .black.opacity(0.55), radius: 3)
-
-                    Text("KHUNG NGẮM • 1/20 MÀN HÌNH")
-                        .font(.caption2.bold())
-                        .foregroundStyle(.black)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(Color.yellow, in: Capsule())
-                        .position(x: rect.midX, y: max(18, rect.minY - 16))
-                }
-
-                if camera.stage == .tracking,
-                   camera.targetRect != nil {
-                    centerTrackingZone(in: geometry.size)
-                    aiTrackingOverlay(in: geometry.size)
-                }
-
-                if camera.isServoTrajectorySearching,
-                   let vector = camera.servoSearchVector {
-                    servoTrajectorySearchOverlay(vector: vector, in: geometry.size)
-                }
-            }
-        }
-        .allowsHitTesting(false)
-    }
-
-    /// Tâm bám nhỏ giúp người dùng thấy đúng điểm servo đang đưa mục tiêu về.
-    /// Overlay SwiftUI này không xuất hiện trong video được lưu.
-    private func centerTrackingZone(in size: CGSize) -> some View {
-        let diameter = max(48.0, min(size.width, size.height) * 0.10)
-        return ZStack {
-            Circle()
-                .stroke(
-                    Color.white.opacity(0.52),
-                    style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])
-                )
-            Circle()
-                .fill(Color.white.opacity(0.82))
-                .frame(width: 5, height: 5)
-        }
-            .frame(width: diameter, height: diameter)
-            .position(x: size.width / 2, y: size.height / 2)
-            .allowsHitTesting(false)
-    }
-
-    /// Lớp AR chỉ nằm trong SwiftUI preview. Video được AVCaptureMovieFileOutput ghi
-    /// trực tiếp từ camera nên mũi tên và nhãn tìm không xuất hiện trong file lưu.
-    private func servoTrajectorySearchOverlay(
-        vector: CGPoint,
-        in size: CGSize
-    ) -> some View {
-        let magnitude = max(0.001, hypot(vector.x, vector.y))
-        let dx = vector.x / magnitude
-        let dy = vector.y / magnitude
-        let angle = Angle.radians(Double(atan2(dy, dx)) + .pi / 2)
-        let anchor = camera.servoSearchAnchor ?? CGPoint(x: 0.5, y: 0.45)
-        let safeAnchor = CGPoint(
-            x: min(0.78, max(0.22, anchor.x)),
-            y: min(0.70, max(0.25, anchor.y))
-        )
-        let base = mappedPoint(safeAnchor, in: size)
-        let travel = min(92.0, max(64.0, min(size.width, size.height) * 0.16))
-        let arrowPoint = CGPoint(
-            x: min(size.width - 42, max(42, base.x + dx * travel)),
-            y: min(size.height - 130, max(105, base.y + dy * travel))
-        )
-
-        return ZStack(alignment: .topLeading) {
-            Canvas { context, _ in
-                var trajectory = Path()
-                trajectory.move(to: base)
-                trajectory.addLine(to: arrowPoint)
-                context.stroke(
-                    trajectory,
-                    with: .color(.cyan.opacity(0.82)),
-                    style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: [7, 6])
-                )
-
-                let centerDot = CGRect(
-                    x: base.x - 5,
-                    y: base.y - 5,
-                    width: 10,
-                    height: 10
-                )
-                context.fill(Path(ellipseIn: centerDot), with: .color(.cyan))
-            }
-
-            ZStack {
-                Circle()
-                    .fill(Color.blue.opacity(0.92))
-                Circle()
-                    .stroke(Color.white.opacity(0.88), lineWidth: 2)
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 28, weight: .black))
-                    .foregroundStyle(.white)
-                    .rotationEffect(angle)
-            }
-            .frame(width: 58, height: 58)
-            .shadow(color: .cyan.opacity(0.85), radius: 10)
-            .position(arrowPoint)
-
-            HStack(spacing: 5) {
-                Circle()
-                    .fill(Color.cyan)
-                    .frame(width: 7, height: 7)
-                Text("ĐANG TÌM")
-                    .font(.system(size: 11, weight: .black, design: .rounded))
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(.black.opacity(0.74), in: Capsule())
-            .overlay(Capsule().stroke(Color.cyan.opacity(0.75), lineWidth: 1))
-            .position(
-                x: min(size.width - 78, max(78, arrowPoint.x)),
-                y: min(size.height - 94, arrowPoint.y + 46)
-            )
-        }
-        .transition(.scale(scale: 0.82).combined(with: .opacity))
-        .animation(.easeOut(duration: 0.18), value: camera.isServoTrajectorySearching)
-        .allowsHitTesting(false)
-    }
-
-    private var subjectTapLayer: some View {
-        GeometryReader { geometry in
-            Color.clear
-                .contentShape(Rectangle())
-                .gesture(
-                    SpatialTapGesture()
-                        .onEnded { value in
-                            camera.selectSubject(
-                                at: normalizedPoint(value.location, in: geometry.size)
-                            )
-                        }
-                )
-        }
-    }
-
-    private func subjectSpotlight(maskImage: UIImage, in size: CGSize) -> some View {
-        ZStack {
-            Color.black.opacity(0.56)
-            Image(uiImage: maskImage)
-                .resizable()
-                .scaledToFill()
-                .frame(width: size.width, height: size.height)
-                .clipped()
-                .luminanceToAlpha()
-                .blendMode(.destinationOut)
-        }
-        .compositingGroup()
-        .allowsHitTesting(false)
-    }
-
-    private func subjectContourOverlay(
-        points: [CGPoint],
-        in size: CGSize
-    ) -> some View {
-        Canvas { context, _ in
-            let mapped = points.map { mappedPoint($0, in: size) }
-            guard mapped.count >= 3 else { return }
-            context.addFilter(.shadow(color: .mint.opacity(0.55), radius: 4))
-            let outline = smoothClosedPath(mapped)
-            context.stroke(
-                outline,
-                with: .color(.mint.opacity(0.42)),
-                style: StrokeStyle(lineWidth: 5.0, lineCap: .round, lineJoin: .round)
-            )
-            context.stroke(
-                outline,
-                with: .color(.white.opacity(0.88)),
-                style: StrokeStyle(lineWidth: 1.35, lineCap: .round, lineJoin: .round)
-            )
-        }
-        .allowsHitTesting(false)
-    }
-
-    private func aiTrackingOverlay(in size: CGSize) -> some View {
-        let rawRect = mappedRect(camera.targetRect ?? .zero, in: size)
-        let side = max(40, max(rawRect.width, rawRect.height) + 10)
-        let box = CGRect(
-            x: rawRect.midX - side / 2,
-            y: rawRect.midY - side / 2,
-            width: side,
-            height: side
-        )
-        let confidence = Int(max(0, min(1, camera.trackingConfidence)) * 100)
-
-        return ZStack(alignment: .topLeading) {
-            Canvas { context, _ in
-                context.addFilter(.shadow(color: .green.opacity(0.92), radius: 5))
-                let corner = min(22.0, max(10.0, min(box.width, box.height) * 0.23))
-                var path = Path()
-                path.move(to: CGPoint(x: box.minX, y: box.minY + corner))
-                path.addLine(to: CGPoint(x: box.minX, y: box.minY))
-                path.addLine(to: CGPoint(x: box.minX + corner, y: box.minY))
-                path.move(to: CGPoint(x: box.maxX - corner, y: box.minY))
-                path.addLine(to: CGPoint(x: box.maxX, y: box.minY))
-                path.addLine(to: CGPoint(x: box.maxX, y: box.minY + corner))
-                path.move(to: CGPoint(x: box.maxX, y: box.maxY - corner))
-                path.addLine(to: CGPoint(x: box.maxX, y: box.maxY))
-                path.addLine(to: CGPoint(x: box.maxX - corner, y: box.maxY))
-                path.move(to: CGPoint(x: box.minX + corner, y: box.maxY))
-                path.addLine(to: CGPoint(x: box.minX, y: box.maxY))
-                path.addLine(to: CGPoint(x: box.minX, y: box.maxY - corner))
-                context.stroke(
-                    path,
-                    with: .color(.green),
-                    style: StrokeStyle(lineWidth: 3, lineCap: .square, lineJoin: .miter)
-                )
-
-                // Deliberately show one square only. A decorative contour or
-                // prediction arrow must not look like a second target.
-            }
-
-            Text("ID:\(camera.targetTrackID)  \(camera.detectedSubjectLabel.uppercased())  \(confidence)%")
-                .font(.system(size: 11, weight: .black, design: .monospaced))
-                .foregroundStyle(.black)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 4)
-                .background(Color.green)
-                .position(
-                    x: max(74, min(size.width - 74, box.minX + 74)),
-                    y: max(14, box.minY - 12)
-                )
-        }
-        .allowsHitTesting(false)
-    }
-
-    private func smoothClosedPath(_ points: [CGPoint]) -> Path {
-        var path = Path()
-        guard let first = points.first, let last = points.last else { return path }
-        let firstMidpoint = CGPoint(x: (last.x + first.x) / 2, y: (last.y + first.y) / 2)
-        path.move(to: firstMidpoint)
-        for index in points.indices {
-            let current = points[index]
-            let next = points[(index + 1) % points.count]
-            let midpoint = CGPoint(x: (current.x + next.x) / 2, y: (current.y + next.y) / 2)
-            path.addQuadCurve(to: midpoint, control: current)
-        }
-        path.closeSubpath()
-        return path
-    }
-
-    private var scanProgressRing: some View {
-        let displayedProgress = camera.scanHasConfirmedTarget
-            ? camera.scanProgress
-            : camera.targetConfirmationProgress
-        let progress = max(0, min(displayedProgress, 1))
-        let color = scanStatusColor
-
-        return ZStack {
-            Circle()
-                .fill(.black.opacity(0.68))
-            Circle()
-                .stroke(.white.opacity(0.22), lineWidth: 7)
-            Circle()
-                .trim(from: 0, to: progress)
-                .stroke(color, style: StrokeStyle(lineWidth: 7, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-
-            VStack(spacing: 1) {
-                if camera.scanIsSufficient {
-                    Image(systemName: "checkmark")
-                        .font(.title2.bold())
-                } else {
-                    Text("\(Int(progress * 100))%")
-                        .font(.headline.monospacedDigit())
-                }
-                Text(
-                    camera.scanIsSufficient
-                        ? "ĐÃ ĐỦ"
-                        : (camera.scanHasConfirmedTarget ? "7 ẢNH" : "XÁC NHẬN")
-                )
-                    .font(.system(size: 9, weight: .bold))
-            }
-            .foregroundStyle(color)
-        }
-        .frame(width: 76, height: 76)
-        .shadow(color: color.opacity(0.45), radius: 8)
-    }
-
-    private var trackingPreparationCountdownOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.50)
-                .ignoresSafeArea()
-
-            VStack(spacing: 12) {
-                Text("\(camera.trackingPreparationCountdown)")
-                    .font(.custom("Arial-BoldMT", size: 112))
-                    .foregroundStyle(.white)
-                    .contentTransition(.numericText())
-                    .shadow(color: .cyan.opacity(0.85), radius: 18)
-
-                Text("ĐANG GHÉP DỮ LIỆU TRACKING")
-                    .font(.subheadline.weight(.black))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(.black.opacity(0.68), in: Capsule())
-            }
-        }
-        .transition(.opacity.combined(with: .scale(scale: 0.96)))
-        .animation(.easeInOut(duration: 0.18), value: camera.trackingPreparationCountdown)
-        .allowsHitTesting(false)
-    }
-
-    private func referenceVideoTimerOverlay(
-        diameter: CGFloat,
-        center: CGPoint
-    ) -> some View {
-        return TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
-            let startedAt = camera.referenceVideoDisplayStartedAt ?? timeline.date
-            let elapsed = max(0, timeline.date.timeIntervalSince(startedAt))
-            let progress = max(0, min(elapsed / 10.0, 1))
-            let secondsLeft = max(0, 10.0 - elapsed)
-
-            ZStack {
-                Circle()
-                    .stroke(Color.black.opacity(0.56), lineWidth: 9)
-                Circle()
-                    .trim(from: 0, to: progress)
-                    .stroke(
-                        Color.red,
-                        style: StrokeStyle(lineWidth: 7, lineCap: .round)
-                    )
-                    .rotationEffect(.degrees(-90))
-
-                Text(String(format: "%.1f s", secondsLeft))
-                    .font(.custom("Arial-BoldMT", size: 15))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color.red.opacity(0.94), in: Capsule())
-            }
-        }
-        .frame(width: diameter + 14, height: diameter + 14)
-        .position(center)
-        .transition(.scale(scale: 0.88).combined(with: .opacity))
-        .allowsHitTesting(false)
-    }
-
-    private var scanStatusColor: Color {
-        if camera.scanIsSufficient { return .green }
-        if camera.scanNeedsNewAngle { return .orange }
-        if camera.scanHasConfirmedTarget { return .cyan }
-        return .yellow
-    }
-
-    private func scanRingX(for rect: CGRect, viewWidth: CGFloat) -> CGFloat {
-        let right = rect.maxX + 46
-        if right <= viewWidth - 40 { return right }
-        return max(40, rect.minX - 46)
-    }
-
-    private func crystalMesh(in rect: CGRect) -> some View {
-        Canvas { context, _ in
-            let columns = camera.crystalGridColumns
-            let rows = camera.crystalGridRows
-            let cellWidth = rect.width / CGFloat(columns)
-            let cellHeight = rect.height / CGFloat(rows)
-            context.addFilter(.shadow(color: .cyan.opacity(0.65), radius: 2))
-
-            for index in camera.crystalCells {
-                let column = index % columns
-                let row = index / columns
-                let tile = CGRect(
-                    x: rect.minX + CGFloat(column) * cellWidth,
-                    y: rect.minY + CGFloat(row) * cellHeight,
-                    width: cellWidth + 0.7,
-                    height: cellHeight + 0.7
-                ).insetBy(dx: 0.35, dy: 0.35)
-
-                var first = Path()
-                first.move(to: CGPoint(x: tile.minX, y: tile.minY))
-                first.addLine(to: CGPoint(x: tile.maxX, y: tile.minY))
-                first.addLine(to: CGPoint(x: tile.minX, y: tile.maxY))
-                first.closeSubpath()
-
-                var second = Path()
-                second.move(to: CGPoint(x: tile.maxX, y: tile.minY))
-                second.addLine(to: CGPoint(x: tile.maxX, y: tile.maxY))
-                second.addLine(to: CGPoint(x: tile.minX, y: tile.maxY))
-                second.closeSubpath()
-
-                let firstColor: Color = index.isMultiple(of: 3) ? .mint : .cyan
-                let secondColor: Color = index.isMultiple(of: 2) ? .blue : .teal
-                let depth = camera.crystalDepths[index] ?? 0.5
-                let nearOpacity = 0.82 - depth * 0.28
-                context.fill(first, with: .color(firstColor.opacity(nearOpacity)))
-                context.fill(second, with: .color(secondColor.opacity(nearOpacity * 0.92)))
-                context.stroke(first, with: .color(.white.opacity(0.72)), lineWidth: 0.65)
-                context.stroke(second, with: .color(.cyan.opacity(0.85)), lineWidth: 0.55)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.easeInOut(duration: 0.28), value: camera.crystalCells.count)
-        .allowsHitTesting(false)
-    }
-
-    private func crystalVolumeMesh(in rect: CGRect) -> some View {
-        Canvas { context, _ in
-            context.addFilter(.shadow(color: .cyan.opacity(0.50), radius: 2.5))
-            for facet in camera.crystalFacets3D {
-                func mapped(_ point: CGPoint) -> CGPoint {
-                    CGPoint(
-                        x: rect.minX + point.x * rect.width,
-                        y: rect.minY + point.y * rect.height
-                    )
-                }
-
-                var triangle = Path()
-                triangle.move(to: mapped(facet.a))
-                triangle.addLine(to: mapped(facet.b))
-                triangle.addLine(to: mapped(facet.c))
-                triangle.closeSubpath()
-
-                let light = max(0.15, min(1.0, facet.light))
-                let depthTint = max(0, min(1, (facet.depth + 0.8) / 1.6))
-                let color = Color(
-                    hue: 0.48 + depthTint * 0.10,
-                    saturation: 0.78,
-                    brightness: 0.42 + light * 0.52
-                )
-                context.fill(triangle, with: .color(color.opacity(0.52 + light * 0.30)))
-                context.stroke(
-                    triangle,
-                    with: .color(.white.opacity(0.20 + light * 0.48)),
-                    lineWidth: 0.55
-                )
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.easeInOut(duration: 0.34), value: camera.crystalFacets3D.count)
-        .allowsHitTesting(false)
-    }
-
-    private var guideLabel: String {
-        switch camera.stage {
-        case .idle, .scanningNear, .waitingFar, .scanningFar, .waitingAround, .scanningAround:
-            if camera.stage.isScanning {
-                return camera.scanHasConfirmedTarget
-                    ? (camera.isAddingReferencePhoto
-                       ? "ĐÃ XÁC NHẬN ẢNH BỔ SUNG"
-                       : "ĐÃ XÁC NHẬN \(camera.scanSubjectKind.title.uppercased()) • \(camera.scanViewpointCount)/\(camera.referencePhotoTarget)")
-                    : (camera.isAddingReferencePhoto
-                       ? "CHỤP THÊM \(camera.scanSubjectKind.title.uppercased())"
-                       : "ĐẶT \(camera.scanSubjectKind.title.uppercased()) TRONG VÒNG TRÒN")
-            }
-            return "CHỌN LOẠI • TẠO MẪU 7 ẢNH"
-        case .ready, .verifying, .lost:
-            return "ĐẶT \(camera.scanSubjectKind.title.uppercased()) VÀO ĐÂY"
-        case .tracking:
-            return ""
-        }
-    }
-
-    private func mappedRect(_ normalized: CGRect, in viewSize: CGSize) -> CGRect {
-        let sourceWidth = max(0.1, camera.frameAspectRatio)
-        let sourceHeight: CGFloat = 1.0
-        let scale = max(viewSize.width / sourceWidth, viewSize.height / sourceHeight)
-        let displayedWidth = sourceWidth * scale
-        let displayedHeight = sourceHeight * scale
-        let offsetX = (viewSize.width - displayedWidth) / 2.0
-        let offsetY = (viewSize.height - displayedHeight) / 2.0
-        return CGRect(
-            x: offsetX + normalized.minX * displayedWidth,
-            y: offsetY + normalized.minY * displayedHeight,
-            width: normalized.width * displayedWidth,
-            height: normalized.height * displayedHeight
-        )
-    }
-
-    private func mappedPoint(_ normalized: CGPoint, in viewSize: CGSize) -> CGPoint {
-        let mapped = mappedRect(
-            CGRect(x: normalized.x, y: normalized.y, width: 0, height: 0),
-            in: viewSize
-        )
-        return mapped.origin
-    }
-
-    private func normalizedPoint(_ point: CGPoint, in viewSize: CGSize) -> CGPoint {
-        let sourceWidth = max(0.1, camera.frameAspectRatio)
-        let scale = max(viewSize.width / sourceWidth, viewSize.height)
-        let displayedWidth = sourceWidth * scale
-        let displayedHeight = scale
-        let offsetX = (viewSize.width - displayedWidth) / 2.0
-        let offsetY = (viewSize.height - displayedHeight) / 2.0
-        return CGPoint(
-            x: min(1, max(0, (point.x - offsetX) / displayedWidth)),
-            y: min(1, max(0, (point.y - offsetY) / displayedHeight))
-        )
-    }
-
-    private var statusPanel: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 9) {
-                Label(
-                    ble.connectionText,
-                    systemImage: ble.isConnected
-                        ? "antenna.radiowaves.left.and.right"
-                        : "bolt.horizontal.circle"
-                )
-                .lineLimit(1)
-                Spacer(minLength: 4)
-                Label(
-                    camera.stage.isScanning
-                        ? (camera.isAddingReferencePhoto
-                           ? "+1"
-                           : "\(camera.scanViewpointCount)/\(camera.referencePhotoTarget)")
-                        : "\(camera.learnedSamples)",
-                    systemImage: camera.stage.isScanning
-                        ? "photo.stack.fill"
-                        : "square.stack.3d.up"
-                )
-                Text(camera.zoomText)
-                    .monospacedDigit()
-            }
-            .font(.caption.bold())
-
-            Text(camera.statusText)
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(2)
-
-            if camera.stage.isScanning
-                || camera.stage == .verifying
-                || camera.stage == .tracking
-                || camera.stage == .lost {
-                Text(camera.matchText)
-                    .font(.caption)
-                    .foregroundStyle(.cyan)
-                    .lineLimit(1)
-            }
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13))
-        .overlay {
-            RoundedRectangle(cornerRadius: 13)
-                .stroke(.white.opacity(0.12), lineWidth: 0.7)
-        }
-    }
-
-    @ViewBuilder
     private var controls: some View {
-        VStack(spacing: 8) {
-            if camera.stage.isScanning {
-                VStack(spacing: 10) {
-                    HStack(spacing: 8) {
-                        Image(
-                            systemName: camera.scanIsSufficient
-                                ? "checkmark.circle.fill"
-                                : (camera.scanNeedsNewAngle
-                                   ? "exclamationmark.circle.fill"
-                                   : "camera.viewfinder")
-                        )
-                        .foregroundStyle(scanStatusColor)
-                        Text(camera.scanGuidanceText)
-                            .font(.footnote.weight(.semibold))
-                            .lineLimit(2)
-                            .minimumScaleFactor(0.78)
-                        Spacer(minLength: 4)
-                        Text(camera.isAddingReferencePhoto
-                             ? "+1"
-                             : "\(camera.scanViewpointCount)/\(camera.referencePhotoTarget)")
-                            .font(.caption.monospacedDigit().bold())
-                    }
-
-                    if !camera.isAddingReferencePhoto {
-                        HStack(spacing: 7) {
-                            ForEach(0..<camera.referencePhotoTarget, id: \.self) { index in
-                                Circle()
-                                    .fill(
-                                        index < camera.scanViewpointCount
-                                            ? Color.cyan
-                                            : Color.white.opacity(0.20)
-                                    )
-                                    .frame(width: 9, height: 9)
-                            }
-                        }
-                    }
-
-                    HStack {
-                        Button(role: .cancel) {
-                            camera.cancelShapeScan()
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.headline.bold())
-                                .frame(width: 42, height: 42)
-                                .background(.black.opacity(0.42), in: Circle())
-                        }
-                        .buttonStyle(.plain)
-
-                        Spacer()
-
-                        Button {
-                            if !camera.isAddingReferencePhoto,
-                               camera.scanViewpointCount >= camera.referencePhotoTarget {
-                                camera.startReferenceVideoCapture()
-                            } else {
-                                camera.captureManualReferencePhoto()
-                            }
-                        } label: {
-                            ZStack {
-                                Circle()
-                                    .fill(
-                                        !camera.isAddingReferencePhoto
-                                            && camera.scanViewpointCount >= camera.referencePhotoTarget
-                                            ? Color.red
-                                            : Color.white
-                                    )
-                                    .frame(width: 76, height: 76)
-                                Circle()
-                                    .stroke(.black.opacity(0.70), lineWidth: 3)
-                                    .frame(width: 64, height: 64)
-                                if !camera.isAddingReferencePhoto,
-                                   camera.scanViewpointCount >= camera.referencePhotoTarget {
-                                    Image(systemName: camera.isCapturingReferenceVideo
-                                          ? "record.circle.fill"
-                                          : "video.fill")
-                                        .font(.title2.bold())
-                                        .foregroundStyle(.white)
-                                } else if camera.isProcessingReferencePhoto {
-                                    ProgressView()
-                                        .tint(.black)
-                                }
-                            }
-                            .shadow(color: .black.opacity(0.35), radius: 5, y: 2)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(
-                            camera.isCapturingReferenceVideo
-                                || camera.isProcessingReferencePhoto
-                        )
-                        .accessibilityLabel(
-                            !camera.isAddingReferencePhoto
-                                && camera.scanViewpointCount >= camera.referencePhotoTarget
-                                ? "Quay video mẫu \(camera.scanSubjectKind.title) 10 giây"
-                                : (camera.isAddingReferencePhoto
-                                   ? "Chụp thêm ảnh đối chứng \(camera.scanSubjectKind.title)"
-                                   : "Chụp ảnh mẫu \(camera.scanSubjectKind.title)")
-                        )
-
-                        Spacer()
-
-                        subjectKindIcon(camera.scanSubjectKind, size: 22)
-                            .foregroundStyle(.cyan)
-                            .frame(width: 42, height: 42)
-                    }
-                }
-                .foregroundStyle(.white)
-            } else {
-                if !camera.savedProfiles.isEmpty {
-                    profileTabs
-                }
-                compactSettings
-                actionButtons
-            }
+        VStack(spacing: 0) {
+            topStatus
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+            Spacer()
+            bottomControls
+                .padding(.horizontal, 18)
+                .padding(.bottom, 18)
         }
-        .padding(8)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(.white.opacity(0.12), lineWidth: 0.7)
-        }
-        .animation(
-            .spring(response: 0.32, dampingFraction: 0.86),
-            value: camera.stage
-        )
-        .animation(
-            .easeInOut(duration: 0.22),
-            value: camera.activeProfileID
-        )
     }
 
-    private var profileTabs: some View {
-        HStack(spacing: 6) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(camera.savedProfiles) { profile in
-                        let isActive = camera.activeProfileID == profile.id
-                        Button {
-                            camera.activateProfile(profile)
-                        } label: {
-                            HStack(spacing: 5) {
-                                if isActive && camera.isProfilePreparing {
-                                    ProgressView()
-                                        .controlSize(.mini)
-                                        .tint(.black)
-                                } else {
-                                    subjectKindIcon(profile.subjectKind, size: 14)
-                                }
-                                Text(profile.shortName)
-                                    .lineLimit(1)
-                            }
-                            .font(.caption.bold())
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 7)
-                            .foregroundStyle(isActive ? .black : .white)
-                            .background(
-                                isActive ? Color.cyan : Color.white.opacity(0.10),
-                                in: Capsule()
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(camera.isProfilePreparing)
+    private var topStatus: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(bluetooth.isConnected ? Color.green.opacity(0.22) : Color.orange.opacity(0.22))
+                        .frame(width: 38, height: 38)
+                    Image(systemName: "airplane.departure")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(bluetooth.isConnected ? .green : .orange)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("SE • MAIX AI")
+                        .font(.custom("Arial", size: 15).weight(.bold))
+                    Text(bluetooth.connectionText)
+                        .font(.custom("Arial", size: 12))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .lineLimit(1)
+                }
+                Spacer()
+                if camera.isRecording {
+                    HStack(spacing: 6) {
+                        Circle().fill(.red).frame(width: 8, height: 8)
+                        Text(recordingTime)
+                            .font(.custom("Arial", size: 14).monospacedDigit().weight(.bold))
                     }
-                }
-            }
-
-            if let activeID = camera.activeProfileID,
-               let active = camera.savedProfiles.first(where: { $0.id == activeID }) {
-                Button {
-                    renameDraft = active.name
-                    profileToRename = active
-                } label: {
-                    Image(systemName: "pencil")
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .tint(.cyan)
-                .accessibilityLabel("Đổi tên mẫu")
-
-                Button(role: .destructive) {
-                    camera.deleteProfile(active)
-                } label: {
-                    Image(systemName: "trash")
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .tint(.red)
-                .accessibilityLabel("Xóa mẫu đang chọn")
-            }
-        }
-        .transition(.move(edge: .bottom).combined(with: .opacity))
-    }
-
-    private var compactSettings: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 5) {
-                ForEach(ScanSubjectKind.allCases) { kind in
-                    let isSelected = camera.scanSubjectKind == kind
-                    Button {
-                        camera.selectSubjectKind(kind)
-                    } label: {
-                        subjectKindIcon(kind, size: 22)
-                        .foregroundStyle(isSelected ? .black : .white)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 38)
-                        .background(
-                            isSelected ? Color.cyan : Color.white.opacity(0.09),
-                            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(camera.isRecording || camera.stage.isScanning)
-                    .accessibilityLabel(kind.title)
-                    .help(kind.title)
+                } else {
+                    Text("0,5× • 4K")
+                        .font(.custom("Arial", size: 13).weight(.bold))
+                        .foregroundStyle(.white.opacity(0.82))
                 }
             }
 
             HStack(spacing: 9) {
-                Image(systemName: "viewfinder")
-                    .foregroundStyle(.yellow)
-                Slider(value: $camera.scanBoxScale, in: 0.48...0.92)
-                    .tint(.yellow)
-                Button {
-                    camera.voiceAnnouncementsEnabled.toggle()
-                } label: {
-                    Image(systemName: camera.voiceAnnouncementsEnabled
-                          ? "speaker.wave.2.fill"
-                          : "speaker.slash.fill")
-                        .frame(width: 24, height: 24)
+                Image(systemName: stateIcon)
+                    .foregroundStyle(stateColor)
+                Text(bluetooth.trackingState.title)
+                    .font(.custom("Arial", size: 13).weight(.semibold))
+                Spacer()
+                if bluetooth.trackingState == .lock || bluetooth.trackingState == .search {
+                    Text("\(bluetooth.confidence)%")
+                        .font(.custom("Arial", size: 14).monospacedDigit().weight(.bold))
+                        .foregroundStyle(stateColor)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .tint(camera.voiceAnnouncementsEnabled ? .green : .gray)
-
-                Button {
-                    camera.returnServosHome()
-                } label: {
-                    Image(systemName: "house.fill")
-                        .frame(width: 24, height: 24)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .tint(.orange)
-                .disabled(!ble.isConnected)
-                .accessibilityLabel("Đưa hai servo về vị trí Home")
+                Text("P \(Int(bluetooth.panAngle))°  T \(Int(bluetooth.tiltAngle))°")
+                    .font(.custom("Arial", size: 11).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.62))
             }
         }
-        .foregroundStyle(.white)
-    }
-
-    @ViewBuilder
-    private func subjectKindIcon(_ kind: ScanSubjectKind, size: CGFloat) -> some View {
-        if kind == .waterRocket {
-            Image("WaterRocketTabIcon")
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .frame(width: size, height: size)
-        } else {
-            Image(systemName: kind.symbol)
-                .font(.system(size: size, weight: .bold))
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(.white.opacity(0.12), lineWidth: 1)
         }
     }
 
-    @ViewBuilder
-    private var actionButtons: some View {
-        switch camera.stage {
-        case .idle:
-            primaryButton("Tạo mẫu 7 ảnh", systemImage: "camera.on.rectangle") {
-                camera.startShapeScan()
-            }
-            .disabled(!camera.isReady)
+    private var bottomControls: some View {
+        VStack(spacing: 13) {
+            Text(camera.statusText)
+                .font(.custom("Arial", size: 13).weight(.semibold))
+                .foregroundStyle(.white.opacity(0.86))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(.black.opacity(0.44), in: Capsule())
 
-        case .waitingFar:
-            primaryButton("Tạo mẫu 7 ảnh", systemImage: "camera.on.rectangle") {
-                camera.startShapeScan()
-            }
-
-        case .waitingAround:
-            primaryButton("Tạo mẫu 7 ảnh", systemImage: "camera.on.rectangle") {
-                camera.startShapeScan()
-            }
-
-        case .ready:
-            primaryButton("Khóa, bám & quay", systemImage: "scope") {
-                camera.startTrackingAndRecording()
-            }
-            if camera.activeProfileID != nil {
-                secondaryButton("Chụp thêm ảnh", systemImage: "camera.badge.ellipsis") {
-                    camera.beginAddingReferencePhoto()
-                }
-            }
-            secondaryButton("Tạo lại mẫu 7 ảnh", systemImage: "trash") {
-                camera.resetProfile()
-                camera.startShapeScan()
-            }
-
-        case .verifying:
-            VStack(spacing: 10) {
-                ProgressView(
-                    camera.hasLockedTargetInSession
-                        ? "Đang bắt lại theo quỹ đạo cuối..."
-                        : "Đang khóa vật trong khung vuông..."
-                )
-                    .tint(.white)
-                    .foregroundStyle(.white)
-                if camera.isRecording {
-                    Button(role: .destructive) {
+            HStack(alignment: .center) {
+                Button {
+                    if camera.isRecording {
                         camera.stopRecording()
-                    } label: {
-                        Label("Dừng tìm và lưu video", systemImage: "stop.circle.fill")
-                            .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-                } else {
-                    secondaryButton("Dừng tìm mục tiêu", systemImage: "xmark.circle") {
-                        camera.cancelTargetSearch()
+                    bluetooth.home()
+                    camera.announceHome()
+                } label: {
+                    controlButton(icon: "house.fill", title: "Home", color: .blue)
+                }
+
+                Spacer()
+
+                Button {
+                    if camera.isRecording {
+                        bluetooth.stop()
+                        camera.stopRecording()
+                    } else {
+                        bluetooth.arm()
+                        camera.startRecording()
+                    }
+                } label: {
+                    ZStack {
+                        Circle()
+                            .stroke(.white.opacity(0.92), lineWidth: 5)
+                            .frame(width: 82, height: 82)
+                        RoundedRectangle(cornerRadius: camera.isRecording ? 8 : 32, style: .continuous)
+                            .fill(camera.isRecording ? Color.red : Color.white)
+                            .frame(width: camera.isRecording ? 34 : 64, height: camera.isRecording ? 34 : 64)
+                            .animation(.spring(response: 0.28, dampingFraction: 0.78), value: camera.isRecording)
                     }
                 }
-            }
+                .disabled(!camera.isReady)
+                .opacity(camera.isReady ? 1 : 0.42)
 
-        case .tracking:
-            if camera.isRecording {
-                Button(role: .destructive) {
-                    camera.stopRecording()
-                } label: {
-                    Label("Dừng và lưu video", systemImage: "stop.circle.fill")
-                        .frame(maxWidth: .infinity)
+                Spacer()
+
+                VStack(spacing: 5) {
+                    ZStack {
+                        Circle()
+                            .fill(stateColor.opacity(0.20))
+                            .frame(width: 46, height: 46)
+                        Image(systemName: bluetooth.trackingState == .lock ? "scope" : "dot.scope")
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundStyle(stateColor)
+                    }
+                    Text("AI")
+                        .font(.custom("Arial", size: 11).weight(.bold))
+                        .foregroundStyle(.white.opacity(0.76))
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
+                .frame(width: 62)
             }
-
-        case .lost:
-            primaryButton("Bắt lại mục tiêu", systemImage: "scope") {
-                camera.reacquireTarget()
-            }
-            if camera.isRecording {
-                Button(role: .destructive) {
-                    camera.stopRecording()
-                } label: {
-                    Label("Dừng và lưu video", systemImage: "stop.circle.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-            }
-
-        case .scanningNear, .scanningFar, .scanningAround:
-            EmptyView()
+        }
+        .padding(.top, 14)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(.white.opacity(0.12), lineWidth: 1)
         }
     }
 
-    private func primaryButton(
-        _ title: String,
-        systemImage: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .frame(maxWidth: .infinity)
+    @ViewBuilder
+    private func trackingOverlay(in size: CGSize) -> some View {
+        let point = CGPoint(
+            x: size.width * bluetooth.targetX,
+            y: size.height * bluetooth.targetY
+        )
+        let locked = bluetooth.trackingState == .lock
+        let searching = bluetooth.trackingState == .search
+
+        ZStack {
+            Path { path in
+                let center = CGPoint(x: size.width / 2, y: size.height / 2)
+                path.move(to: CGPoint(x: center.x - 14, y: center.y))
+                path.addLine(to: CGPoint(x: center.x + 14, y: center.y))
+                path.move(to: CGPoint(x: center.x, y: center.y - 14))
+                path.addLine(to: CGPoint(x: center.x, y: center.y + 14))
+            }
+            .stroke(.white.opacity(0.48), lineWidth: 1)
+
+            if locked || searching {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(stateColor, style: StrokeStyle(lineWidth: 2.5, dash: searching ? [7, 5] : []))
+                    .frame(width: 58, height: 58)
+                    .position(point)
+                    .shadow(color: stateColor.opacity(0.48), radius: 6)
+                    .animation(.linear(duration: 0.08), value: bluetooth.targetX)
+                    .animation(.linear(duration: 0.08), value: bluetooth.targetY)
+            }
         }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.regular)
-        .font(.subheadline.bold())
+        .allowsHitTesting(false)
     }
 
-    private func secondaryButton(
-        _ title: String,
-        systemImage: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .frame(maxWidth: .infinity)
+    private func controlButton(icon: String, title: String, color: Color) -> some View {
+        VStack(spacing: 5) {
+            ZStack {
+                Circle().fill(color.opacity(0.20)).frame(width: 46, height: 46)
+                Image(systemName: icon)
+                    .font(.system(size: 19, weight: .bold))
+                    .foregroundStyle(color)
+            }
+            Text(title)
+                .font(.custom("Arial", size: 11).weight(.bold))
+                .foregroundStyle(.white.opacity(0.76))
         }
-        .buttonStyle(.bordered)
-        .tint(.white)
-        .controlSize(.small)
-        .font(.caption.bold())
+        .frame(width: 62)
+    }
+
+    private var stateColor: Color {
+        switch bluetooth.trackingState {
+        case .lock: return .green
+        case .search, .acquire: return .yellow
+        case .home: return .blue
+        case .disconnected: return .orange
+        case .idle: return .white
+        }
+    }
+
+    private var stateIcon: String {
+        switch bluetooth.trackingState {
+        case .lock: return "scope"
+        case .search: return "location.magnifyingglass"
+        case .acquire: return "dot.scope"
+        case .home: return "house.fill"
+        case .disconnected: return "antenna.radiowaves.left.and.right.slash"
+        case .idle: return "checkmark.circle.fill"
+        }
+    }
+
+    private var recordingTime: String {
+        String(format: "%02d:%02d", camera.elapsedSeconds / 60, camera.elapsedSeconds % 60)
     }
 }

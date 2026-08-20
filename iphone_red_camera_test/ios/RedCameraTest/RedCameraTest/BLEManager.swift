@@ -1,102 +1,139 @@
 import CoreBluetooth
 import Foundation
-import QuartzCore
+
+enum GimbalTrackingState: String {
+    case disconnected
+    case idle
+    case acquire
+    case lock
+    case search
+    case home
+
+    var title: String {
+        switch self {
+        case .disconnected: return "Chưa kết nối"
+        case .idle: return "Sẵn sàng"
+        case .acquire: return "Đang tìm"
+        case .lock: return "Đã khóa mục tiêu"
+        case .search: return "Đang bắt lại"
+        case .home: return "Đang về Home"
+        }
+    }
+}
 
 final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var connectionText = "Đang bật Bluetooth..."
     @Published private(set) var isConnected = false
-
-    var onArm: (() -> Void)?
+    @Published private(set) var trackingState: GimbalTrackingState = .disconnected
+    @Published private(set) var confidence = 0
+    @Published private(set) var targetX = 0.5
+    @Published private(set) var targetY = 0.5
+    @Published private(set) var panAngle = 90.0
+    @Published private(set) var tiltAngle = 90.0
+    @Published private(set) var maixVersion = "Đang chờ MaixCAM"
 
     private let serviceUUID = CBUUID(string: "7E57A000-8E3A-4D6A-9B2B-13B10A000001")
     private let eventUUID = CBUUID(string: "7E57A001-8E3A-4D6A-9B2B-13B10A000001")
-    private let statusUUID = CBUUID(string: "7E57A002-8E3A-4D6A-9B2B-13B10A000001")
+    private let commandUUID = CBUUID(string: "7E57A002-8E3A-4D6A-9B2B-13B10A000001")
 
     private var central: CBCentralManager!
     private var trackerPeripheral: CBPeripheral?
-    private var statusCharacteristic: CBCharacteristic?
+    private var commandCharacteristic: CBCharacteristic?
     private var lifecycleActive = true
-    private var lastTelemetryWriteAt: TimeInterval = 0
-    // Camera có thể chạy 60 fps. Chỉ chặn nhanh hơn 70 Hz; cờ
-    // canSendWriteWithoutResponse sẽ tự bỏ frame cũ nếu BLE đang bận.
-    private let telemetryMinimumInterval: TimeInterval = 1.0 / 70.0
+    private var reconnectWorkItem: DispatchWorkItem?
 
     override init() {
         super.init()
         central = CBCentralManager(delegate: self, queue: .main)
     }
 
-    func sendStatus(_ message: String) {
-        guard let peripheral = trackerPeripheral,
-              peripheral.state == .connected,
-              let characteristic = statusCharacteristic,
-              let data = message.data(using: .utf8) else { return }
+    func arm() {
+        send("ARM")
+        trackingState = .acquire
+    }
 
-        // Tọa độ tracking gửi dày nên dùng writeWithoutResponse. Các lệnh đổi
-        // trạng thái servo phải có phản hồi để SEARCH không bị rơi gói BLE.
-        // W là gói 18 byte: Wxxxyyyccsssvvvwww, có thêm kích thước mục tiêu.
-        // V 15 byte vẫn được nhận để tương thích firmware/app cũ.
-        let isVelocityTelemetry = message.hasPrefix("V") && message.utf8.count == 15
-        let isAdaptiveTelemetry = message.hasPrefix("W") && message.utf8.count == 18
-        let isTelemetry = message.hasPrefix("T,")
-            || isVelocityTelemetry
-            || isAdaptiveTelemetry
-        let canWriteFast = characteristic.properties.contains(.writeWithoutResponse)
-        let canWriteConfirmed = characteristic.properties.contains(.write)
-        let writeType: CBCharacteristicWriteType
-        if isTelemetry, canWriteFast {
-            // Khong xep hang toa do cu khi BLE dang ban. Goi cu lam servo duoi theo
-            // vi tri da qua, tao cam giac tre va giat nguoc.
-            let now = CACurrentMediaTime()
-            guard peripheral.canSendWriteWithoutResponse,
-                  now - lastTelemetryWriteAt >= telemetryMinimumInterval else {
-                return
-            }
-            lastTelemetryWriteAt = now
-            writeType = .withoutResponse
-        } else if canWriteConfirmed {
-            writeType = .withResponse
-        } else {
-            writeType = .withoutResponse
-        }
-        peripheral.writeValue(data, for: characteristic, type: writeType)
-        if message.hasPrefix("S,") {
-            connectionText = "Đang tìm"
-        } else if message == "TARGET_LOCKED" {
-            connectionText = "ESP32 đang bám mục tiêu"
-        } else if message == "SEARCH_STOP" || message == "RECORDING_STOPPED" {
-            connectionText = "ESP32 đã dừng tìm và giữ nguyên góc"
-        } else if message == "TRACKING_STARTED" {
-            connectionText = "ESP32 sẵn sàng nhận dữ liệu bám"
-        } else if message == "SERVO_HOME" {
-            connectionText = "PAN/TILT đang về Home"
-        }
+    func stop() {
+        send("STOP")
+        trackingState = .idle
+    }
+
+    func home() {
+        send("HOME")
+        trackingState = .home
     }
 
     func suspendForBackground() {
         lifecycleActive = false
+        reconnectWorkItem?.cancel()
         central.stopScan()
-        connectionText = isConnected
-            ? "ESP32 đang chờ • app đã tạm dừng"
-            : "Bluetooth đã tạm dừng để hạ nhiệt"
     }
 
     func resumeFromForeground() {
         lifecycleActive = true
-        guard trackerPeripheral?.state != .connected else {
-            connectionText = "Đã kết nối ESP32"
-            return
+        if trackerPeripheral?.state != .connected {
+            startScanning()
         }
-        startScanning()
+    }
+
+    private func send(_ command: String) {
+        guard let peripheral = trackerPeripheral,
+              peripheral.state == .connected,
+              let characteristic = commandCharacteristic,
+              let data = command.data(using: .utf8) else { return }
+        let type: CBCharacteristicWriteType = characteristic.properties.contains(.write)
+            ? .withResponse
+            : .withoutResponse
+        peripheral.writeValue(data, for: characteristic, type: type)
     }
 
     private func startScanning() {
         guard lifecycleActive, central.state == .poweredOn else { return }
-        connectionText = "Đang tìm RocketTracker-Test..."
+        central.stopScan()
+        connectionText = "Đang tìm bộ điều khiển SE..."
         central.scanForPeripherals(
             withServices: [serviceUUID],
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
         )
+    }
+
+    private func scheduleReconnect() {
+        reconnectWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard self?.lifecycleActive == true else { return }
+            self?.startScanning()
+        }
+        reconnectWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: item)
+    }
+
+    private func parseEvent(_ event: String) {
+        let message = event.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fields = message.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        guard let head = fields.first?.uppercased() else { return }
+
+        if head == "STATE", fields.count >= 3 {
+            switch fields[1].uppercased() {
+            case "IDLE", "HOME_DONE": trackingState = .idle
+            case "ACQUIRE": trackingState = .acquire
+            case "LOCK": trackingState = .lock
+            case "SEARCH": trackingState = .search
+            case "HOME": trackingState = .home
+            default: break
+            }
+            confidence = Int(fields[2]) ?? 0
+            if fields.count >= 5 {
+                targetX = min(1, max(0, (Double(fields[3]) ?? 500) / 1000))
+                targetY = min(1, max(0, (Double(fields[4]) ?? 500) / 1000))
+            }
+            if fields.count >= 7 {
+                panAngle = Double(fields[5]) ?? panAngle
+                tiltAngle = Double(fields[6]) ?? tiltAngle
+            }
+        } else if head == "MAIX" {
+            maixVersion = fields.dropFirst().joined(separator: " • ")
+        } else if head == "ESP32" {
+            connectionText = "ESP32 SE đã sẵn sàng"
+        }
     }
 }
 
@@ -104,13 +141,13 @@ extension BLEManager: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
         case .poweredOn:
-            if lifecycleActive { startScanning() }
+            startScanning()
         case .poweredOff:
             connectionText = "Bluetooth đang tắt"
         case .unauthorized:
-            connectionText = "Chưa cấp quyền Bluetooth"
+            connectionText = "Hãy cấp quyền Bluetooth cho SE"
         case .unsupported:
-            connectionText = "Máy không hỗ trợ Bluetooth LE"
+            connectionText = "iPhone không hỗ trợ Bluetooth LE"
         default:
             connectionText = "Bluetooth chưa sẵn sàng"
         }
@@ -131,7 +168,8 @@ extension BLEManager: CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         isConnected = true
-        connectionText = "Đã kết nối ESP32"
+        trackingState = .idle
+        connectionText = "Đã kết nối ESP32 SE"
         peripheral.discoverServices([serviceUUID])
     }
 
@@ -141,12 +179,10 @@ extension BLEManager: CBCentralManagerDelegate {
         error: Error?
     ) {
         isConnected = false
+        trackingState = .disconnected
         connectionText = "Kết nối lỗi, đang thử lại..."
         trackerPeripheral = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard self?.lifecycleActive == true else { return }
-            self?.startScanning()
-        }
+        scheduleReconnect()
     }
 
     func centralManager(
@@ -155,27 +191,24 @@ extension BLEManager: CBCentralManagerDelegate {
         error: Error?
     ) {
         isConnected = false
-        statusCharacteristic = nil
+        trackingState = .disconnected
+        commandCharacteristic = nil
         trackerPeripheral = nil
-        lastTelemetryWriteAt = 0
-        connectionText = "ESP32 đã ngắt, đang tìm lại..."
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard self?.lifecycleActive == true else { return }
-            self?.startScanning()
-        }
+        confidence = 0
+        connectionText = "ESP32 đã ngắt, đang kết nối lại..."
+        scheduleReconnect()
     }
 }
 
 extension BLEManager: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard error == nil else {
-            connectionText = "Không đọc được dịch vụ BLE"
+            connectionText = "Không đọc được dịch vụ ESP32"
             return
         }
-
         peripheral.services?
             .filter { $0.uuid == serviceUUID }
-            .forEach { peripheral.discoverCharacteristics([eventUUID, statusUUID], for: $0) }
+            .forEach { peripheral.discoverCharacteristics([eventUUID, commandUUID], for: $0) }
     }
 
     func peripheral(
@@ -184,17 +217,16 @@ extension BLEManager: CBPeripheralDelegate {
         error: Error?
     ) {
         guard error == nil else {
-            connectionText = "Không đọc được kênh BLE"
+            connectionText = "Không đọc được kênh điều khiển"
             return
         }
-
         for characteristic in service.characteristics ?? [] {
             if characteristic.uuid == eventUUID {
                 peripheral.setNotifyValue(true, for: characteristic)
                 peripheral.readValue(for: characteristic)
-            } else if characteristic.uuid == statusUUID {
-                statusCharacteristic = characteristic
-                sendStatus("APP_READY")
+            } else if characteristic.uuid == commandUUID {
+                commandCharacteristic = characteristic
+                send("PING")
             }
         }
     }
@@ -208,10 +240,6 @@ extension BLEManager: CBPeripheralDelegate {
               characteristic.uuid == eventUUID,
               let data = characteristic.value,
               let message = String(data: data, encoding: .utf8) else { return }
-
-        if message.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "ARM" {
-            connectionText = "ESP32 đã ra lệnh khóa và bám tên lửa"
-            onArm?()
-        }
+        parseEvent(message)
     }
 }

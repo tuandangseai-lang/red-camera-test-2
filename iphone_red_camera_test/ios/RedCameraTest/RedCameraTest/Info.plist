@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Rocket Tracker</string>
+	<string>SE</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -23,9 +23,9 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Kết nối ESP32 để bật chế độ nhận diện và nhận trạng thái quay.</string>
+	<string>Kết nối ESP32 để điều khiển MaixCAM và giá đỡ bám tên lửa nước.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Dùng camera để học, bám và quay tên lửa nước của bạn.</string>
+	<string>Dùng camera góc rộng để quay tên lửa nước; MaixCAM thực hiện AI tracking.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Thu âm thanh cùng video thử nghiệm.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>

@@ -1,0 +1,11 @@
+id: se_rocket_tracker
+name: SE Rocket Tracker
+version: 1.0.0
+author: SE Dang Huu Tuan
+icon: icon.png
+desc: Water-rocket detector and low-latency UART tracker for ESP32 gimbal.
+files:
+  - app.yaml
+  - icon.png
+  - main.py
+
