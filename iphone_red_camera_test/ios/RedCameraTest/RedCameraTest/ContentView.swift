@@ -48,6 +48,9 @@ struct ContentView: View {
             topStatus
                 .padding(.horizontal, 14)
                 .padding(.top, 8)
+            modeTabs
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
             Spacer()
             bottomControls
                 .padding(.horizontal, 18)
@@ -68,7 +71,7 @@ struct ContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("SE • MAIX AI")
+                    Text("SE • \(bluetooth.selectedMode.title)")
                         .font(.custom("Arial", size: 15).weight(.bold))
                     Text(bluetooth.connectionText)
                         .font(.custom("Arial", size: 12))
@@ -111,6 +114,39 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .stroke(.white.opacity(0.12), lineWidth: 1)
         }
+    }
+
+    private var modeTabs: some View {
+        HStack(spacing: 8) {
+            ForEach(TrackingMode.allCases) { mode in
+                let selected = bluetooth.selectedMode == mode
+                Button {
+                    if camera.isRecording {
+                        bluetooth.stop()
+                        camera.stopRecording()
+                    }
+                    bluetooth.selectMode(mode)
+                } label: {
+                    Image(systemName: mode.icon)
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(selected ? .black : .white.opacity(0.76))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 42)
+                        .background(
+                            selected ? stateColor : Color.white.opacity(0.10),
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(.white.opacity(selected ? 0.42 : 0.10), lineWidth: 1)
+                        }
+                        .accessibilityLabel(mode.title)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(6)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 19, style: .continuous))
     }
 
     private var bottomControls: some View {

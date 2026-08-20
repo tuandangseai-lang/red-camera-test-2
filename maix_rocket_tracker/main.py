@@ -1,17 +1,19 @@
-"""SE water-rocket tracker for MaixCAM Lite.
+"""SE selectable tracker for MaixCAM Lite.
 
-MaixCAM is the only vision authority.  It detects the water rocket, preserves
-one identity through ByteTrack and sends a filtered target to the ESP32 over
-UART1.  The ESP32 owns all servo timing and safety limits.
+MaixCAM is the only vision authority.  The iPhone selects one mode, MaixCAM
+runs only that detector/class group, preserves one identity through ByteTrack,
+and sends a filtered target to the ESP32 over UART1.  The ESP32 owns all servo
+timing and safety limits.
 """
 
 from maix import app, camera, display, err, image, nn, pinmap, time, tracker, uart
 import math
 import os
+import gc
 
 
-APP_VERSION = "1.1.0"
-MODEL_PATH = "/root/models/se_water_rocket_yolo11n.mud"
+APP_VERSION = "1.2.0"
+MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
 
 UART_DEVICE = "/dev/ttyS1"
@@ -34,6 +36,10 @@ STATE_ACQUIRE = 1
 STATE_LOCKED = 2
 STATE_WEAK = 3
 STATE_LOST = 4
+
+SUPPORTED_MODES = ("ROCKET", "PERSON", "ANIMAL", "OBJECT")
+ANIMAL_CLASS_IDS = list(range(14, 24))
+OBJECT_CLASS_IDS = list(range(1, 14)) + list(range(24, 80))
 
 
 def clamp(value, low, high):
@@ -141,7 +147,9 @@ class AlphaBetaBox:
 class RocketTracker:
     def __init__(self):
         self.custom_model = os.path.exists(MODEL_PATH)
-        selected_model = MODEL_PATH if self.custom_model else FALLBACK_MODEL_PATH
+        self.active_mode = "ROCKET"
+        selected_model, self.valid_class_ids = self._mode_configuration(self.active_mode)
+        self.detector_path = selected_model
         self.detector = nn.YOLO11(model=selected_model, dual_buff=True)
         self.camera = camera.Camera(
             self.detector.input_width(),
@@ -167,8 +175,36 @@ class RocketTracker:
         self.fps_frames = 0
         self.fps = 0.0
 
-        # COCO fallback uses bottle only.  A converted custom model has one class.
-        self.valid_class_ids = [0] if self.custom_model else [39]
+    def _mode_configuration(self, mode):
+        if mode == "ROCKET":
+            return (MODEL_PATH, [0]) if self.custom_model else (FALLBACK_MODEL_PATH, [39])
+        if mode == "PERSON":
+            return FALLBACK_MODEL_PATH, [0]
+        if mode == "ANIMAL":
+            return FALLBACK_MODEL_PATH, ANIMAL_CLASS_IDS
+        return FALLBACK_MODEL_PATH, OBJECT_CLASS_IDS
+
+    def _set_mode(self, mode):
+        mode = mode.upper()
+        if mode not in SUPPORTED_MODES:
+            return False
+        model_path, class_ids = self._mode_configuration(mode)
+        if model_path != self.detector_path:
+            next_detector = nn.YOLO11(model=model_path, dual_buff=True)
+            if (next_detector.input_width() != self.camera.width() or
+                    next_detector.input_height() != self.camera.height()):
+                raise RuntimeError("Tracking models must share one input size")
+            previous_detector = self.detector
+            self.detector = next_detector
+            self.detector_path = model_path
+            del previous_detector
+            gc.collect()
+        self.active_mode = mode
+        self.valid_class_ids = class_ids
+        self.state = STATE_ACQUIRE if self.enabled else STATE_IDLE
+        self._clear_target()
+        print("Tracking mode: {0}".format(mode), flush=True)
+        return True
 
     def _new_byte_tracker(self):
         return tracker.ByteTracker(
@@ -221,9 +257,14 @@ class RocketTracker:
                 self.state = STATE_IDLE
                 self._clear_target()
                 self._write("A,{0},HOME".format(parts[1]))
+            elif command == "MODE" and len(parts) >= 4:
+                if self._set_mode(parts[3]):
+                    self._write("A,{0},MODE,{1}".format(parts[1], self.active_mode))
+                else:
+                    self._write("A,{0},MODE_ERROR".format(parts[1]))
             elif command == "PING":
                 print("UART command: PING", flush=True)
-                self._write("A,{0},PONG,{1}".format(parts[1], APP_VERSION))
+                self._write("A,{0},PONG,{1},{2}".format(parts[1], APP_VERSION, self.active_mode))
 
     def _clear_target(self):
         # ByteTrack keeps identities internally. Recreate it at each ARM/STOP/
@@ -338,7 +379,8 @@ class RocketTracker:
             y = int(self.filter.cy - self.filter.h * 0.5)
             frame.draw_rect(x, y, int(self.filter.w), int(self.filter.h), color=color, thickness=2)
             frame.draw_cross(int(self.filter.cx), int(self.filter.cy), color=color, size=5, thickness=2)
-        label = "SE {0}  {1}%  {2:.1f}fps".format(
+        label = "SE {0} {1}  {2}%  {3:.1f}fps".format(
+            self.active_mode,
             ("LOCK" if self.state == STATE_LOCKED else "FIND"),
             int(self.last_confidence * 100),
             self.fps,
@@ -361,14 +403,17 @@ class RocketTracker:
             ),
             flush=True,
         )
-        self._write("B,SE_ROCKET,{0},{1}".format(APP_VERSION, "CUSTOM" if self.custom_model else "FALLBACK"))
+        self._write("B,SE_TRACKER,{0},{1},{2}".format(
+            APP_VERSION, self.active_mode,
+            "CUSTOM" if self.custom_model else "FALLBACK"))
         while not app.need_exit():
             now_ms = time.ticks_ms()
             self._read_commands()
             if ticks_delta(now_ms, self.last_status_ms) >= 2000:
                 self._write(
-                    "B,SE_ROCKET,{0},{1}".format(
-                        APP_VERSION, "CUSTOM" if self.custom_model else "FALLBACK"
+                    "B,SE_TRACKER,{0},{1},{2}".format(
+                        APP_VERSION, self.active_mode,
+                        "CUSTOM" if self.custom_model else "FALLBACK"
                     )
                 )
                 self.last_status_ms = now_ms

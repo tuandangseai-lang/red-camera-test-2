@@ -1,10 +1,12 @@
 id: se_rocket_tracker
-name: SE Rocket Tracker
-version: 1.1.0
+name: SE AI Tracker
+version: 1.2.0
 author: SE Dang Huu Tuan
 icon: icon.png
-desc: Water-rocket detector and low-latency UART tracker for ESP32 gimbal.
+desc: Selectable rocket, person, animal and object tracker for the ESP32 gimbal.
 files:
   - app.yaml
   - icon.png
   - main.py
+  - models/se_water_rocket_yolo11n.mud
+  - models/se_water_rocket_yolo11n.cvimodel

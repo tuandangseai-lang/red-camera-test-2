@@ -1,6 +1,33 @@
 import CoreBluetooth
 import Foundation
 
+enum TrackingMode: String, CaseIterable, Identifiable {
+    case waterRocket = "ROCKET"
+    case person = "PERSON"
+    case animal = "ANIMAL"
+    case object = "OBJECT"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .waterRocket: return "Tên lửa nước"
+        case .person: return "Người"
+        case .animal: return "Thú"
+        case .object: return "Vật"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .waterRocket: return "rocket.fill"
+        case .person: return "person.fill"
+        case .animal: return "pawprint.fill"
+        case .object: return "cube.fill"
+        }
+    }
+}
+
 enum GimbalTrackingState: String {
     case disconnected
     case idle
@@ -31,6 +58,7 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var panAngle = 90.0
     @Published private(set) var tiltAngle = 90.0
     @Published private(set) var maixVersion = "Đang chờ MaixCAM"
+    @Published private(set) var selectedMode: TrackingMode = .waterRocket
 
     private let serviceUUID = CBUUID(string: "7E57A000-8E3A-4D6A-9B2B-13B10A000001")
     private let eventUUID = CBUUID(string: "7E57A001-8E3A-4D6A-9B2B-13B10A000001")
@@ -60,6 +88,16 @@ final class BLEManager: NSObject, ObservableObject {
     func home() {
         send("HOME")
         trackingState = .home
+    }
+
+    func selectMode(_ mode: TrackingMode) {
+        guard selectedMode != mode else { return }
+        selectedMode = mode
+        confidence = 0
+        targetX = 0.5
+        targetY = 0.5
+        trackingState = .idle
+        send("MODE,\(mode.rawValue)")
     }
 
     func suspendForBackground() {
@@ -131,6 +169,9 @@ final class BLEManager: NSObject, ObservableObject {
             }
         } else if head == "MAIX" {
             maixVersion = fields.dropFirst().joined(separator: " • ")
+        } else if head == "MODE", fields.count >= 2,
+                  let mode = TrackingMode(rawValue: fields[1].uppercased()) {
+            selectedMode = mode
         } else if head == "ESP32" {
             connectionText = "ESP32 SE đã sẵn sàng"
         }
@@ -227,6 +268,7 @@ extension BLEManager: CBPeripheralDelegate {
             } else if characteristic.uuid == commandUUID {
                 commandCharacteristic = characteristic
                 send("PING")
+                send("MODE,\(selectedMode.rawValue)")
             }
         }
     }

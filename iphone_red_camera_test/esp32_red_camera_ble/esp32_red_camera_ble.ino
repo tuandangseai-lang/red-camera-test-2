@@ -94,6 +94,7 @@ TargetPacket latestTarget;
 volatile bool phoneConnected = false;
 bool sessionArmed = false;
 bool homeRequested = true;
+String selectedTrackingMode = "ROCKET";
 bool searchActive = false;
 bool panMoving = false;
 bool tiltMoving = false;
@@ -203,9 +204,27 @@ void armSession() {
   homeRequested = false;
   setPhoneCharging(false);
   chargeResumePending = false;
+  sendMaixCommand("MODE", selectedTrackingMode.c_str());
   sendMaixCommand("ARM");
   notifyPhone("STATE,ACQUIRE,0");
   Serial.println("[SESSION] ARMED - MaixCAM is vision authority");
+}
+
+bool isSupportedTrackingMode(const String &mode) {
+  return mode == "ROCKET" || mode == "PERSON" || mode == "ANIMAL" ||
+         mode == "OBJECT";
+}
+
+void selectTrackingMode(String mode) {
+  mode.trim();
+  mode.toUpperCase();
+  if (!isSupportedTrackingMode(mode)) return;
+  selectedTrackingMode = mode;
+  resetTrackingFilter();
+  sendMaixCommand("MODE", selectedTrackingMode.c_str());
+  notifyPhone(String("MODE,") + selectedTrackingMode);
+  notifyPhone(sessionArmed ? "STATE,ACQUIRE,0" : "STATE,IDLE,0");
+  Serial.printf("[MODE] %s\n", selectedTrackingMode.c_str());
 }
 
 void stopSession() {
@@ -571,7 +590,9 @@ void updateCharging() {
 void handlePhoneCommand(String command) {
   command.trim();
   command.toUpperCase();
-  if (command == "ARM" || command == "TRACKING_STARTED" ||
+  if (command.startsWith("MODE,")) {
+    selectTrackingMode(command.substring(5));
+  } else if (command == "ARM" || command == "TRACKING_STARTED" ||
       command == "RECORDING_STARTED") {
     armSession();
   } else if (command == "STOP" || command == "DISARM" ||
@@ -580,7 +601,9 @@ void handlePhoneCommand(String command) {
   } else if (command == "HOME" || command == "SERVO_HOME") {
     requestHome();
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,2.1.0");
+    notifyPhone("ESP32,SE_GIMBAL,2.2.0");
+    notifyPhone(String("MODE,") + selectedTrackingMode);
+    sendMaixCommand("MODE", selectedTrackingMode.c_str());
     sendMaixCommand("PING");
   }
   // Old V/W/T coordinate packets are intentionally ignored. MaixCAM is the
@@ -616,7 +639,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,2.1.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,2.2.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -631,7 +654,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE Rocket Tracker ESP32 v2.1.0");
+  Serial.println("\nSE AI Tracker ESP32 v2.2.0");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);

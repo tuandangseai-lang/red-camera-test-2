@@ -1,4 +1,4 @@
-name: Tao IPA SE v6.1 - MaixCAM + ESP32
+name: Tao IPA SE v6.2 - 4 che do MaixCAM
 
 on:
   workflow_dispatch:
@@ -89,12 +89,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v6.1-build51-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v6.2-build52-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v6.1-build51-unsigned-ipa
-          path: SE-v6.1-build51-unsigned.ipa
+          name: SE-v6.2-build52-unsigned-ipa
+          path: SE-v6.2-build52-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
