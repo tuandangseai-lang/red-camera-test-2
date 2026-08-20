@@ -5,7 +5,7 @@
 #include <BLEUtils.h>
 #include <ESP32Servo.h>
 
-// SE Rocket Tracker v2.1
+// SE Rocket Tracker v2.3
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -113,6 +113,9 @@ bool filterReady = false;
 uint8_t consistentLockCount = 0;
 int previousLockX = 500;
 int previousLockY = 500;
+uint16_t lastEvaluatedTargetSequence = 0;
+uint16_t lastAppliedTargetSequence = 0;
+bool acceptedVisionLock = false;
 int lastPanPulse = -1;
 int lastTiltPulse = -1;
 uint16_t commandSequence = 0;
@@ -192,6 +195,9 @@ void resetTrackingFilter() {
   filterReady = false;
   consistentLockCount = 0;
   previousLockX = previousLockY = 500;
+  lastEvaluatedTargetSequence = 0;
+  lastAppliedTargetSequence = 0;
+  acceptedVisionLock = false;
   panRate = tiltRate = 0.0f;
   panMoving = tiltMoving = false;
   searchActive = false;
@@ -333,9 +339,18 @@ void readMaixUart() {
 }
 
 bool lockPacketIsConsistent(const TargetPacket &target) {
+  // The servo loop runs at 50 Hz and can see one Maix packet several times.
+  // Count consistency only once per real vision frame; otherwise one false
+  // detection could be promoted to a lock simply by rereading the same packet.
+  if (target.sequence == lastEvaluatedTargetSequence) {
+    return acceptedVisionLock && target.state == VISION_LOCKED &&
+           target.confidence >= Config::MIN_LOCK_CONFIDENCE;
+  }
+  lastEvaluatedTargetSequence = target.sequence;
   if (target.state != VISION_LOCKED ||
       target.confidence < Config::MIN_LOCK_CONFIDENCE) {
     consistentLockCount = 0;
+    acceptedVisionLock = false;
     return false;
   }
   if (consistentLockCount == 0 ||
@@ -347,7 +362,9 @@ bool lockPacketIsConsistent(const TargetPacket &target) {
   }
   previousLockX = target.x;
   previousLockY = target.y;
-  return consistentLockCount >= Config::CONSISTENT_LOCK_PACKETS;
+  acceptedVisionLock =
+      consistentLockCount >= Config::CONSISTENT_LOCK_PACKETS;
+  return acceptedVisionLock;
 }
 
 float adaptiveGainFromSize(const TargetPacket &target) {
@@ -406,20 +423,26 @@ void holdServos(float dt) {
 
 void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
   const uint32_t age = nowMs - target.receivedAtMs;
-  const bool strongLock = age <= Config::TARGET_STALE_MS &&
-                          lockPacketIsConsistent(target);
+  const bool freshTarget = age <= Config::TARGET_STALE_MS;
+  const bool targetLooksLocked =
+      freshTarget && target.state == VISION_LOCKED &&
+      target.confidence >= Config::MIN_LOCK_CONFIDENCE;
+  const bool strongLock = freshTarget && lockPacketIsConsistent(target);
   const bool weakTrack = age <= Config::COAST_LIMIT_MS &&
                          target.state == VISION_WEAK &&
                          target.confidence >= Config::MIN_WEAK_CONFIDENCE &&
                          filterReady;
 
   if (strongLock) {
-    const float alpha = filterReady ? 0.58f : 1.0f;
-    filteredX += alpha * (target.x - filteredX);
-    filteredY += alpha * (target.y - filteredY);
-    filteredVX += 0.42f * (target.velocityX - filteredVX);
-    filteredVY += 0.42f * (target.velocityY - filteredVY);
-    filterReady = true;
+    if (target.sequence != lastAppliedTargetSequence) {
+      const float alpha = filterReady ? 0.58f : 1.0f;
+      filteredX += alpha * (target.x - filteredX);
+      filteredY += alpha * (target.y - filteredY);
+      filteredVX += 0.42f * (target.velocityX - filteredVX);
+      filteredVY += 0.42f * (target.velocityY - filteredVY);
+      filterReady = true;
+      lastAppliedTargetSequence = target.sequence;
+    }
     lostStartedAtMs = 0;
     searchActive = false;
     const float sizeGain = adaptiveGainFromSize(target);
@@ -437,6 +460,12 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
                                 : Config::MAX_TILT_ACCEL_DPS2;
     panRate = moveToward(panRate, desiredPan, panLimit * dt);
     tiltRate = moveToward(tiltRate, desiredTilt, tiltLimit * dt);
+  } else if (targetLooksLocked) {
+    // First confirming frame: hold position instead of starting a search.  A
+    // second independent frame will promote it to a real lock.
+    searchActive = false;
+    holdServos(dt);
+    return;
   } else if (weakTrack) {
     if (lostStartedAtMs == 0) lostStartedAtMs = nowMs;
     searchActive = true;
@@ -529,7 +558,8 @@ void updateStatusLed() {
   bool on = false;
   if (!sessionArmed) {
     on = phase < 70;
-  } else if (target.valid && target.state == VISION_LOCKED &&
+  } else if (target.valid && acceptedVisionLock &&
+             target.state == VISION_LOCKED &&
              target.confidence >= Config::MIN_LOCK_CONFIDENCE) {
     on = true;
   } else if (searchActive) {
@@ -553,7 +583,8 @@ void publishTelemetry() {
     state = "HOME";
   else if (searchActive)
     state = "SEARCH";
-  else if (sessionArmed && target.state == VISION_LOCKED)
+  else if (sessionArmed && acceptedVisionLock &&
+           target.state == VISION_LOCKED)
     state = "LOCK";
   else if (sessionArmed)
     state = "ACQUIRE";
@@ -601,7 +632,7 @@ void handlePhoneCommand(String command) {
   } else if (command == "HOME" || command == "SERVO_HOME") {
     requestHome();
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,2.2.0");
+    notifyPhone("ESP32,SE_GIMBAL,2.3.0");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     sendMaixCommand("MODE", selectedTrackingMode.c_str());
     sendMaixCommand("PING");
@@ -639,7 +670,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,2.2.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,2.3.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -654,7 +685,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v2.2.0");
+  Serial.println("\nSE AI Tracker ESP32 v2.3.0");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);

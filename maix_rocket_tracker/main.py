@@ -12,7 +12,7 @@ import os
 import gc
 
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
 
@@ -23,7 +23,9 @@ UART_RX_PIN = "A18"
 
 DETECT_CONFIDENCE = 0.16
 DETECT_IOU = 0.42
-LOCK_SCORE_MIN = 0.34
+ACQUIRE_SCORE_MIN = 0.29
+REACQUIRE_SCORE_MIN = 0.22
+ASSOCIATE_SCORE_MIN = 0.27
 LOCK_CONFIRM_FRAMES = 2
 LOST_AFTER_FRAMES = 4
 DROP_AFTER_FRAMES = 22
@@ -127,8 +129,13 @@ class AlphaBetaBox:
         beta = clamp(0.05 + confidence * 0.08, 0.06, 0.14)
         self.cx = predicted_x + alpha * residual_x
         self.cy = predicted_y + alpha * residual_y
-        self.vx = clamp(self.vx + beta * residual_x / dt, -1500.0, 1500.0)
-        self.vy = clamp(self.vy + beta * residual_y / dt, -1500.0, 1500.0)
+        # Damp residual velocity before adding the new measurement.  Without
+        # this, one noisy box can leave a non-zero feed-forward command for
+        # several frames and make an MG995 twitch around a stationary target.
+        self.vx = clamp(self.vx * 0.88 + beta * residual_x / dt,
+                        -1500.0, 1500.0)
+        self.vy = clamp(self.vy * 0.88 + beta * residual_y / dt,
+                        -1500.0, 1500.0)
         size_alpha = 0.24 + confidence * 0.14
         self.w += size_alpha * (w - self.w)
         self.h += size_alpha * (h - self.h)
@@ -165,6 +172,9 @@ class RocketTracker:
         self.sequence = 0
         self.frame_index = 0
         self.target_id = -1
+        self.pending_target_id = -1
+        self.pending_target_frames = 0
+        self.has_ever_locked = False
         self.confirm_count = 0
         self.missing_frames = 0
         self.last_box = None
@@ -272,6 +282,9 @@ class RocketTracker:
         # a stale position on the first frame of a new recording.
         self.byte_tracker = self._new_byte_tracker()
         self.target_id = -1
+        self.pending_target_id = -1
+        self.pending_target_frames = 0
+        self.has_ever_locked = False
         self.confirm_count = 0
         self.missing_frames = 0
         self.last_box = None
@@ -289,18 +302,50 @@ class RocketTracker:
     def _candidate_score(self, track_item, now_ms):
         obj = track_item.history[-1]
         box = (obj.x, obj.y, obj.w, obj.h)
-        score = clamp(track_item.score, 0.0, 1.0) * 0.52
+        raw_confidence = clamp(track_item.score, 0.0, 1.0)
+        camera_width = max(1.0, float(self.camera.width()))
+        camera_height = max(1.0, float(self.camera.height()))
+        cx, cy = obj.x + obj.w * 0.5, obj.y + obj.h * 0.5
+
+        # A new session begins with the object deliberately placed near the
+        # centre.  Use that fact only while acquiring; once locked, identity,
+        # IoU and the motion prediction become the authority.  The old formula
+        # could never acquire a detector score below ~0.65 even though the
+        # detector itself intentionally accepts scores down to 0.16.
+        if self.target_id == -1 or not self.filter.valid:
+            nx = (cx - camera_width * 0.5) / (camera_width * 0.5)
+            ny = (cy - camera_height * 0.5) / (camera_height * 0.5)
+            centre_distance = math.sqrt(nx * nx + ny * ny) / math.sqrt(2.0)
+            centre_prior = clamp(1.0 - centre_distance * 1.25, 0.0, 1.0)
+            area_ratio = obj.w * obj.h / (camera_width * camera_height)
+            visible_prior = clamp(min(obj.w / camera_width,
+                                      obj.h / camera_height) * 9.0, 0.0, 1.0)
+            not_full_frame = clamp((0.88 - area_ratio) / 0.38, 0.0, 1.0)
+            size_prior = visible_prior * not_full_frame
+            if self.has_ever_locked:
+                # After a complete disappearance the rocket may re-enter at an
+                # edge.  The custom detector class and two-frame confirmation
+                # are stronger evidence than the initial centre placement.
+                return (raw_confidence * 0.82 + centre_prior * 0.08 +
+                        size_prior * 0.10), box
+            return (raw_confidence * 0.68 + centre_prior * 0.22 +
+                    size_prior * 0.10), box
+
+        score = raw_confidence * 0.34
         if track_item.id == self.target_id:
-            score += 0.22
+            score += 0.30
         if self.last_box is not None:
-            score += iou(box, self.last_box) * 0.16
+            overlap = iou(box, self.last_box)
+            score += overlap * 0.10
+            old_area = max(1.0, self.last_box[2] * self.last_box[3])
+            new_area = max(1.0, obj.w * obj.h)
+            score += (min(old_area, new_area) / max(old_area, new_area)) * 0.06
         predicted = self.filter.predict(now_ms)
         if predicted is not None:
             px, py, _, _ = predicted
-            cx, cy = obj.x + obj.w * 0.5, obj.y + obj.h * 0.5
-            diagonal = math.sqrt(self.camera.width() ** 2 + self.camera.height() ** 2)
+            diagonal = math.sqrt(camera_width ** 2 + camera_height ** 2)
             distance = math.sqrt((cx - px) ** 2 + (cy - py) ** 2) / max(1.0, diagonal)
-            score += clamp(1.0 - distance * 4.0, 0.0, 1.0) * 0.24
+            score += clamp(1.0 - distance * 4.5, 0.0, 1.0) * 0.20
         return score, box
 
     def _select_target(self, tracks, now_ms):
@@ -315,7 +360,12 @@ class RocketTracker:
                 best = track_item
                 best_score = candidate_score
                 best_box = box
-        if best is None or best_score < LOCK_SCORE_MIN:
+        if self.target_id == -1 or not self.filter.valid:
+            minimum_score = (REACQUIRE_SCORE_MIN if self.has_ever_locked
+                             else ACQUIRE_SCORE_MIN)
+        else:
+            minimum_score = ASSOCIATE_SCORE_MIN
+        if best is None or best_score < minimum_score:
             return None
         return best, best_box, best_score
 
@@ -323,6 +373,8 @@ class RocketTracker:
         if selected is None:
             self.missing_frames += 1
             self.confirm_count = 0
+            self.pending_target_id = -1
+            self.pending_target_frames = 0
             if self.filter.valid and self.missing_frames <= DROP_AFTER_FRAMES:
                 self.filter.coast(now_ms)
                 self.state = STATE_WEAK if self.missing_frames < LOST_AFTER_FRAMES else STATE_LOST
@@ -335,17 +387,60 @@ class RocketTracker:
             return
 
         track_item, box, association_score = selected
-        if self.target_id == -1 or track_item.id == self.target_id:
-            self.confirm_count += 1
-        else:
-            self.confirm_count = 1
-        self.target_id = track_item.id
-        confidence = clamp(track_item.score * 0.74 + association_score * 0.26, 0.0, 1.0)
+        confidence = clamp(track_item.score * 0.45 + association_score * 0.55,
+                           0.0, 1.0)
+
+        if self.target_id == -1:
+            if track_item.id == self.pending_target_id:
+                self.pending_target_frames += 1
+            else:
+                self.pending_target_id = track_item.id
+                self.pending_target_frames = 1
+                self.filter.reset()
+            self.filter.update(box, now_ms, confidence)
+            self.last_box = box
+            self.last_confidence = confidence
+            self.missing_frames = 0
+            if self.pending_target_frames >= LOCK_CONFIRM_FRAMES:
+                self.target_id = track_item.id
+                self.pending_target_id = -1
+                self.pending_target_frames = 0
+                self.confirm_count = LOCK_CONFIRM_FRAMES
+                self.has_ever_locked = True
+                self.state = STATE_LOCKED
+            else:
+                self.confirm_count = self.pending_target_frames
+                self.state = STATE_ACQUIRE
+            return
+
+        if track_item.id != self.target_id:
+            # Never jump to a different ByteTrack identity from one frame.  Keep
+            # coasting the old trajectory while the replacement is confirmed.
+            if track_item.id == self.pending_target_id:
+                self.pending_target_frames += 1
+            else:
+                self.pending_target_id = track_item.id
+                self.pending_target_frames = 1
+            if self.pending_target_frames < LOCK_CONFIRM_FRAMES:
+                self.missing_frames += 1
+                self.filter.coast(now_ms)
+                self.last_confidence *= 0.90
+                self.state = STATE_WEAK
+                return
+            self.target_id = track_item.id
+            self.pending_target_id = -1
+            self.pending_target_frames = 0
+            self.filter.reset()
+
+        self.confirm_count = LOCK_CONFIRM_FRAMES
         self.filter.update(box, now_ms, confidence)
         self.last_box = box
         self.last_confidence = confidence
         self.missing_frames = 0
-        self.state = STATE_LOCKED if self.confirm_count >= LOCK_CONFIRM_FRAMES else STATE_ACQUIRE
+        self.pending_target_id = -1
+        self.pending_target_frames = 0
+        self.has_ever_locked = True
+        self.state = STATE_LOCKED
 
     def _send_target(self, now_ms):
         self.sequence = (self.sequence + 1) & 0xFFFF

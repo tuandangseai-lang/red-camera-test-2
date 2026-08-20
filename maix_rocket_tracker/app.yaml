@@ -1,6 +1,6 @@
 id: se_rocket_tracker
 name: SE AI Tracker
-version: 1.2.0
+version: 1.3.0
 author: SE Dang Huu Tuan
 icon: icon.png
 desc: Selectable rocket, person, animal and object tracker for the ESP32 gimbal.
