@@ -1,4 +1,4 @@
-name: Tao IPA SE v6.3 - khoa chu the MaixCAM 3 giay
+name: Tao IPA SE v6.3 build54 - icon tab ten lua
 
 on:
   workflow_dispatch:
@@ -42,12 +42,14 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :NSBluetoothAlwaysUsageDescription" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :NSPhotoLibraryAddUsageDescription" "$PLIST"
           test -f "RedCameraTest/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
+          test -f "RedCameraTest/Assets.xcassets/WaterRocketTabIcon.imageset/WaterRocketTabIcon@3x.png"
           grep -q "builtInUltraWideCamera" "RedCameraTest/CameraController.swift"
           grep -q "videoZoomFactor" "RedCameraTest/CameraController.swift"
           grep -q "bluetooth.arm" "RedCameraTest/ContentView.swift"
           grep -q "GimbalTrackingState" "RedCameraTest/BLEManager.swift"
           grep -q "enrollmentOverlay" "RedCameraTest/ContentView.swift"
           grep -q "ENROLL" "RedCameraTest/BLEManager.swift"
+          grep -q "WaterRocketTabIcon" "RedCameraTest/ContentView.swift"
           if grep -q "import Vision" "RedCameraTest/CameraController.swift"; then
             echo "iPhone khong duoc chay AI Vision trong kien truc MaixCAM"
             exit 1
@@ -91,12 +93,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v6.3-build53-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v6.3-build54-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v6.3-build53-unsigned-ipa
-          path: SE-v6.3-build53-unsigned.ipa
+          name: SE-v6.3-build54-unsigned-ipa
+          path: SE-v6.3-build54-unsigned.ipa
           if-no-files-found: error
           retention-days: 7

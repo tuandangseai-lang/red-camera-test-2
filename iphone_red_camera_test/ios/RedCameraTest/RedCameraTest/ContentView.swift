@@ -175,8 +175,18 @@ struct ContentView: View {
                     }
                     bluetooth.selectMode(mode)
                 } label: {
-                    Image(systemName: mode.icon)
-                        .font(.system(size: 17, weight: .bold))
+                    Group {
+                        if mode.rawValue == TrackingMode.waterRocket.rawValue {
+                            Image("WaterRocketTabIcon")
+                                .resizable()
+                                .renderingMode(.template)
+                                .scaledToFit()
+                                .frame(width: 24, height: 24)
+                        } else {
+                            Image(systemName: mode.icon)
+                                .font(.system(size: 17, weight: .bold))
+                        }
+                    }
                         .foregroundStyle(selected ? .black : .white.opacity(0.76))
                         .frame(maxWidth: .infinity)
                         .frame(height: 42)
