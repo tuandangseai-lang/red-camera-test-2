@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v2.5
+// SE Rocket Tracker v2.6
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -40,26 +40,26 @@ constexpr uint32_t COAST_LIMIT_MS = 420;
 constexpr uint32_t SEARCH_LIMIT_MS = 850;
 constexpr uint32_t TELEMETRY_PERIOD_MS = 150;
 
-constexpr float START_DEADBAND = 5.0f;  // normalized Maix coordinates
-constexpr float STOP_DEADBAND = 2.2f;
-constexpr float MAX_PAN_SPEED_DPS = 220.0f;
-constexpr float MAX_TILT_SPEED_DPS = 205.0f;
-constexpr float MAX_PAN_ACCEL_DPS2 = 1550.0f;
-constexpr float MAX_TILT_ACCEL_DPS2 = 1400.0f;
-constexpr float ROCKET_BOOST_PAN_SPEED_DPS = 285.0f;
-constexpr float ROCKET_BOOST_TILT_SPEED_DPS = 255.0f;
-constexpr float ROCKET_BOOST_PAN_ACCEL_DPS2 = 2600.0f;
-constexpr float ROCKET_BOOST_TILT_ACCEL_DPS2 = 2250.0f;
-constexpr float MAX_DECEL_DPS2 = 1850.0f;
+constexpr float START_DEADBAND = 3.2f;  // 0.32% of the Maix image
+constexpr float STOP_DEADBAND = 1.6f;
+constexpr float MAX_PAN_SPEED_DPS = 255.0f;
+constexpr float MAX_TILT_SPEED_DPS = 235.0f;
+constexpr float MAX_PAN_ACCEL_DPS2 = 2250.0f;
+constexpr float MAX_TILT_ACCEL_DPS2 = 2050.0f;
+constexpr float ROCKET_BOOST_PAN_SPEED_DPS = 320.0f;
+constexpr float ROCKET_BOOST_TILT_SPEED_DPS = 290.0f;
+constexpr float ROCKET_BOOST_PAN_ACCEL_DPS2 = 3400.0f;
+constexpr float ROCKET_BOOST_TILT_ACCEL_DPS2 = 3050.0f;
+constexpr float MAX_DECEL_DPS2 = 2800.0f;
 constexpr float HOME_SPEED_DPS = 65.0f;
-constexpr float SEARCH_SPEED_LIMIT_DPS = 68.0f;
+constexpr float SEARCH_SPEED_LIMIT_DPS = 92.0f;
 
 constexpr uint32_t CENTER_CALIBRATION_MS = 1800;
 constexpr uint32_t CENTER_CALIBRATION_TIMEOUT_MS = 6500;
 constexpr uint8_t CENTER_CALIBRATION_MIN_SAMPLES = 12;
 constexpr int CENTER_CALIBRATION_MAX_DEVIATION = 150;
 
-constexpr int MIN_LOCK_CONFIDENCE = 34;
+constexpr int MIN_LOCK_CONFIDENCE = 38;
 constexpr int MIN_WEAK_CONFIDENCE = 12;
 constexpr uint8_t CONSISTENT_LOCK_PACKETS = 2;
 constexpr int MAX_LOCK_JUMP = 260;
@@ -123,12 +123,17 @@ float filteredX = 500.0f;
 float filteredY = 500.0f;
 float filteredVX = 0.0f;
 float filteredVY = 0.0f;
+float filteredAX = 0.0f;
+float filteredAY = 0.0f;
+float previousVisionVX = 0.0f;
+float previousVisionVY = 0.0f;
 bool filterReady = false;
 uint8_t consistentLockCount = 0;
 int previousLockX = 500;
 int previousLockY = 500;
 uint16_t lastEvaluatedTargetSequence = 0;
 uint16_t lastAppliedTargetSequence = 0;
+uint32_t lastDynamicsAtMs = 0;
 bool acceptedVisionLock = false;
 int lastPanPulse = -1;
 int lastTiltPulse = -1;
@@ -215,6 +220,9 @@ void resetTrackingFilter() {
   portEXIT_CRITICAL(&targetMux);
   filteredX = filteredY = 500.0f;
   filteredVX = filteredVY = 0.0f;
+  filteredAX = filteredAY = 0.0f;
+  previousVisionVX = previousVisionVY = 0.0f;
+  lastDynamicsAtMs = 0;
   filterReady = false;
   consistentLockCount = 0;
   previousLockX = previousLockY = 500;
@@ -426,17 +434,25 @@ bool lockPacketIsConsistent(const TargetPacket &target) {
     acceptedVisionLock = false;
     return false;
   }
+  const float targetSpeed = hypotf(target.velocityX, target.velocityY);
+  const int dynamicJump = Config::MAX_LOCK_JUMP +
+                          min(160, static_cast<int>(targetSpeed * 0.07f));
   if (consistentLockCount == 0 ||
-      (abs(target.x - previousLockX) <= Config::MAX_LOCK_JUMP &&
-       abs(target.y - previousLockY) <= Config::MAX_LOCK_JUMP)) {
+      (abs(target.x - previousLockX) <= dynamicJump &&
+       abs(target.y - previousLockY) <= dynamicJump)) {
     consistentLockCount = min<uint8_t>(consistentLockCount + 1, 20);
   } else {
     consistentLockCount = 1;
   }
   previousLockX = target.x;
   previousLockY = target.y;
-  acceptedVisionLock =
-      consistentLockCount >= Config::CONSISTENT_LOCK_PACKETS;
+  // A high-confidence rocket is allowed to steer on the first independent
+  // frame.  Waiting for a second 30-fps frame costs most of its launch travel.
+  const uint8_t packetsRequired =
+      (selectedTrackingMode == "ROCKET" && target.confidence >= 60)
+          ? 1
+          : Config::CONSISTENT_LOCK_PACKETS;
+  acceptedVisionLock = consistentLockCount >= packetsRequired;
   return acceptedVisionLock;
 }
 
@@ -444,7 +460,7 @@ float adaptiveGainFromSize(const TargetPacket &target) {
   const float largest = max(target.width, target.height);
   // A small distant target crosses the frame quickly in angular terms. Give
   // it more authority; large nearby targets get slightly softer correction.
-  return clampFloat(1.22f - largest / 1800.0f, 0.94f, 1.18f);
+  return clampFloat(1.18f - largest / 1900.0f, 0.96f, 1.15f);
 }
 
 float axisDesiredRate(float error, float velocity, float direction,
@@ -554,6 +570,9 @@ void updateCenterCalibration(float dt, const TargetPacket &target,
     filteredX = targetCenterX;
     filteredY = targetCenterY;
     filteredVX = filteredVY = 0.0f;
+    filteredAX = filteredAY = 0.0f;
+    previousVisionVX = previousVisionVY = 0.0f;
+    lastDynamicsAtMs = 0;
     notifyPhone(String("CALIBRATE,DONE,") + lroundf(targetCenterX) + "," +
                 lroundf(targetCenterY));
     Serial.printf("[CALIBRATE] center=%.0f,%.0f samples=%u\n", targetCenterX,
@@ -584,13 +603,38 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
   if (strongLock) {
     if (target.sequence != lastAppliedTargetSequence) {
       const float rawSpeed = hypotf(target.velocityX, target.velocityY);
-      const bool rocketFast = selectedTrackingMode == "ROCKET" && rawSpeed > 150.0f;
-      const float alpha = filterReady ? (rocketFast ? 0.82f : 0.66f) : 1.0f;
-      const float velocityAlpha = rocketFast ? 0.68f : 0.48f;
+      const bool rocketFast = selectedTrackingMode == "ROCKET" && rawSpeed > 90.0f;
+      const float alpha = filterReady ? (rocketFast ? 0.86f : 0.70f) : 1.0f;
+      const float velocityAlpha = rocketFast ? 0.74f : 0.54f;
+      if (lastDynamicsAtMs != 0 && target.receivedAtMs > lastDynamicsAtMs) {
+        const float visionDt = clampFloat(
+            (target.receivedAtMs - lastDynamicsAtMs) / 1000.0f, 0.015f,
+            0.120f);
+        const float rawAX = clampFloat(
+            (target.velocityX - previousVisionVX) / visionDt, -5000.0f,
+            5000.0f);
+        const float rawAY = clampFloat(
+            (target.velocityY - previousVisionVY) / visionDt, -5000.0f,
+            5000.0f);
+        const float accelerationAlpha = rocketFast ? 0.36f : 0.22f;
+        filteredAX += accelerationAlpha * (rawAX - filteredAX);
+        filteredAY += accelerationAlpha * (rawAY - filteredAY);
+      }
       filteredX += alpha * (target.x - filteredX);
       filteredY += alpha * (target.y - filteredY);
       filteredVX += velocityAlpha * (target.velocityX - filteredVX);
       filteredVY += velocityAlpha * (target.velocityY - filteredVY);
+      previousVisionVX = target.velocityX;
+      previousVisionVY = target.velocityY;
+      lastDynamicsAtMs = target.receivedAtMs;
+      if (rawSpeed < 24.0f &&
+          fabsf(filteredX - targetCenterX) < Config::START_DEADBAND &&
+          fabsf(filteredY - targetCenterY) < Config::START_DEADBAND) {
+        filteredVX *= 0.48f;
+        filteredVY *= 0.48f;
+        filteredAX *= 0.35f;
+        filteredAY *= 0.35f;
+      }
       filterReady = true;
       lastAppliedTargetSequence = target.sequence;
     }
@@ -599,30 +643,39 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
     const float sizeGain = adaptiveGainFromSize(target);
     const float screenSpeed = hypotf(filteredVX, filteredVY);
     const bool rocketBoost = selectedTrackingMode == "ROCKET" &&
-                             (screenSpeed > 150.0f ||
-                              fabsf(filteredX - targetCenterX) > 90.0f ||
-                              fabsf(filteredY - targetCenterY) > 90.0f);
+                             (screenSpeed > 80.0f ||
+                              fabsf(filteredX - targetCenterX) > 45.0f ||
+                              fabsf(filteredY - targetCenterY) > 45.0f);
+    const float transportAge = min(age / 1000.0f, 0.08f);
     const float leadSeconds = rocketBoost
-                                  ? clampFloat(0.055f + screenSpeed / 5200.0f,
-                                               0.055f, 0.175f)
-                                  : 0.035f;
-    const float predictedX = filteredX + filteredVX * leadSeconds;
-    const float predictedY = filteredY + filteredVY * leadSeconds;
-    const float startDeadband = rocketBoost ? 3.0f : Config::START_DEADBAND;
-    const float stopDeadband = rocketBoost ? 1.5f : Config::STOP_DEADBAND;
+                                  ? clampFloat(0.045f + transportAge +
+                                                   screenSpeed / 6000.0f,
+                                               0.050f, 0.190f)
+                                  : clampFloat(0.030f + transportAge, 0.030f,
+                                               0.090f);
+    const float predictedX = clampFloat(
+        filteredX + filteredVX * leadSeconds +
+            0.5f * filteredAX * leadSeconds * leadSeconds,
+        0.0f, 1000.0f);
+    const float predictedY = clampFloat(
+        filteredY + filteredVY * leadSeconds +
+            0.5f * filteredAY * leadSeconds * leadSeconds,
+        0.0f, 1000.0f);
+    const float startDeadband = rocketBoost ? 2.2f : Config::START_DEADBAND;
+    const float stopDeadband = rocketBoost ? 1.1f : Config::STOP_DEADBAND;
     const float panMax = rocketBoost ? Config::ROCKET_BOOST_PAN_SPEED_DPS
                                      : Config::MAX_PAN_SPEED_DPS;
     const float tiltMax = rocketBoost ? Config::ROCKET_BOOST_TILT_SPEED_DPS
                                       : Config::MAX_TILT_SPEED_DPS;
     const float desiredPan = axisDesiredRate(
         predictedX - targetCenterX, filteredVX, Config::PAN_DIRECTION, panMax,
-        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.390f : 0.315f,
-        rocketBoost ? 0.064f : 0.048f, rocketBoost ? 16.0f : 10.0f,
+        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.440f : 0.340f,
+        rocketBoost ? 0.082f : 0.058f, rocketBoost ? 18.0f : 9.0f,
         panMoving);
     const float desiredTilt = axisDesiredRate(
         predictedY - targetCenterY, filteredVY, Config::TILT_DIRECTION, tiltMax,
-        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.410f : 0.330f,
-        rocketBoost ? 0.068f : 0.052f, rocketBoost ? 16.0f : 10.0f,
+        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.455f : 0.355f,
+        rocketBoost ? 0.086f : 0.062f, rocketBoost ? 18.0f : 9.0f,
         tiltMoving);
     const float panAccel = rocketBoost ? Config::ROCKET_BOOST_PAN_ACCEL_DPS2
                                        : Config::MAX_PAN_ACCEL_DPS2;
@@ -647,10 +700,13 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
     searchActive = true;
     const float elapsed = (nowMs - lostStartedAtMs) / 1000.0f;
     const bool rocketSearch = selectedTrackingMode == "ROCKET";
-    const float predictionLimit = rocketSearch ? 0.55f : 0.42f;
-    const float searchSpeed = rocketSearch ? 92.0f : Config::SEARCH_SPEED_LIMIT_DPS;
-    const float predictedX = filteredX + filteredVX * min(elapsed, predictionLimit);
-    const float predictedY = filteredY + filteredVY * min(elapsed, predictionLimit);
+    const float predictionLimit = rocketSearch ? 0.62f : 0.42f;
+    const float searchSpeed = rocketSearch ? 125.0f : Config::SEARCH_SPEED_LIMIT_DPS;
+    const float coastTime = min(elapsed, predictionLimit);
+    const float predictedX = filteredX + filteredVX * coastTime +
+                             0.5f * filteredAX * coastTime * coastTime;
+    const float predictedY = filteredY + filteredVY * coastTime +
+                             0.5f * filteredAY * coastTime * coastTime;
     const float desiredPan = clampFloat(
         Config::PAN_DIRECTION * ((predictedX - targetCenterX) * (rocketSearch ? 0.205f : 0.115f) +
                                  filteredVX * (rocketSearch ? 0.034f : 0.018f)),
@@ -824,7 +880,7 @@ void handlePhoneCommand(String command) {
              command == "ALIGN_CENTER") {
     beginCenterCalibration();
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,2.5.0");
+    notifyPhone("ESP32,SE_GIMBAL,2.6.0");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
                 lroundf(targetCenterY));
@@ -864,7 +920,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,2.5.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,2.6.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -879,7 +935,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v2.5.0");
+  Serial.println("\nSE AI Tracker ESP32 v2.6.0");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);

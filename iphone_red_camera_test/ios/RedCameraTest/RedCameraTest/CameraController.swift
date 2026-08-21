@@ -12,6 +12,11 @@ final class CameraController: NSObject, ObservableObject {
 
     let session = AVCaptureSession()
 
+    // On a physical ultra-wide camera, AVFoundation factor 1.0 is the
+    // user-facing 0.5× view. Never ramp or switch lenses while tracking:
+    // changing geometry would make the MaixCAM/iPhone alignment appear to jump.
+    private static let lockedUltraWideZoomFactor: CGFloat = 1.0
+
     private let sessionQueue = DispatchQueue(label: "vn.se.camera.session", qos: .userInitiated)
     private let movieOutput = AVCaptureMovieFileOutput()
     private let voice = VoiceNotifier()
@@ -138,7 +143,7 @@ final class CameraController: NSObject, ObservableObject {
         configured = true
         DispatchQueue.main.async {
             self.isReady = true
-            self.statusText = "Camera 0,5× sẵn sàng"
+            self.statusText = "Camera 0,5× cố định • sẵn sàng"
         }
     }
 
@@ -177,7 +182,12 @@ final class CameraController: NSObject, ObservableObject {
                     camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
                 }
             }
-            camera.videoZoomFactor = max(camera.minAvailableVideoZoomFactor, 1.0)
+            camera.cancelVideoZoomRamp()
+            camera.videoZoomFactor = min(
+                camera.maxAvailableVideoZoomFactor,
+                max(camera.minAvailableVideoZoomFactor,
+                    Self.lockedUltraWideZoomFactor)
+            )
             if camera.isFocusModeSupported(.continuousAutoFocus) {
                 camera.focusMode = .continuousAutoFocus
             }

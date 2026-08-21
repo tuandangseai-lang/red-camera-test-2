@@ -12,9 +12,10 @@ import os
 import gc
 
 
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.5.0"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
+NANOTRACK_MODEL_PATH = "/root/models/nanotrack.mud"
 
 # The four-pin Type-C adapter exposes MaixCAM UART0, not UART1.
 # Adapter TX/RX are the SoC A16/A17 signals.  ESP32 still uses GPIO16/17.
@@ -39,6 +40,13 @@ IDLE_FRAME_INTERVAL_MS = 120
 ENROLL_DURATION_MS = 3000
 ENROLL_REPORT_INTERVAL_MS = 80
 ENROLL_MIN_VISIBLE_RATIO = 0.25
+NANO_MIN_SCORE = 0.46
+NANO_STRONG_SCORE = 0.68
+NANO_REINIT_FRAMES = 24
+YOLO_ROCKET_INTERVAL = 2
+YOLO_GENERAL_INTERVAL = 4
+NANO_MAX_CENTRE_JUMP_RATIO = 0.34
+NANO_MIN_BOX_SIDE = 4
 
 STATE_IDLE = 0
 STATE_ACQUIRE = 1
@@ -165,6 +173,8 @@ class RocketTracker:
         selected_model, self.valid_class_ids = self._mode_configuration(self.active_mode)
         self.detector_path = selected_model
         self.detector = nn.YOLO11(model=selected_model, dual_buff=True)
+        self.nano_tracker = (nn.NanoTrack(NANOTRACK_MODEL_PATH)
+                             if os.path.exists(NANOTRACK_MODEL_PATH) else None)
         self.camera = camera.Camera(
             self.detector.input_width(),
             self.detector.input_height(),
@@ -201,6 +211,12 @@ class RocketTracker:
         self.enroll_signature_counts = {}
         self.enrollment_class_id = -1
         self.appearance_template = None
+        self.nano_active = False
+        self.nano_last_score = 0.0
+        self.nano_last_init_frame = -1000
+        self.last_yolo_frame = -1000
+        self.last_yolo_lock_frame = -1000
+        self.tracking_source = "YOLO"
 
     def _mode_configuration(self, mode):
         if mode == "ROCKET":
@@ -312,6 +328,12 @@ class RocketTracker:
         self.last_box = None
         self.last_confidence = 0.0
         self.filter.reset()
+        self.nano_active = False
+        self.nano_last_score = 0.0
+        self.nano_last_init_frame = -1000
+        self.last_yolo_frame = -1000
+        self.last_yolo_lock_frame = -1000
+        self.tracking_source = "YOLO"
 
     def _begin_enrollment(self):
         self.enrolling = True
@@ -379,6 +401,127 @@ class RocketTracker:
                            for i in range(6)) / 6.0
         shape_error = abs(signature[6] - self.appearance_template[6])
         return clamp(1.0 - colour_error * 1.45 - shape_error * 0.18, 0.0, 1.0)
+
+    def _normalise_box(self, box):
+        """Clamp one tracker box to the sensor and reject obvious drift."""
+        if box is None or len(box) < 4:
+            return None
+        width = max(1, self.camera.width())
+        height = max(1, self.camera.height())
+        x, y, w, h = [int(value) for value in box[:4]]
+        if w < NANO_MIN_BOX_SIDE or h < NANO_MIN_BOX_SIDE:
+            return None
+        if w * h > width * height * 0.88:
+            return None
+        x = int(clamp(x, 0, width - 1))
+        y = int(clamp(y, 0, height - 1))
+        w = int(clamp(w, 1, width - x))
+        h = int(clamp(h, 1, height - y))
+        if w < NANO_MIN_BOX_SIDE or h < NANO_MIN_BOX_SIDE:
+            return None
+        return x, y, w, h
+
+    def _start_nano_tracker(self, frame, box):
+        """Teach NanoTrack the already verified YOLO target."""
+        if self.nano_tracker is None:
+            return False
+        clean = self._normalise_box(box)
+        if clean is None:
+            self.nano_active = False
+            return False
+        x, y, w, h = clean
+        # NanoTrack needs a usable template even when the rocket is already
+        # small. Expand only to eight pixels; a larger crop would teach sky or
+        # the operator's hand instead of the rocket.
+        minimum = 8
+        if w < minimum:
+            extra = minimum - w
+            x = max(0, x - extra // 2)
+            w = min(self.camera.width() - x, minimum)
+        if h < minimum:
+            extra = minimum - h
+            y = max(0, y - extra // 2)
+            h = min(self.camera.height() - y, minimum)
+        try:
+            self.nano_tracker.init(frame, x, y, w, h)
+            self.nano_active = True
+            self.nano_last_init_frame = self.frame_index
+            self.nano_last_score = 1.0
+            self.tracking_source = "NANO"
+            return True
+        except Exception as exception:
+            print("NanoTrack init failed: {0}".format(exception), flush=True)
+            self.nano_active = False
+            return False
+
+    def _track_with_nano(self, frame, now_ms):
+        if not self.nano_active or self.nano_tracker is None:
+            return None
+        try:
+            # Keep the call compatible with the NanoTrack binding shipped in
+            # current and older MaixPy images.  We apply our stricter score
+            # gate below instead of relying on an optional threshold argument.
+            result = self.nano_tracker.track(frame)
+        except Exception as exception:
+            print("NanoTrack frame failed: {0}".format(exception), flush=True)
+            self.nano_active = False
+            return None
+        if result is None:
+            return None
+        score = clamp(float(result.score), 0.0, 1.0)
+        box = self._normalise_box((result.x, result.y, result.w, result.h))
+        if box is None or score < NANO_MIN_SCORE:
+            self.nano_last_score = score
+            return None
+
+        if self.filter.valid:
+            predicted = self.filter.predict(now_ms)
+            if predicted is not None:
+                cx = box[0] + box[2] * 0.5
+                cy = box[1] + box[3] * 0.5
+                distance = math.sqrt((cx - predicted[0]) ** 2 +
+                                     (cy - predicted[1]) ** 2)
+                diagonal = math.sqrt(self.camera.width() ** 2 +
+                                     self.camera.height() ** 2)
+                maximum_jump = max(diagonal * NANO_MAX_CENTRE_JUMP_RATIO,
+                                   max(box[2], box[3]) * 2.8)
+                if distance > maximum_jump and score < 0.82:
+                    self.nano_last_score = score
+                    return None
+        self.nano_last_score = score
+        return box, score
+
+    def _boxes_compatible(self, first, second):
+        if first is None or second is None:
+            return False
+        if iou(first, second) >= 0.06:
+            return True
+        first_x = first[0] + first[2] * 0.5
+        first_y = first[1] + first[3] * 0.5
+        second_x = second[0] + second[2] * 0.5
+        second_y = second[1] + second[3] * 0.5
+        distance = math.sqrt((first_x - second_x) ** 2 +
+                             (first_y - second_y) ** 2)
+        scale = max(8.0, first[2], first[3], second[2], second[3])
+        return distance <= scale * 0.85
+
+    def _update_from_nano(self, nano_result, now_ms):
+        if nano_result is None:
+            return False
+        box, score = nano_result
+        confidence = clamp(score * 0.86 + self.last_confidence * 0.14,
+                           0.0, 1.0)
+        self.filter.update(box, now_ms, confidence)
+        self.last_box = box
+        self.last_confidence = confidence
+        self.missing_frames = 0
+        self.confirm_count = LOCK_CONFIRM_FRAMES
+        self.has_ever_locked = True
+        self.tracking_source = "NANO"
+        yolo_recent = self.frame_index - self.last_yolo_lock_frame <= 12
+        self.state = (STATE_LOCKED if score >= NANO_STRONG_SCORE or
+                      (score >= 0.54 and yolo_recent) else STATE_WEAK)
+        return True
 
     def _detections_to_tracks(self, objects):
         converted = []
@@ -559,6 +702,9 @@ class RocketTracker:
         self.last_confidence = confidence
         self.filter.reset()
         self.filter.update(box, now_ms, confidence)
+        self.last_yolo_frame = self.frame_index
+        self.last_yolo_lock_frame = self.frame_index
+        self._start_nano_tracker(frame, box)
         signature_count = self.enroll_signature_counts.get(best_id, 0)
         if signature_count > 0:
             self.appearance_template = [
@@ -668,6 +814,61 @@ class RocketTracker:
         )
         self._write(payload)
 
+    def _run_enabled_frame(self, frame, now_ms):
+        """Fuse semantic YOLO detections with low-latency single-object tracking."""
+        if self.enrolling:
+            objects = self.detector.detect(
+                frame,
+                conf_th=DETECT_CONFIDENCE,
+                iou_th=DETECT_IOU,
+            )
+            self.last_yolo_frame = self.frame_index
+            tracks = self._detections_to_tracks(objects)
+            self._update_enrollment(tracks, frame, now_ms)
+            return
+
+        nano_result = self._track_with_nano(frame, now_ms)
+        yolo_interval = (YOLO_ROCKET_INTERVAL if self.active_mode == "ROCKET"
+                         else YOLO_GENERAL_INTERVAL)
+        yolo_due = (nano_result is None or self.state != STATE_LOCKED or
+                    self.frame_index - self.last_yolo_frame >= yolo_interval)
+        selected = None
+        if yolo_due:
+            objects = self.detector.detect(
+                frame,
+                conf_th=DETECT_CONFIDENCE,
+                iou_th=DETECT_IOU,
+            )
+            self.last_yolo_frame = self.frame_index
+            tracks = self._detections_to_tracks(objects)
+            selected = self._select_target(tracks, now_ms, frame)
+
+        if selected is not None:
+            yolo_box = selected[1]
+            association_score = selected[2]
+            self._update_target(selected, now_ms)
+            self.tracking_source = "YOLO"
+            if self.state == STATE_LOCKED:
+                self.last_yolo_lock_frame = self.frame_index
+                compatible = (nano_result is None or
+                              self._boxes_compatible(nano_result[0], yolo_box))
+                periodic_refresh = (
+                    self.frame_index - self.nano_last_init_frame >=
+                    NANO_REINIT_FRAMES
+                )
+                # Re-teach scale/pose periodically, but never let one unrelated
+                # YOLO box overwrite a healthy NanoTrack identity.
+                if (not self.nano_active or
+                        (periodic_refresh and compatible) or
+                        (nano_result is None and association_score >= 0.58)):
+                    self._start_nano_tracker(frame, yolo_box)
+            return
+
+        if self._update_from_nano(nano_result, now_ms):
+            return
+
+        self._update_target(None, now_ms)
+
     def _draw_preview(self, frame):
         width, height = frame.width(), frame.height()
         color = image.COLOR_GREEN if self.state == STATE_LOCKED else image.COLOR_YELLOW
@@ -677,9 +878,10 @@ class RocketTracker:
             y = int(self.filter.cy - self.filter.h * 0.5)
             frame.draw_rect(x, y, int(self.filter.w), int(self.filter.h), color=color, thickness=2)
             frame.draw_cross(int(self.filter.cx), int(self.filter.cy), color=color, size=5, thickness=2)
-        label = "SE {0} {1}  {2}%  {3:.1f}fps".format(
+        label = "SE {0} {1}/{2} {3}% {4:.1f}fps".format(
             self.active_mode,
             ("3S" if self.enrolling else "LOCK" if self.state == STATE_LOCKED else "FIND"),
+            self.tracking_source,
             int(self.last_confidence * 100),
             self.fps,
         )
@@ -717,17 +919,7 @@ class RocketTracker:
                 self.last_status_ms = now_ms
             frame = self.camera.read()
             if self.enabled:
-                objects = self.detector.detect(
-                    frame,
-                    conf_th=DETECT_CONFIDENCE,
-                    iou_th=DETECT_IOU,
-                )
-                tracks = self._detections_to_tracks(objects)
-                if self.enrolling:
-                    self._update_enrollment(tracks, frame, now_ms)
-                else:
-                    selected = self._select_target(tracks, now_ms, frame)
-                    self._update_target(selected, now_ms)
+                self._run_enabled_frame(frame, now_ms)
             self._send_target(now_ms)
             self._update_fps(now_ms)
             if self.frame_index % PREVIEW_EVERY_N_FRAMES == 0:

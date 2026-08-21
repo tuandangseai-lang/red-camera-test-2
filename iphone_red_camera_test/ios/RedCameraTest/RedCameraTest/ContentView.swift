@@ -177,7 +177,7 @@ struct ContentView: View {
                             .font(.custom("Arial", size: 14).monospacedDigit().weight(.bold))
                     }
                 } else {
-                    Text("0,5× • 4K")
+                    Text("0,5× cố định • 4K60")
                         .font(.custom("Arial", size: 13).weight(.bold))
                         .foregroundStyle(.white.opacity(0.82))
                 }
