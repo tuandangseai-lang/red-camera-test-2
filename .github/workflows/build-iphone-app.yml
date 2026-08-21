@@ -1,4 +1,4 @@
-name: Tao IPA SE v6.3 build54 - icon tab ten lua
+name: Tao IPA SE v6.3 build55 - icon tab ten lua
 
 on:
   workflow_dispatch:
@@ -89,16 +89,19 @@ jobs:
           APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/RedCameraTest.app"
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "6.3"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "55"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v6.3-build54-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v6.3-build55-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v6.3-build54-unsigned-ipa
-          path: SE-v6.3-build54-unsigned.ipa
+          name: SE-v6.3-build55-unsigned-ipa
+          path: SE-v6.3-build55-unsigned.ipa
           if-no-files-found: error
           retention-days: 7

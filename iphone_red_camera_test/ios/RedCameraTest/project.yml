@@ -7,7 +7,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "6.3"
-    CURRENT_PROJECT_VERSION: "54"
+    CURRENT_PROJECT_VERSION: "55"
 targets:
   RedCameraTest:
     type: application
@@ -24,6 +24,8 @@ targets:
       path: RedCameraTest/Info.plist
       properties:
         CFBundleDisplayName: SE
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
         NSBluetoothAlwaysUsageDescription: Kết nối ESP32 để điều khiển MaixCAM và giá đỡ bám tên lửa nước.
         NSCameraUsageDescription: Dùng camera góc rộng để quay tên lửa nước; MaixCAM thực hiện AI tracking.
@@ -38,7 +40,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: vn.rockettracker.RedCameraTest
         MARKETING_VERSION: "6.3"
-        CURRENT_PROJECT_VERSION: "54"
+        CURRENT_PROJECT_VERSION: "55"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"
