@@ -35,6 +35,7 @@ enum GimbalTrackingState: String {
     case lock
     case search
     case home
+    case calibrate
 
     var title: String {
         switch self {
@@ -44,6 +45,7 @@ enum GimbalTrackingState: String {
         case .lock: return "Đã khóa mục tiêu"
         case .search: return "Đang bắt lại"
         case .home: return "Đang về Home"
+        case .calibrate: return "Đang căn tâm hai camera"
         }
     }
 }
@@ -62,6 +64,9 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var isEnrolling = false
     @Published private(set) var enrollmentProgress = 0.0
     @Published private(set) var enrollmentStatus = "Giữ chủ thể trước MaixCAM"
+    @Published private(set) var isCalibrating = false
+    @Published private(set) var calibrationProgress = 0.0
+    @Published private(set) var calibrationStatus = "Đặt cùng chủ thể vào tâm iPhone"
 
     private let serviceUUID = CBUUID(string: "7E57A000-8E3A-4D6A-9B2B-13B10A000001")
     private let eventUUID = CBUUID(string: "7E57A001-8E3A-4D6A-9B2B-13B10A000001")
@@ -80,6 +85,7 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     func arm() {
+        cancelCalibrationUI()
         beginEnrollmentUI()
         send("ARM")
         trackingState = .acquire
@@ -87,14 +93,29 @@ final class BLEManager: NSObject, ObservableObject {
 
     func stop() {
         cancelEnrollmentUI()
+        cancelCalibrationUI()
         send("STOP")
         trackingState = .idle
     }
 
     func home() {
         cancelEnrollmentUI()
+        cancelCalibrationUI()
         send("HOME")
         trackingState = .home
+    }
+
+    func calibrateCenter() {
+        guard isConnected else { return }
+        guard trackingState == .lock else {
+            calibrationStatus = "Hãy khóa chủ thể trước khi căn tâm"
+            return
+        }
+        isCalibrating = true
+        calibrationProgress = 0
+        calibrationStatus = "Giữ chủ thể đúng giữa màn hình iPhone"
+        trackingState = .calibrate
+        send("CALIBRATE_CENTER")
     }
 
     func selectMode(_ mode: TrackingMode) {
@@ -105,6 +126,7 @@ final class BLEManager: NSObject, ObservableObject {
         targetY = 0.5
         trackingState = .idle
         cancelEnrollmentUI()
+        cancelCalibrationUI()
         send("MODE,\(mode.rawValue)")
     }
 
@@ -120,6 +142,12 @@ final class BLEManager: NSObject, ObservableObject {
         isEnrolling = false
         enrollmentProgress = 0
         enrollmentStatus = "Giữ chủ thể trước MaixCAM"
+    }
+
+    private func cancelCalibrationUI() {
+        isCalibrating = false
+        calibrationProgress = 0
+        calibrationStatus = "Đặt cùng chủ thể vào tâm iPhone"
     }
 
     func suspendForBackground() {
@@ -178,6 +206,7 @@ final class BLEManager: NSObject, ObservableObject {
             case "LOCK": trackingState = .lock
             case "SEARCH": trackingState = .search
             case "HOME": trackingState = .home
+            case "CALIBRATE": trackingState = .calibrate
             default: break
             }
             confidence = Int(fields[2]) ?? 0
@@ -191,6 +220,40 @@ final class BLEManager: NSObject, ObservableObject {
             }
         } else if head == "MAIX" {
             maixVersion = fields.dropFirst().joined(separator: " • ")
+        } else if head == "CALIBRATE", fields.count >= 2 {
+            switch fields[1].uppercased() {
+            case "START":
+                isCalibrating = true
+                calibrationProgress = 0
+                calibrationStatus = "Giữ chủ thể đúng giữa màn hình iPhone"
+                trackingState = .calibrate
+            case "PROGRESS":
+                isCalibrating = true
+                if fields.count >= 3 {
+                    calibrationProgress = min(1, max(0, (Double(fields[2]) ?? 0) / 100))
+                }
+                calibrationStatus = calibrationProgress > 0
+                    ? "Đang đo độ lệch hai camera"
+                    : "Đang chờ MaixCAM khóa đúng chủ thể"
+            case "DONE":
+                calibrationProgress = 1
+                calibrationStatus = "Đã căn tâm hai camera"
+                trackingState = .lock
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
+                    self?.isCalibrating = false
+                }
+            case "FAILED":
+                isCalibrating = false
+                calibrationProgress = 0
+                calibrationStatus = fields.count >= 3 && fields[2] == "LOCK_FIRST"
+                    ? "Hãy khóa chủ thể rồi căn tâm lại"
+                    : "Không thấy chủ thể ổn định, hãy thử lại"
+                trackingState = .acquire
+            case "SAVED":
+                break
+            default:
+                break
+            }
         } else if head == "ENROLL", fields.count >= 4 {
             let progress = min(100, max(0, Double(fields[1]) ?? 0)) / 100
             if let mode = TrackingMode(rawValue: fields[2].uppercased()) {
@@ -283,6 +346,7 @@ extension BLEManager: CBCentralManagerDelegate {
         isConnected = false
         trackingState = .disconnected
         cancelEnrollmentUI()
+        cancelCalibrationUI()
         commandCharacteristic = nil
         trackerPeripheral = nil
         confidence = 0

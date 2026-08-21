@@ -7,7 +7,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "6.3"
-    CURRENT_PROJECT_VERSION: "55"
+    CURRENT_PROJECT_VERSION: "56"
 targets:
   RedCameraTest:
     type: application
@@ -40,7 +40,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: vn.rockettracker.RedCameraTest
         MARKETING_VERSION: "6.3"
-        CURRENT_PROJECT_VERSION: "55"
+        CURRENT_PROJECT_VERSION: "56"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"

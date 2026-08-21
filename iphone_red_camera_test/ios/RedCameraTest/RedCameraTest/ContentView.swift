@@ -24,6 +24,9 @@ struct ContentView: View {
                 if bluetooth.isEnrolling {
                     enrollmentOverlay
                 }
+                if bluetooth.isCalibrating {
+                    calibrationOverlay
+                }
                 controls
             }
         }
@@ -89,6 +92,46 @@ struct ContentView: View {
         .allowsHitTesting(false)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(bluetooth.enrollmentStatus)
+    }
+
+    private var calibrationOverlay: some View {
+        let complete = bluetooth.calibrationProgress >= 0.999
+        return ZStack {
+            Circle()
+                .fill(.black.opacity(0.48))
+                .frame(width: 188, height: 188)
+
+            Circle()
+                .stroke(.white.opacity(0.22), lineWidth: 7)
+                .frame(width: 164, height: 164)
+
+            Circle()
+                .trim(from: 0, to: max(0.012, bluetooth.calibrationProgress))
+                .stroke(
+                    complete ? Color.green : Color.cyan,
+                    style: StrokeStyle(lineWidth: 7, lineCap: .round)
+                )
+                .frame(width: 164, height: 164)
+                .rotationEffect(.degrees(-90))
+                .animation(.linear(duration: 0.10), value: bluetooth.calibrationProgress)
+
+            Image(systemName: complete ? "checkmark" : "scope")
+                .font(.system(size: 42, weight: .bold))
+                .foregroundStyle(complete ? .green : .white)
+
+            VStack {
+                Spacer()
+                Text(bluetooth.calibrationStatus)
+                    .font(.custom("Arial", size: 12).weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .multilineTextAlignment(.center)
+                    .frame(width: 174)
+            }
+            .frame(height: 236)
+        }
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(bluetooth.calibrationStatus)
     }
 
     private var controls: some View {
@@ -253,20 +296,14 @@ struct ContentView: View {
 
                 Spacer()
 
-                VStack(spacing: 5) {
-                    ZStack {
-                        Circle()
-                            .fill(stateColor.opacity(0.20))
-                            .frame(width: 46, height: 46)
-                        Image(systemName: bluetooth.trackingState == .lock ? "scope" : "dot.scope")
-                            .font(.system(size: 20, weight: .bold))
-                            .foregroundStyle(stateColor)
-                    }
-                    Text("AI")
-                        .font(.custom("Arial", size: 11).weight(.bold))
-                        .foregroundStyle(.white.opacity(0.76))
+                Button {
+                    bluetooth.calibrateCenter()
+                } label: {
+                    controlButton(icon: "scope", title: "Căn tâm", color: .cyan)
                 }
-                .frame(width: 62)
+                .buttonStyle(.plain)
+                .disabled(!bluetooth.isConnected || bluetooth.trackingState != .lock)
+                .opacity(bluetooth.isConnected && bluetooth.trackingState == .lock ? 1 : 0.38)
             }
         }
         .padding(.top, 14)
@@ -331,6 +368,7 @@ struct ContentView: View {
         case .lock: return .green
         case .search, .acquire: return .yellow
         case .home: return .blue
+        case .calibrate: return .cyan
         case .disconnected: return .orange
         case .idle: return .white
         }
@@ -342,6 +380,7 @@ struct ContentView: View {
         case .search: return "location.magnifyingglass"
         case .acquire: return "dot.scope"
         case .home: return "house.fill"
+        case .calibrate: return "scope"
         case .disconnected: return "antenna.radiowaves.left.and.right.slash"
         case .idle: return "checkmark.circle.fill"
         }

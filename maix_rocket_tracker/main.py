@@ -2,8 +2,8 @@
 
 MaixCAM is the only vision authority.  The iPhone selects one mode, MaixCAM
 runs only that detector/class group, preserves one identity through ByteTrack,
-and sends a filtered target to the ESP32 over UART1.  The ESP32 owns all servo
-timing and safety limits.
+and sends a filtered target to the ESP32 through the Type-C UART adapter.  The
+ESP32 owns all servo timing and safety limits.
 """
 
 from maix import app, camera, display, err, image, nn, pinmap, time, tracker, uart
@@ -12,14 +12,18 @@ import os
 import gc
 
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
 
-UART_DEVICE = "/dev/ttyS1"
+# The four-pin Type-C adapter exposes MaixCAM UART0, not UART1.
+# Adapter TX/RX are the SoC A16/A17 signals.  ESP32 still uses GPIO16/17.
+UART_DEVICE = "/dev/ttyS0"
 UART_BAUD = 115200
-UART_TX_PIN = "A19"
-UART_RX_PIN = "A18"
+UART_TX_PIN = "A16"
+UART_RX_PIN = "A17"
+UART_TX_FUNCTION = "UART0_TX"
+UART_RX_FUNCTION = "UART0_RX"
 
 DETECT_CONFIDENCE = 0.16
 DETECT_IOU = 0.42
@@ -241,8 +245,8 @@ class RocketTracker:
         )
 
     def _open_uart(self):
-        err.check_raise(pinmap.set_pin_function(UART_TX_PIN, "UART1_TX"), "UART TX mapping failed")
-        err.check_raise(pinmap.set_pin_function(UART_RX_PIN, "UART1_RX"), "UART RX mapping failed")
+        err.check_raise(pinmap.set_pin_function(UART_TX_PIN, UART_TX_FUNCTION), "UART TX mapping failed")
+        err.check_raise(pinmap.set_pin_function(UART_RX_PIN, UART_RX_FUNCTION), "UART RX mapping failed")
         return uart.UART(UART_DEVICE, UART_BAUD)
 
     def _write(self, payload):

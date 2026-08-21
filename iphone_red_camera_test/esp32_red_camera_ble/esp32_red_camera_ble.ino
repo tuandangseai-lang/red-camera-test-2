@@ -4,16 +4,17 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <ESP32Servo.h>
+#include <Preferences.h>
 
-// SE Rocket Tracker v2.4
+// SE Rocket Tracker v2.5
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
 namespace Config {
 constexpr uint8_t PAN_SERVO_PIN = 19;   // horizontal / left-right axis
 constexpr uint8_t TILT_SERVO_PIN = 18;  // vertical / up-down axis
-constexpr uint8_t MAIX_RX_PIN = 16;     // <- MaixCAM A19 / UART1_TX
-constexpr uint8_t MAIX_TX_PIN = 17;     // -> MaixCAM A18 / UART1_RX
+constexpr uint8_t MAIX_RX_PIN = 16;     // <- MaixCAM Type-C adapter TX (UART0/A16)
+constexpr uint8_t MAIX_TX_PIN = 17;     // -> MaixCAM Type-C adapter RX (UART0/A17)
 constexpr uint8_t STATUS_LED_PIN = 25;
 constexpr uint8_t PHONE_CHARGE_RELAY_PIN = 26;
 
@@ -39,19 +40,24 @@ constexpr uint32_t COAST_LIMIT_MS = 420;
 constexpr uint32_t SEARCH_LIMIT_MS = 850;
 constexpr uint32_t TELEMETRY_PERIOD_MS = 150;
 
-constexpr float START_DEADBAND = 10.0f;  // normalized coordinates, center=500
-constexpr float STOP_DEADBAND = 4.0f;
-constexpr float MAX_PAN_SPEED_DPS = 180.0f;
-constexpr float MAX_TILT_SPEED_DPS = 165.0f;
-constexpr float MAX_PAN_ACCEL_DPS2 = 900.0f;
-constexpr float MAX_TILT_ACCEL_DPS2 = 820.0f;
-constexpr float ROCKET_BOOST_PAN_SPEED_DPS = 225.0f;
-constexpr float ROCKET_BOOST_TILT_SPEED_DPS = 210.0f;
-constexpr float ROCKET_BOOST_PAN_ACCEL_DPS2 = 1500.0f;
-constexpr float ROCKET_BOOST_TILT_ACCEL_DPS2 = 1380.0f;
-constexpr float MAX_DECEL_DPS2 = 1050.0f;
+constexpr float START_DEADBAND = 5.0f;  // normalized Maix coordinates
+constexpr float STOP_DEADBAND = 2.2f;
+constexpr float MAX_PAN_SPEED_DPS = 220.0f;
+constexpr float MAX_TILT_SPEED_DPS = 205.0f;
+constexpr float MAX_PAN_ACCEL_DPS2 = 1550.0f;
+constexpr float MAX_TILT_ACCEL_DPS2 = 1400.0f;
+constexpr float ROCKET_BOOST_PAN_SPEED_DPS = 285.0f;
+constexpr float ROCKET_BOOST_TILT_SPEED_DPS = 255.0f;
+constexpr float ROCKET_BOOST_PAN_ACCEL_DPS2 = 2600.0f;
+constexpr float ROCKET_BOOST_TILT_ACCEL_DPS2 = 2250.0f;
+constexpr float MAX_DECEL_DPS2 = 1850.0f;
 constexpr float HOME_SPEED_DPS = 65.0f;
-constexpr float SEARCH_SPEED_LIMIT_DPS = 42.0f;
+constexpr float SEARCH_SPEED_LIMIT_DPS = 68.0f;
+
+constexpr uint32_t CENTER_CALIBRATION_MS = 1800;
+constexpr uint32_t CENTER_CALIBRATION_TIMEOUT_MS = 6500;
+constexpr uint8_t CENTER_CALIBRATION_MIN_SAMPLES = 12;
+constexpr int CENTER_CALIBRATION_MAX_DEVIATION = 150;
 
 constexpr int MIN_LOCK_CONFIDENCE = 34;
 constexpr int MIN_WEAK_CONFIDENCE = 12;
@@ -89,6 +95,7 @@ struct TargetPacket {
 
 Servo panServo;
 Servo tiltServo;
+Preferences calibrationPreferences;
 BLECharacteristic *eventCharacteristic = nullptr;
 HardwareSerial maixSerial(2);
 
@@ -106,6 +113,7 @@ bool chargeResumePending = false;
 bool phoneChargeCut = false;
 bool enrollmentActive = false;
 uint8_t enrollmentProgress = 0;
+bool centerCalibrationActive = false;
 
 float panAngle = Config::PAN_HOME_DEG;
 float tiltAngle = Config::TILT_HOME_DEG;
@@ -130,6 +138,15 @@ uint32_t lastControlAtUs = 0;
 uint32_t lastTelemetryAtMs = 0;
 uint32_t lastSerialLogAtMs = 0;
 uint32_t chargeResumeAtMs = 0;
+float targetCenterX = 500.0f;
+float targetCenterY = 500.0f;
+uint32_t centerCalibrationStartedAtMs = 0;
+uint32_t centerCalibrationFirstSampleAtMs = 0;
+uint32_t lastCenterCalibrationNotifyAtMs = 0;
+uint32_t centerCalibrationSumX = 0;
+uint32_t centerCalibrationSumY = 0;
+uint16_t centerCalibrationSamples = 0;
+uint16_t lastCenterCalibrationSequence = 0;
 
 char uartLine[192];
 size_t uartLineLength = 0;
@@ -210,7 +227,35 @@ void resetTrackingFilter() {
   lostStartedAtMs = 0;
 }
 
+void cancelCenterCalibration() {
+  centerCalibrationActive = false;
+  centerCalibrationStartedAtMs = 0;
+  centerCalibrationFirstSampleAtMs = 0;
+  centerCalibrationSamples = 0;
+  centerCalibrationSumX = centerCalibrationSumY = 0;
+  lastCenterCalibrationSequence = 0;
+}
+
+void beginCenterCalibration() {
+  if (!sessionArmed || enrollmentActive) {
+    notifyPhone("CALIBRATE,FAILED,LOCK_FIRST");
+    return;
+  }
+  centerCalibrationActive = true;
+  centerCalibrationStartedAtMs = millis();
+  centerCalibrationFirstSampleAtMs = 0;
+  lastCenterCalibrationNotifyAtMs = 0;
+  centerCalibrationSamples = 0;
+  centerCalibrationSumX = centerCalibrationSumY = 0;
+  lastCenterCalibrationSequence = 0;
+  panRate = tiltRate = 0.0f;
+  panMoving = tiltMoving = false;
+  notifyPhone("CALIBRATE,START,0");
+  Serial.println("[CALIBRATE] Put the same subject at iPhone center and hold");
+}
+
 void armSession() {
+  cancelCenterCalibration();
   resetTrackingFilter();
   sessionArmed = true;
   enrollmentActive = true;
@@ -237,6 +282,7 @@ void selectTrackingMode(String mode) {
   selectedTrackingMode = mode;
   enrollmentActive = false;
   enrollmentProgress = 0;
+  cancelCenterCalibration();
   resetTrackingFilter();
   sendMaixCommand("MODE", selectedTrackingMode.c_str());
   notifyPhone(String("MODE,") + selectedTrackingMode);
@@ -248,6 +294,7 @@ void stopSession() {
   sessionArmed = false;
   enrollmentActive = false;
   enrollmentProgress = 0;
+  cancelCenterCalibration();
   resetTrackingFilter();
   sendMaixCommand("DISARM");
   chargeResumePending = true;
@@ -260,6 +307,7 @@ void requestHome() {
   sessionArmed = false;
   enrollmentActive = false;
   enrollmentProgress = 0;
+  cancelCenterCalibration();
   resetTrackingFilter();
   homeRequested = true;
   sendMaixCommand("HOME");
@@ -394,8 +442,9 @@ bool lockPacketIsConsistent(const TargetPacket &target) {
 
 float adaptiveGainFromSize(const TargetPacket &target) {
   const float largest = max(target.width, target.height);
-  // Very tiny targets are noisier; keep strong response but avoid violent jumps.
-  return clampFloat(0.88f + largest / 1100.0f, 0.88f, 1.10f);
+  // A small distant target crosses the frame quickly in angular terms. Give
+  // it more authority; large nearby targets get slightly softer correction.
+  return clampFloat(1.22f - largest / 1800.0f, 0.94f, 1.18f);
 }
 
 float axisDesiredRate(float error, float velocity, float direction,
@@ -448,6 +497,78 @@ void holdServos(float dt) {
   panMoving = tiltMoving = false;
 }
 
+void updateCenterCalibration(float dt, const TargetPacket &target,
+                             uint32_t nowMs) {
+  holdServos(dt);
+  const bool freshLock = target.valid &&
+                         nowMs - target.receivedAtMs <= Config::TARGET_STALE_MS &&
+                         target.state == VISION_LOCKED &&
+                         target.confidence >= Config::MIN_LOCK_CONFIDENCE;
+
+  if (freshLock && target.sequence != lastCenterCalibrationSequence) {
+    lastCenterCalibrationSequence = target.sequence;
+    bool acceptSample = true;
+    if (centerCalibrationSamples >= 4) {
+      const int meanX = centerCalibrationSumX / centerCalibrationSamples;
+      const int meanY = centerCalibrationSumY / centerCalibrationSamples;
+      acceptSample = abs(target.x - meanX) <=
+                         Config::CENTER_CALIBRATION_MAX_DEVIATION &&
+                     abs(target.y - meanY) <=
+                         Config::CENTER_CALIBRATION_MAX_DEVIATION;
+    }
+    if (acceptSample) {
+      if (centerCalibrationFirstSampleAtMs == 0)
+        centerCalibrationFirstSampleAtMs = nowMs;
+      centerCalibrationSumX += target.x;
+      centerCalibrationSumY += target.y;
+      centerCalibrationSamples++;
+    }
+  }
+
+  if (nowMs - lastCenterCalibrationNotifyAtMs >= 100) {
+    lastCenterCalibrationNotifyAtMs = nowMs;
+    int progress = 0;
+    if (centerCalibrationFirstSampleAtMs != 0) {
+      progress = constrain(
+          static_cast<int>((nowMs - centerCalibrationFirstSampleAtMs) * 100 /
+                           Config::CENTER_CALIBRATION_MS),
+          0, 99);
+    }
+    notifyPhone(String("CALIBRATE,PROGRESS,") + progress);
+  }
+
+  const bool enoughTime = centerCalibrationFirstSampleAtMs != 0 &&
+                          nowMs - centerCalibrationFirstSampleAtMs >=
+                              Config::CENTER_CALIBRATION_MS;
+  if (enoughTime &&
+      centerCalibrationSamples >= Config::CENTER_CALIBRATION_MIN_SAMPLES) {
+    targetCenterX = clampFloat(
+        static_cast<float>(centerCalibrationSumX) / centerCalibrationSamples,
+        200.0f, 800.0f);
+    targetCenterY = clampFloat(
+        static_cast<float>(centerCalibrationSumY) / centerCalibrationSamples,
+        200.0f, 800.0f);
+    calibrationPreferences.putUShort("centerX", lroundf(targetCenterX));
+    calibrationPreferences.putUShort("centerY", lroundf(targetCenterY));
+    centerCalibrationActive = false;
+    filteredX = targetCenterX;
+    filteredY = targetCenterY;
+    filteredVX = filteredVY = 0.0f;
+    notifyPhone(String("CALIBRATE,DONE,") + lroundf(targetCenterX) + "," +
+                lroundf(targetCenterY));
+    Serial.printf("[CALIBRATE] center=%.0f,%.0f samples=%u\n", targetCenterX,
+                  targetCenterY, centerCalibrationSamples);
+    return;
+  }
+
+  if (nowMs - centerCalibrationStartedAtMs >=
+      Config::CENTER_CALIBRATION_TIMEOUT_MS) {
+    cancelCenterCalibration();
+    notifyPhone("CALIBRATE,FAILED,NO_STABLE_TARGET");
+    Serial.println("[CALIBRATE] failed - no stable target");
+  }
+}
+
 void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
   const uint32_t age = nowMs - target.receivedAtMs;
   const bool freshTarget = age <= Config::TARGET_STALE_MS;
@@ -479,29 +600,29 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
     const float screenSpeed = hypotf(filteredVX, filteredVY);
     const bool rocketBoost = selectedTrackingMode == "ROCKET" &&
                              (screenSpeed > 150.0f ||
-                              fabsf(filteredX - 500.0f) > 115.0f ||
-                              fabsf(filteredY - 500.0f) > 115.0f);
+                              fabsf(filteredX - targetCenterX) > 90.0f ||
+                              fabsf(filteredY - targetCenterY) > 90.0f);
     const float leadSeconds = rocketBoost
                                   ? clampFloat(0.055f + screenSpeed / 5200.0f,
                                                0.055f, 0.175f)
                                   : 0.035f;
     const float predictedX = filteredX + filteredVX * leadSeconds;
     const float predictedY = filteredY + filteredVY * leadSeconds;
-    const float startDeadband = rocketBoost ? 5.0f : Config::START_DEADBAND;
-    const float stopDeadband = rocketBoost ? 2.5f : Config::STOP_DEADBAND;
+    const float startDeadband = rocketBoost ? 3.0f : Config::START_DEADBAND;
+    const float stopDeadband = rocketBoost ? 1.5f : Config::STOP_DEADBAND;
     const float panMax = rocketBoost ? Config::ROCKET_BOOST_PAN_SPEED_DPS
                                      : Config::MAX_PAN_SPEED_DPS;
     const float tiltMax = rocketBoost ? Config::ROCKET_BOOST_TILT_SPEED_DPS
                                       : Config::MAX_TILT_SPEED_DPS;
     const float desiredPan = axisDesiredRate(
-        predictedX - 500.0f, filteredVX, Config::PAN_DIRECTION, panMax,
-        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.255f : 0.215f,
-        rocketBoost ? 0.046f : 0.032f, rocketBoost ? 12.0f : 8.0f,
+        predictedX - targetCenterX, filteredVX, Config::PAN_DIRECTION, panMax,
+        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.390f : 0.315f,
+        rocketBoost ? 0.064f : 0.048f, rocketBoost ? 16.0f : 10.0f,
         panMoving);
     const float desiredTilt = axisDesiredRate(
-        predictedY - 500.0f, filteredVY, Config::TILT_DIRECTION, tiltMax,
-        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.270f : 0.225f,
-        rocketBoost ? 0.050f : 0.034f, rocketBoost ? 12.0f : 8.0f,
+        predictedY - targetCenterY, filteredVY, Config::TILT_DIRECTION, tiltMax,
+        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.410f : 0.330f,
+        rocketBoost ? 0.068f : 0.052f, rocketBoost ? 16.0f : 10.0f,
         tiltMoving);
     const float panAccel = rocketBoost ? Config::ROCKET_BOOST_PAN_ACCEL_DPS2
                                        : Config::MAX_PAN_ACCEL_DPS2;
@@ -531,11 +652,11 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
     const float predictedX = filteredX + filteredVX * min(elapsed, predictionLimit);
     const float predictedY = filteredY + filteredVY * min(elapsed, predictionLimit);
     const float desiredPan = clampFloat(
-        Config::PAN_DIRECTION * ((predictedX - 500.0f) * (rocketSearch ? 0.145f : 0.085f) +
+        Config::PAN_DIRECTION * ((predictedX - targetCenterX) * (rocketSearch ? 0.205f : 0.115f) +
                                  filteredVX * (rocketSearch ? 0.034f : 0.018f)),
         -searchSpeed, searchSpeed);
     const float desiredTilt = clampFloat(
-        Config::TILT_DIRECTION * ((predictedY - 500.0f) * (rocketSearch ? 0.155f : 0.075f) +
+        Config::TILT_DIRECTION * ((predictedY - targetCenterY) * (rocketSearch ? 0.220f : 0.105f) +
                                   filteredVY * (rocketSearch ? 0.038f : 0.016f)),
         -searchSpeed, searchSpeed);
     panRate = moveToward(panRate, desiredPan,
@@ -592,6 +713,8 @@ void runServoController() {
 
   if (homeRequested) {
     runHome(dt);
+  } else if (centerCalibrationActive) {
+    updateCenterCalibration(dt, target, nowMs);
   } else if (sessionArmed && !enrollmentActive && target.valid) {
     runTracking(dt, target, nowMs);
   } else {
@@ -641,6 +764,8 @@ void publishTelemetry() {
   const char *state = "IDLE";
   if (homeRequested)
     state = "HOME";
+  else if (centerCalibrationActive)
+    state = "CALIBRATE";
   else if (searchActive)
     state = "SEARCH";
   else if (sessionArmed && !enrollmentActive && acceptedVisionLock &&
@@ -648,9 +773,13 @@ void publishTelemetry() {
     state = "LOCK";
   else if (sessionArmed)
     state = "ACQUIRE";
+  const int alignedX = constrain(
+      target.x - static_cast<int>(lroundf(targetCenterX)) + 500, 0, 1000);
+  const int alignedY = constrain(
+      target.y - static_cast<int>(lroundf(targetCenterY)) + 500, 0, 1000);
   char message[96];
   snprintf(message, sizeof(message), "STATE,%s,%d,%d,%d,%.1f,%.1f", state,
-           target.confidence, target.x, target.y, panAngle, tiltAngle);
+           target.confidence, alignedX, alignedY, panAngle, tiltAngle);
   notifyPhone(message);
   if (now - lastSerialLogAtMs >= 750) {
     lastSerialLogAtMs = now;
@@ -691,9 +820,14 @@ void handlePhoneCommand(String command) {
     stopSession();
   } else if (command == "HOME" || command == "SERVO_HOME") {
     requestHome();
+  } else if (command == "CALIBRATE" || command == "CALIBRATE_CENTER" ||
+             command == "ALIGN_CENTER") {
+    beginCenterCalibration();
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,2.4.0");
+    notifyPhone("ESP32,SE_GIMBAL,2.5.0");
     notifyPhone(String("MODE,") + selectedTrackingMode);
+    notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
+                lroundf(targetCenterY));
     sendMaixCommand("MODE", selectedTrackingMode.c_str());
     sendMaixCommand("PING");
   }
@@ -730,7 +864,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,2.4.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,2.5.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -745,10 +879,17 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v2.4.0");
+  Serial.println("\nSE AI Tracker ESP32 v2.5.0");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);
+  calibrationPreferences.begin("se-gimbal", false);
+  targetCenterX = clampFloat(
+      calibrationPreferences.getUShort("centerX", 500), 200.0f, 800.0f);
+  targetCenterY = clampFloat(
+      calibrationPreferences.getUShort("centerY", 500), 200.0f, 800.0f);
+  Serial.printf("[CALIBRATE] saved center=%.0f,%.0f\n", targetCenterX,
+                targetCenterY);
   setPhoneCharging(true);
 
   ESP32PWM::allocateTimer(0);
