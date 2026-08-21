@@ -186,8 +186,9 @@ struct ContentView: View {
             HStack(spacing: 9) {
                 Image(systemName: stateIcon)
                     .foregroundStyle(stateColor)
-                Text(bluetooth.trackingState.title)
+                Text(bluetooth.trackingTitle)
                     .font(.custom("Arial", size: 13).weight(.semibold))
+                    .lineLimit(1)
                 Spacer()
                 if bluetooth.trackingState == .lock || bluetooth.trackingState == .search {
                     Text("\(bluetooth.confidence)%")
@@ -324,6 +325,8 @@ struct ContentView: View {
         )
         let locked = bluetooth.trackingState == .lock
         let searching = bluetooth.trackingState == .search
+        let boxWidth = max(48, size.width * bluetooth.targetWidth)
+        let boxHeight = max(48, size.height * bluetooth.targetHeight)
 
         ZStack {
             Path { path in
@@ -338,11 +341,22 @@ struct ContentView: View {
             if locked || searching {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .stroke(stateColor, style: StrokeStyle(lineWidth: 2.5, dash: searching ? [7, 5] : []))
-                    .frame(width: 58, height: 58)
+                    .frame(width: boxWidth, height: boxHeight)
                     .position(point)
                     .shadow(color: stateColor.opacity(0.48), radius: 6)
                     .animation(.linear(duration: 0.08), value: bluetooth.targetX)
                     .animation(.linear(duration: 0.08), value: bluetooth.targetY)
+
+                Text("MaixCAM • \(bluetooth.lockedTargetName)")
+                    .font(.custom("Arial", size: 12).weight(.bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(stateColor.opacity(0.86), in: Capsule())
+                    .position(
+                        x: min(size.width - 78, max(78, point.x)),
+                        y: max(32, point.y - boxHeight / 2 - 18)
+                    )
             }
         }
         .allowsHitTesting(false)

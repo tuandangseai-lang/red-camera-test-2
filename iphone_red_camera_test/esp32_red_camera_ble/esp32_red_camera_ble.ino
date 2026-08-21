@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v2.6
+// SE Rocket Tracker v2.7
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -54,8 +54,8 @@ constexpr float MAX_DECEL_DPS2 = 2800.0f;
 constexpr float HOME_SPEED_DPS = 65.0f;
 constexpr float SEARCH_SPEED_LIMIT_DPS = 92.0f;
 
-constexpr uint32_t CENTER_CALIBRATION_MS = 1800;
-constexpr uint32_t CENTER_CALIBRATION_TIMEOUT_MS = 6500;
+constexpr uint32_t CENTER_CALIBRATION_MS = 2000;
+constexpr uint32_t CENTER_CALIBRATION_TIMEOUT_MS = 7000;
 constexpr uint8_t CENTER_CALIBRATION_MIN_SAMPLES = 12;
 constexpr int CENTER_CALIBRATION_MAX_DEVIATION = 150;
 
@@ -114,6 +114,8 @@ bool phoneChargeCut = false;
 bool enrollmentActive = false;
 uint8_t enrollmentProgress = 0;
 bool centerCalibrationActive = false;
+bool alignmentReady = false;
+String lockedTargetToken = "WATER_ROCKET";
 
 float panAngle = Config::PAN_HOME_DEG;
 float tiltAngle = Config::TILT_HOME_DEG;
@@ -250,6 +252,7 @@ void beginCenterCalibration() {
     return;
   }
   centerCalibrationActive = true;
+  alignmentReady = false;
   centerCalibrationStartedAtMs = millis();
   centerCalibrationFirstSampleAtMs = 0;
   lastCenterCalibrationNotifyAtMs = 0;
@@ -258,8 +261,8 @@ void beginCenterCalibration() {
   lastCenterCalibrationSequence = 0;
   panRate = tiltRate = 0.0f;
   panMoving = tiltMoving = false;
-  notifyPhone("CALIBRATE,START,0");
-  Serial.println("[CALIBRATE] Put the same subject at iPhone center and hold");
+  notifyPhone("CALIBRATE,START,0,AUTO");
+  Serial.println("[CALIBRATE] Auto 2 s: hold the locked subject at iPhone center");
 }
 
 void armSession() {
@@ -267,6 +270,7 @@ void armSession() {
   resetTrackingFilter();
   sessionArmed = true;
   enrollmentActive = true;
+  alignmentReady = false;
   enrollmentProgress = 0;
   homeRequested = false;
   setPhoneCharging(false);
@@ -288,7 +292,9 @@ void selectTrackingMode(String mode) {
   mode.toUpperCase();
   if (!isSupportedTrackingMode(mode)) return;
   selectedTrackingMode = mode;
+  lockedTargetToken = mode == "ROCKET" ? "WATER_ROCKET" : mode;
   enrollmentActive = false;
+  alignmentReady = false;
   enrollmentProgress = 0;
   cancelCenterCalibration();
   resetTrackingFilter();
@@ -301,6 +307,7 @@ void selectTrackingMode(String mode) {
 void stopSession() {
   sessionArmed = false;
   enrollmentActive = false;
+  alignmentReady = false;
   enrollmentProgress = 0;
   cancelCenterCalibration();
   resetTrackingFilter();
@@ -314,6 +321,7 @@ void stopSession() {
 void requestHome() {
   sessionArmed = false;
   enrollmentActive = false;
+  alignmentReady = false;
   enrollmentProgress = 0;
   cancelCenterCalibration();
   resetTrackingFilter();
@@ -396,8 +404,18 @@ void processMaixLine(char *line) {
       enrollmentProgress = static_cast<uint8_t>(
           constrain(enrollment.substring(0, firstComma).toInt(), 0, 100));
     }
-    enrollmentActive = enrollment.indexOf(",READY") < 0;
+    const int readyMarker = enrollment.indexOf(",READY,");
+    const bool ready = readyMarker >= 0 || enrollment.endsWith(",READY");
+    enrollmentActive = !ready;
+    if (readyMarker >= 0) {
+      lockedTargetToken = enrollment.substring(readyMarker + 7);
+      lockedTargetToken.trim();
+    }
     notifyPhone(String("ENROLL,") + enrollment);
+    if (ready) {
+      notifyPhone(String("TARGET,") + lockedTargetToken);
+      beginCenterCalibration();
+    }
     Serial.printf("[MAIX ENROLL] %s\n", enrollment.c_str());
   }
 }
@@ -567,6 +585,7 @@ void updateCenterCalibration(float dt, const TargetPacket &target,
     calibrationPreferences.putUShort("centerX", lroundf(targetCenterX));
     calibrationPreferences.putUShort("centerY", lroundf(targetCenterY));
     centerCalibrationActive = false;
+    alignmentReady = true;
     filteredX = targetCenterX;
     filteredY = targetCenterY;
     filteredVX = filteredVY = 0.0f;
@@ -583,6 +602,7 @@ void updateCenterCalibration(float dt, const TargetPacket &target,
   if (nowMs - centerCalibrationStartedAtMs >=
       Config::CENTER_CALIBRATION_TIMEOUT_MS) {
     cancelCenterCalibration();
+    alignmentReady = false;
     notifyPhone("CALIBRATE,FAILED,NO_STABLE_TARGET");
     Serial.println("[CALIBRATE] failed - no stable target");
   }
@@ -771,7 +791,8 @@ void runServoController() {
     runHome(dt);
   } else if (centerCalibrationActive) {
     updateCenterCalibration(dt, target, nowMs);
-  } else if (sessionArmed && !enrollmentActive && target.valid) {
+  } else if (sessionArmed && !enrollmentActive && alignmentReady &&
+             target.valid) {
     runTracking(dt, target, nowMs);
   } else {
     holdServos(dt);
@@ -797,7 +818,7 @@ void updateStatusLed() {
   bool on = false;
   if (!sessionArmed) {
     on = phase < 70;
-  } else if (target.valid && acceptedVisionLock &&
+  } else if (alignmentReady && target.valid && acceptedVisionLock &&
              target.state == VISION_LOCKED &&
              target.confidence >= Config::MIN_LOCK_CONFIDENCE) {
     on = true;
@@ -824,7 +845,8 @@ void publishTelemetry() {
     state = "CALIBRATE";
   else if (searchActive)
     state = "SEARCH";
-  else if (sessionArmed && !enrollmentActive && acceptedVisionLock &&
+  else if (sessionArmed && !enrollmentActive && alignmentReady &&
+           acceptedVisionLock &&
            target.state == VISION_LOCKED)
     state = "LOCK";
   else if (sessionArmed)
@@ -833,9 +855,11 @@ void publishTelemetry() {
       target.x - static_cast<int>(lroundf(targetCenterX)) + 500, 0, 1000);
   const int alignedY = constrain(
       target.y - static_cast<int>(lroundf(targetCenterY)) + 500, 0, 1000);
-  char message[96];
-  snprintf(message, sizeof(message), "STATE,%s,%d,%d,%d,%.1f,%.1f", state,
-           target.confidence, alignedX, alignedY, panAngle, tiltAngle);
+  char message[112];
+  snprintf(message, sizeof(message),
+           "STATE,%s,%d,%d,%d,%.1f,%.1f,%d,%d", state, target.confidence,
+           alignedX, alignedY, panAngle, tiltAngle, target.width,
+           target.height);
   notifyPhone(message);
   if (now - lastSerialLogAtMs >= 750) {
     lastSerialLogAtMs = now;
@@ -880,7 +904,7 @@ void handlePhoneCommand(String command) {
              command == "ALIGN_CENTER") {
     beginCenterCalibration();
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,2.6.0");
+    notifyPhone("ESP32,SE_GIMBAL,2.7.0");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
                 lroundf(targetCenterY));
@@ -920,7 +944,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,2.6.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,2.7.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -935,7 +959,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v2.6.0");
+  Serial.println("\nSE AI Tracker ESP32 v2.7.0");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);

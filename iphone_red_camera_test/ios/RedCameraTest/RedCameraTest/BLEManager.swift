@@ -57,6 +57,9 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var confidence = 0
     @Published private(set) var targetX = 0.5
     @Published private(set) var targetY = 0.5
+    @Published private(set) var targetWidth = 0.08
+    @Published private(set) var targetHeight = 0.08
+    @Published private(set) var lockedTargetName = "Tên lửa nước"
     @Published private(set) var panAngle = 90.0
     @Published private(set) var tiltAngle = 90.0
     @Published private(set) var maixVersion = "Đang chờ MaixCAM"
@@ -78,6 +81,14 @@ final class BLEManager: NSObject, ObservableObject {
     private var lifecycleActive = true
     private var reconnectWorkItem: DispatchWorkItem?
     private var enrollmentCycle = 0
+
+    var trackingTitle: String {
+        switch trackingState {
+        case .lock: return "Đã khóa: \(lockedTargetName)"
+        case .search: return "Đang bắt lại: \(lockedTargetName)"
+        default: return trackingState.title
+        }
+    }
 
     override init() {
         super.init()
@@ -124,6 +135,9 @@ final class BLEManager: NSObject, ObservableObject {
         confidence = 0
         targetX = 0.5
         targetY = 0.5
+        targetWidth = 0.08
+        targetHeight = 0.08
+        lockedTargetName = mode.title
         trackingState = .idle
         cancelEnrollmentUI()
         cancelCalibrationUI()
@@ -148,6 +162,28 @@ final class BLEManager: NSObject, ObservableObject {
         isCalibrating = false
         calibrationProgress = 0
         calibrationStatus = "Đặt cùng chủ thể vào tâm iPhone"
+    }
+
+    private func localizedTargetName(_ token: String) -> String {
+        let key = token.uppercased()
+        let known: [String: String] = [
+            "WATER_ROCKET": "Tên lửa nước", "ROCKET": "Tên lửa nước",
+            "PERSON": "Người", "DOG": "Chó", "CAT": "Mèo",
+            "BIRD": "Chim", "HORSE": "Ngựa", "COW": "Bò",
+            "SHEEP": "Cừu", "ELEPHANT": "Voi", "BEAR": "Gấu",
+            "BOTTLE": "Chai", "CAR": "Ô tô", "MOTORCYCLE": "Xe máy",
+            "BICYCLE": "Xe đạp", "CHAIR": "Ghế", "CELL_PHONE": "Điện thoại",
+            "BACKPACK": "Ba lô", "UMBRELLA": "Ô", "OBJECT": "Vật"
+        ]
+        if let translated = known[key] { return translated }
+        return key.replacingOccurrences(of: "_", with: " ").lowercased().capitalized
+    }
+
+    private func mapMaixPointToIPhone(_ raw: Double, scale: Double) -> Double {
+        // Two fixed cameras have different fields of view. Calibration removes
+        // the centre offset; this scale prevents raw Maix coordinates from
+        // being drawn as if both sensors had identical optics.
+        min(1, max(0, 0.5 + (raw - 0.5) * scale))
     }
 
     func suspendForBackground() {
@@ -211,12 +247,20 @@ final class BLEManager: NSObject, ObservableObject {
             }
             confidence = Int(fields[2]) ?? 0
             if fields.count >= 5 {
-                targetX = min(1, max(0, (Double(fields[3]) ?? 500) / 1000))
-                targetY = min(1, max(0, (Double(fields[4]) ?? 500) / 1000))
+                let maixX = (Double(fields[3]) ?? 500) / 1000
+                let maixY = (Double(fields[4]) ?? 500) / 1000
+                targetX = mapMaixPointToIPhone(maixX, scale: 0.62)
+                targetY = mapMaixPointToIPhone(maixY, scale: 0.48)
             }
             if fields.count >= 7 {
                 panAngle = Double(fields[5]) ?? panAngle
                 tiltAngle = Double(fields[6]) ?? tiltAngle
+            }
+            if fields.count >= 9 {
+                targetWidth = min(0.34, max(0.055,
+                    ((Double(fields[7]) ?? 80) / 1000) * 0.62))
+                targetHeight = min(0.42, max(0.055,
+                    ((Double(fields[8]) ?? 80) / 1000) * 0.48))
             }
         } else if head == "MAIX" {
             maixVersion = fields.dropFirst().joined(separator: " • ")
@@ -225,7 +269,7 @@ final class BLEManager: NSObject, ObservableObject {
             case "START":
                 isCalibrating = true
                 calibrationProgress = 0
-                calibrationStatus = "Giữ chủ thể đúng giữa màn hình iPhone"
+                calibrationStatus = "Giữ \(lockedTargetName.lowercased()) đúng tâm iPhone trong 2 giây"
                 trackingState = .calibrate
             case "PROGRESS":
                 isCalibrating = true
@@ -263,14 +307,12 @@ final class BLEManager: NSObject, ObservableObject {
             enrollmentProgress = progress
             switch status {
             case "READY":
-                isEnrolling = true
-                enrollmentProgress = 1
-                enrollmentStatus = "Đã xác nhận \(selectedMode.title.lowercased())"
-                let cycle = enrollmentCycle
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { [weak self] in
-                    guard let self, self.enrollmentCycle == cycle else { return }
-                    self.isEnrolling = false
+                if fields.count >= 5 {
+                    lockedTargetName = localizedTargetName(fields[4])
                 }
+                isEnrolling = false
+                enrollmentProgress = 1
+                enrollmentStatus = "MaixCAM đã khóa \(lockedTargetName.lowercased())"
             case "RETRY":
                 isEnrolling = true
                 enrollmentProgress = 0
@@ -284,6 +326,9 @@ final class BLEManager: NSObject, ObservableObject {
         } else if head == "MODE", fields.count >= 2,
                   let mode = TrackingMode(rawValue: fields[1].uppercased()) {
             selectedMode = mode
+            lockedTargetName = mode.title
+        } else if head == "TARGET", fields.count >= 2 {
+            lockedTargetName = localizedTargetName(fields[1])
         } else if head == "ESP32" {
             connectionText = "ESP32 SE đã sẵn sàng"
         }

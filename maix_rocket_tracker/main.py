@@ -12,7 +12,7 @@ import os
 import gc
 
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
 NANOTRACK_MODEL_PATH = "/root/models/nanotrack.mud"
@@ -57,6 +57,22 @@ STATE_LOST = 4
 SUPPORTED_MODES = ("ROCKET", "PERSON", "ANIMAL", "OBJECT")
 ANIMAL_CLASS_IDS = list(range(14, 24))
 OBJECT_CLASS_IDS = list(range(1, 14)) + list(range(24, 80))
+COCO_LABELS = (
+    "PERSON", "BICYCLE", "CAR", "MOTORCYCLE", "AIRPLANE", "BUS",
+    "TRAIN", "TRUCK", "BOAT", "TRAFFIC_LIGHT", "FIRE_HYDRANT",
+    "STOP_SIGN", "PARKING_METER", "BENCH", "BIRD", "CAT", "DOG",
+    "HORSE", "SHEEP", "COW", "ELEPHANT", "BEAR", "ZEBRA", "GIRAFFE",
+    "BACKPACK", "UMBRELLA", "HANDBAG", "TIE", "SUITCASE", "FRISBEE",
+    "SKIS", "SNOWBOARD", "SPORTS_BALL", "KITE", "BASEBALL_BAT",
+    "BASEBALL_GLOVE", "SKATEBOARD", "SURFBOARD", "TENNIS_RACKET",
+    "BOTTLE", "WINE_GLASS", "CUP", "FORK", "KNIFE", "SPOON", "BOWL",
+    "BANANA", "APPLE", "SANDWICH", "ORANGE", "BROCCOLI", "CARROT",
+    "HOT_DOG", "PIZZA", "DONUT", "CAKE", "CHAIR", "COUCH",
+    "POTTED_PLANT", "BED", "DINING_TABLE", "TOILET", "TV", "LAPTOP",
+    "MOUSE", "REMOTE", "KEYBOARD", "CELL_PHONE", "MICROWAVE", "OVEN",
+    "TOASTER", "SINK", "REFRIGERATOR", "BOOK", "CLOCK", "VASE",
+    "SCISSORS", "TEDDY_BEAR", "HAIR_DRIER", "TOOTHBRUSH",
+)
 
 
 def clamp(value, low, high):
@@ -66,6 +82,14 @@ def clamp(value, low, high):
 def ticks_delta(now, before):
     value = now - before
     return value if value >= 0 else 1
+
+
+def target_label(mode, class_id):
+    if mode == "ROCKET":
+        return "WATER_ROCKET"
+    if 0 <= class_id < len(COCO_LABELS):
+        return COCO_LABELS[class_id]
+    return mode
 
 
 def crc8_xor(text):
@@ -217,6 +241,7 @@ class RocketTracker:
         self.last_yolo_frame = -1000
         self.last_yolo_lock_frame = -1000
         self.tracking_source = "YOLO"
+        self.locked_label = "WATER_ROCKET"
 
     def _mode_configuration(self, mode):
         if mode == "ROCKET":
@@ -334,6 +359,7 @@ class RocketTracker:
         self.last_yolo_frame = -1000
         self.last_yolo_lock_frame = -1000
         self.tracking_source = "YOLO"
+        self.locked_label = target_label(self.active_mode, -1)
 
     def _begin_enrollment(self):
         self.enrolling = True
@@ -518,9 +544,12 @@ class RocketTracker:
         self.confirm_count = LOCK_CONFIRM_FRAMES
         self.has_ever_locked = True
         self.tracking_source = "NANO"
-        yolo_recent = self.frame_index - self.last_yolo_lock_frame <= 12
-        self.state = (STATE_LOCKED if score >= NANO_STRONG_SCORE or
-                      (score >= 0.54 and yolo_recent) else STATE_WEAK)
+        # NanoTrack is excellent at motion continuity but can drift onto a hand,
+        # reflection or nearby object.  It may command LOCK only while YOLO has
+        # semantically confirmed the same box very recently.
+        yolo_recent = self.frame_index - self.last_yolo_lock_frame <= 8
+        self.state = (STATE_LOCKED if yolo_recent and
+                      score >= NANO_STRONG_SCORE else STATE_WEAK)
         return True
 
     def _detections_to_tracks(self, objects):
@@ -693,6 +722,7 @@ class RocketTracker:
         box, confidence, class_id = self.enroll_last_seen[best_id]
         self.target_id = best_id
         self.enrollment_class_id = class_id
+        self.locked_label = target_label(self.active_mode, class_id)
         self.pending_target_id = -1
         self.pending_target_frames = 0
         self.has_ever_locked = True
@@ -713,7 +743,9 @@ class RocketTracker:
             ]
         self.enrolling = False
         self.state = STATE_LOCKED
-        self._write("E,100,{0},READY".format(self.active_mode))
+        self._write("E,100,{0},READY,{1}".format(
+            self.active_mode, self.locked_label
+        ))
         print("Subject enrolled: mode={0} id={1} class={2} visible={3:.0f}%".format(
             self.active_mode, best_id, class_id, visible_ratio * 100.0
         ), flush=True)
@@ -843,6 +875,13 @@ class RocketTracker:
             tracks = self._detections_to_tracks(objects)
             selected = self._select_target(tracks, now_ms, frame)
 
+        if (selected is not None and nano_result is not None and
+                not self._boxes_compatible(nano_result[0], selected[1])):
+            # Never jump from a healthy single-object track to an unrelated
+            # YOLO detection in one frame.  Let the old trajectory coast while
+            # semantic confirmation catches up.
+            selected = None
+
         if selected is not None:
             yolo_box = selected[1]
             association_score = selected[2]
@@ -850,8 +889,6 @@ class RocketTracker:
             self.tracking_source = "YOLO"
             if self.state == STATE_LOCKED:
                 self.last_yolo_lock_frame = self.frame_index
-                compatible = (nano_result is None or
-                              self._boxes_compatible(nano_result[0], yolo_box))
                 periodic_refresh = (
                     self.frame_index - self.nano_last_init_frame >=
                     NANO_REINIT_FRAMES
@@ -859,7 +896,7 @@ class RocketTracker:
                 # Re-teach scale/pose periodically, but never let one unrelated
                 # YOLO box overwrite a healthy NanoTrack identity.
                 if (not self.nano_active or
-                        (periodic_refresh and compatible) or
+                        (periodic_refresh and nano_result is not None) or
                         (nano_result is None and association_score >= 0.58)):
                     self._start_nano_tracker(frame, yolo_box)
             return
@@ -879,7 +916,7 @@ class RocketTracker:
             frame.draw_rect(x, y, int(self.filter.w), int(self.filter.h), color=color, thickness=2)
             frame.draw_cross(int(self.filter.cx), int(self.filter.cy), color=color, size=5, thickness=2)
         label = "SE {0} {1}/{2} {3}% {4:.1f}fps".format(
-            self.active_mode,
+            self.locked_label,
             ("3S" if self.enrolling else "LOCK" if self.state == STATE_LOCKED else "FIND"),
             self.tracking_source,
             int(self.last_confidence * 100),
