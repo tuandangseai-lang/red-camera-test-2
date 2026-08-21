@@ -21,6 +21,9 @@ struct ContentView: View {
                 .allowsHitTesting(false)
 
                 trackingOverlay(in: geometry.size)
+                if bluetooth.isEnrolling {
+                    enrollmentOverlay
+                }
                 controls
             }
         }
@@ -41,6 +44,51 @@ struct ContentView: View {
                 break
             }
         }
+    }
+
+    private var enrollmentOverlay: some View {
+        let complete = bluetooth.enrollmentProgress >= 0.999
+        let remaining = max(1, Int(ceil((1 - bluetooth.enrollmentProgress) * 3)))
+        return ZStack {
+            Circle()
+                .fill(.black.opacity(0.58))
+                .frame(width: 176, height: 176)
+                .shadow(color: .black.opacity(0.45), radius: 18)
+
+            Circle()
+                .stroke(.white.opacity(0.20), lineWidth: 8)
+                .frame(width: 154, height: 154)
+
+            Circle()
+                .trim(from: 0, to: max(0.012, bluetooth.enrollmentProgress))
+                .stroke(
+                    complete ? Color.green : Color.red,
+                    style: StrokeStyle(lineWidth: 8, lineCap: .round)
+                )
+                .frame(width: 154, height: 154)
+                .rotationEffect(.degrees(-90))
+                .shadow(color: (complete ? Color.green : Color.red).opacity(0.55), radius: 7)
+                .animation(.linear(duration: 0.10), value: bluetooth.enrollmentProgress)
+
+            VStack(spacing: 7) {
+                Image(systemName: complete ? "checkmark" : bluetooth.selectedMode.icon)
+                    .font(.system(size: 29, weight: .bold))
+                    .foregroundStyle(complete ? .green : .white)
+                Text(complete ? "XONG" : "\(remaining)")
+                    .font(.custom("Arial", size: 30).monospacedDigit().weight(.bold))
+                Text(bluetooth.enrollmentStatus)
+                    .font(.custom("Arial", size: 12).weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .frame(width: 132)
+            }
+        }
+        .transition(.scale(scale: 0.88).combined(with: .opacity))
+        .animation(.spring(response: 0.30, dampingFraction: 0.84), value: complete)
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(bluetooth.enrollmentStatus)
     }
 
     private var controls: some View {

@@ -12,7 +12,7 @@ import os
 import gc
 
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
 
@@ -32,6 +32,9 @@ DROP_AFTER_FRAMES = 22
 MAX_PREDICT_SECONDS = 0.50
 PREVIEW_EVERY_N_FRAMES = 6
 IDLE_FRAME_INTERVAL_MS = 120
+ENROLL_DURATION_MS = 3000
+ENROLL_REPORT_INTERVAL_MS = 80
+ENROLL_MIN_VISIBLE_RATIO = 0.25
 
 STATE_IDLE = 0
 STATE_ACQUIRE = 1
@@ -184,6 +187,16 @@ class RocketTracker:
         self.last_fps_ms = time.ticks_ms()
         self.fps_frames = 0
         self.fps = 0.0
+        self.enrolling = False
+        self.enroll_started_ms = 0
+        self.enroll_last_report_ms = 0
+        self.enroll_total_frames = 0
+        self.enroll_votes = {}
+        self.enroll_last_seen = {}
+        self.enroll_signature_sums = {}
+        self.enroll_signature_counts = {}
+        self.enrollment_class_id = -1
+        self.appearance_template = None
 
     def _mode_configuration(self, mode):
         if mode == "ROCKET":
@@ -213,6 +226,8 @@ class RocketTracker:
         self.valid_class_ids = class_ids
         self.state = STATE_ACQUIRE if self.enabled else STATE_IDLE
         self._clear_target()
+        if self.enabled:
+            self._begin_enrollment()
         print("Tracking mode: {0}".format(mode), flush=True)
         return True
 
@@ -254,18 +269,21 @@ class RocketTracker:
                 self.enabled = True
                 self.state = STATE_ACQUIRE
                 self._clear_target()
+                self._begin_enrollment()
                 self._write("A,{0},ARMED".format(parts[1]))
             elif command in ("STOP", "DISARM"):
                 print("UART command: {0}".format(command), flush=True)
                 self.enabled = False
                 self.state = STATE_IDLE
                 self._clear_target()
+                self._cancel_enrollment()
                 self._write("A,{0},IDLE".format(parts[1]))
             elif command == "HOME":
                 print("UART command: HOME", flush=True)
                 self.enabled = False
                 self.state = STATE_IDLE
                 self._clear_target()
+                self._cancel_enrollment()
                 self._write("A,{0},HOME".format(parts[1]))
             elif command == "MODE" and len(parts) >= 4:
                 if self._set_mode(parts[3]):
@@ -291,15 +309,87 @@ class RocketTracker:
         self.last_confidence = 0.0
         self.filter.reset()
 
+    def _begin_enrollment(self):
+        self.enrolling = True
+        self.enroll_started_ms = time.ticks_ms()
+        self.enroll_last_report_ms = 0
+        self.enroll_total_frames = 0
+        self.enroll_votes = {}
+        self.enroll_last_seen = {}
+        self.enroll_signature_sums = {}
+        self.enroll_signature_counts = {}
+        self.enrollment_class_id = -1
+        self.appearance_template = None
+        self.state = STATE_ACQUIRE
+        self._write("E,0,{0},START".format(self.active_mode))
+
+    def _cancel_enrollment(self):
+        self.enrolling = False
+        self.enroll_votes = {}
+        self.enroll_last_seen = {}
+        self.enroll_signature_sums = {}
+        self.enroll_signature_counts = {}
+
+    def _appearance_signature(self, frame, box):
+        """Tiny colour/shape descriptor for re-identifying the enrolled subject.
+
+        YOLO supplies the semantic class and ByteTrack supplies motion identity.
+        This descriptor is deliberately small so MaixCAM can compare a specific
+        bottle/person/animal without a second neural network or extra heat.
+        """
+        x, y, w, h = box
+        if w < 10 or h < 10:
+            return None
+        width = max(1, frame.width())
+        height = max(1, frame.height())
+        samples = []
+        for fy in (0.22, 0.40, 0.58, 0.76):
+            py = int(clamp(y + h * fy, 0, height - 1))
+            for fx in (0.22, 0.40, 0.58, 0.76):
+                px = int(clamp(x + w * fx, 0, width - 1))
+                try:
+                    pixel = frame.get_pixel(px, py, True)
+                except Exception:
+                    return None
+                if not isinstance(pixel, (tuple, list)) or len(pixel) < 3:
+                    return None
+                samples.append((float(pixel[0]), float(pixel[1]), float(pixel[2])))
+        if not samples:
+            return None
+        count = float(len(samples))
+        means = [sum(pixel[channel] for pixel in samples) / (255.0 * count)
+                 for channel in range(3)]
+        spreads = []
+        for channel in range(3):
+            mean_raw = means[channel] * 255.0
+            variance = sum((pixel[channel] - mean_raw) ** 2 for pixel in samples) / count
+            spreads.append(math.sqrt(variance) / 128.0)
+        aspect = clamp(math.log(max(0.12, w / float(max(1, h)))) / 2.5,
+                       -1.0, 1.0)
+        return means + spreads + [aspect]
+
+    def _appearance_similarity(self, signature):
+        if signature is None or self.appearance_template is None:
+            return None
+        colour_error = sum(abs(signature[i] - self.appearance_template[i])
+                           for i in range(6)) / 6.0
+        shape_error = abs(signature[6] - self.appearance_template[6])
+        return clamp(1.0 - colour_error * 1.45 - shape_error * 0.18, 0.0, 1.0)
+
     def _detections_to_tracks(self, objects):
         converted = []
         for obj in objects:
             if obj.class_id not in self.valid_class_ids:
                 continue
-            converted.append(tracker.Object(obj.x, obj.y, obj.w, obj.h, 0, obj.score))
+            if (not self.enrolling and self.enrollment_class_id >= 0 and
+                    obj.class_id != self.enrollment_class_id):
+                continue
+            converted.append(tracker.Object(
+                obj.x, obj.y, obj.w, obj.h, obj.class_id, obj.score
+            ))
         return self.byte_tracker.update(converted)
 
-    def _candidate_score(self, track_item, now_ms):
+    def _candidate_score(self, track_item, now_ms, frame):
         obj = track_item.history[-1]
         box = (obj.x, obj.y, obj.w, obj.h)
         raw_confidence = clamp(track_item.score, 0.0, 1.0)
@@ -326,6 +416,12 @@ class RocketTracker:
                 # After a complete disappearance the rocket may re-enter at an
                 # edge.  The custom detector class and two-frame confirmation
                 # are stronger evidence than the initial centre placement.
+                appearance = self._appearance_similarity(
+                    self._appearance_signature(frame, box)
+                )
+                if appearance is not None:
+                    return (raw_confidence * 0.58 + appearance * 0.32 +
+                            centre_prior * 0.03 + size_prior * 0.07), box
                 return (raw_confidence * 0.82 + centre_prior * 0.08 +
                         size_prior * 0.10), box
             return (raw_confidence * 0.68 + centre_prior * 0.22 +
@@ -334,6 +430,12 @@ class RocketTracker:
         score = raw_confidence * 0.34
         if track_item.id == self.target_id:
             score += 0.30
+        elif self.appearance_template is not None:
+            appearance = self._appearance_similarity(
+                self._appearance_signature(frame, box)
+            )
+            if appearance is not None:
+                score += appearance * 0.24
         if self.last_box is not None:
             overlap = iou(box, self.last_box)
             score += overlap * 0.10
@@ -348,14 +450,14 @@ class RocketTracker:
             score += clamp(1.0 - distance * 4.5, 0.0, 1.0) * 0.20
         return score, box
 
-    def _select_target(self, tracks, now_ms):
+    def _select_target(self, tracks, now_ms, frame):
         best = None
         best_score = -1.0
         best_box = None
         for track_item in tracks:
             if track_item.lost or not track_item.history:
                 continue
-            candidate_score, box = self._candidate_score(track_item, now_ms)
+            candidate_score, box = self._candidate_score(track_item, now_ms, frame)
             if candidate_score > best_score:
                 best = track_item
                 best_score = candidate_score
@@ -368,6 +470,103 @@ class RocketTracker:
         if best is None or best_score < minimum_score:
             return None
         return best, best_box, best_score
+
+    def _select_enrollment_candidate(self, tracks):
+        width = max(1.0, float(self.camera.width()))
+        height = max(1.0, float(self.camera.height()))
+        best = None
+        best_score = -1.0
+        for track_item in tracks:
+            if track_item.lost or not track_item.history:
+                continue
+            obj = track_item.history[-1]
+            cx = obj.x + obj.w * 0.5
+            cy = obj.y + obj.h * 0.5
+            nx = (cx - width * 0.5) / (width * 0.5)
+            ny = (cy - height * 0.5) / (height * 0.5)
+            centre_distance = math.sqrt(nx * nx + ny * ny) / math.sqrt(2.0)
+            centre_prior = clamp(1.0 - centre_distance * 1.65, 0.0, 1.0)
+            area = clamp(obj.w * obj.h / (width * height) * 7.0, 0.0, 1.0)
+            score = clamp(track_item.score, 0.0, 1.0) * 0.58 + centre_prior * 0.34 + area * 0.08
+            if score > best_score:
+                best = track_item
+                best_score = score
+        return best
+
+    def _restart_enrollment(self, now_ms):
+        self.enroll_started_ms = now_ms
+        self.enroll_last_report_ms = 0
+        self.enroll_total_frames = 0
+        self.enroll_votes = {}
+        self.enroll_last_seen = {}
+        self.enroll_signature_sums = {}
+        self.enroll_signature_counts = {}
+        self._write("E,0,{0},RETRY".format(self.active_mode))
+
+    def _update_enrollment(self, tracks, frame, now_ms):
+        self.enroll_total_frames += 1
+        candidate = self._select_enrollment_candidate(tracks)
+        if candidate is not None:
+            obj = candidate.history[-1]
+            box = (obj.x, obj.y, obj.w, obj.h)
+            target_id = candidate.id
+            self.enroll_votes[target_id] = self.enroll_votes.get(target_id, 0) + 1
+            self.enroll_last_seen[target_id] = (
+                box, clamp(candidate.score, 0.0, 1.0), obj.class_id
+            )
+            if self.frame_index % 2 == 0:
+                signature = self._appearance_signature(frame, box)
+                if signature is not None:
+                    if target_id not in self.enroll_signature_sums:
+                        self.enroll_signature_sums[target_id] = [0.0] * len(signature)
+                        self.enroll_signature_counts[target_id] = 0
+                    sums = self.enroll_signature_sums[target_id]
+                    for index, value in enumerate(signature):
+                        sums[index] += value
+                    self.enroll_signature_counts[target_id] += 1
+
+        elapsed = ticks_delta(now_ms, self.enroll_started_ms)
+        progress = int(clamp(elapsed * 100.0 / ENROLL_DURATION_MS, 0, 100))
+        if (self.enroll_last_report_ms == 0 or
+                ticks_delta(now_ms, self.enroll_last_report_ms) >= ENROLL_REPORT_INTERVAL_MS):
+            self._write("E,{0},{1},SCANNING".format(progress, self.active_mode))
+            self.enroll_last_report_ms = now_ms
+        if elapsed < ENROLL_DURATION_MS:
+            return
+
+        if not self.enroll_votes:
+            self._restart_enrollment(now_ms)
+            return
+        best_id = max(self.enroll_votes, key=self.enroll_votes.get)
+        visible_ratio = self.enroll_votes[best_id] / float(max(1, self.enroll_total_frames))
+        if visible_ratio < ENROLL_MIN_VISIBLE_RATIO or best_id not in self.enroll_last_seen:
+            self._restart_enrollment(now_ms)
+            return
+
+        box, confidence, class_id = self.enroll_last_seen[best_id]
+        self.target_id = best_id
+        self.enrollment_class_id = class_id
+        self.pending_target_id = -1
+        self.pending_target_frames = 0
+        self.has_ever_locked = True
+        self.confirm_count = LOCK_CONFIRM_FRAMES
+        self.missing_frames = 0
+        self.last_box = box
+        self.last_confidence = confidence
+        self.filter.reset()
+        self.filter.update(box, now_ms, confidence)
+        signature_count = self.enroll_signature_counts.get(best_id, 0)
+        if signature_count > 0:
+            self.appearance_template = [
+                value / signature_count
+                for value in self.enroll_signature_sums[best_id]
+            ]
+        self.enrolling = False
+        self.state = STATE_LOCKED
+        self._write("E,100,{0},READY".format(self.active_mode))
+        print("Subject enrolled: mode={0} id={1} class={2} visible={3:.0f}%".format(
+            self.active_mode, best_id, class_id, visible_ratio * 100.0
+        ), flush=True)
 
     def _update_target(self, selected, now_ms):
         if selected is None:
@@ -444,7 +643,7 @@ class RocketTracker:
 
     def _send_target(self, now_ms):
         self.sequence = (self.sequence + 1) & 0xFFFF
-        if not self.enabled or not self.filter.valid:
+        if not self.enabled or self.enrolling or not self.filter.valid:
             payload = "T,{0},{1},500,500,0,0,0,0,0,{2}".format(
                 self.sequence, now_ms, self.state
             )
@@ -476,7 +675,7 @@ class RocketTracker:
             frame.draw_cross(int(self.filter.cx), int(self.filter.cy), color=color, size=5, thickness=2)
         label = "SE {0} {1}  {2}%  {3:.1f}fps".format(
             self.active_mode,
-            ("LOCK" if self.state == STATE_LOCKED else "FIND"),
+            ("3S" if self.enrolling else "LOCK" if self.state == STATE_LOCKED else "FIND"),
             int(self.last_confidence * 100),
             self.fps,
         )
@@ -520,8 +719,11 @@ class RocketTracker:
                     iou_th=DETECT_IOU,
                 )
                 tracks = self._detections_to_tracks(objects)
-                selected = self._select_target(tracks, now_ms)
-                self._update_target(selected, now_ms)
+                if self.enrolling:
+                    self._update_enrollment(tracks, frame, now_ms)
+                else:
+                    selected = self._select_target(tracks, now_ms, frame)
+                    self._update_target(selected, now_ms)
             self._send_target(now_ms)
             self._update_fps(now_ms)
             if self.frame_index % PREVIEW_EVERY_N_FRAMES == 0:

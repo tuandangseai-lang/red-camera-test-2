@@ -59,6 +59,9 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var tiltAngle = 90.0
     @Published private(set) var maixVersion = "Đang chờ MaixCAM"
     @Published private(set) var selectedMode: TrackingMode = .waterRocket
+    @Published private(set) var isEnrolling = false
+    @Published private(set) var enrollmentProgress = 0.0
+    @Published private(set) var enrollmentStatus = "Giữ chủ thể trước MaixCAM"
 
     private let serviceUUID = CBUUID(string: "7E57A000-8E3A-4D6A-9B2B-13B10A000001")
     private let eventUUID = CBUUID(string: "7E57A001-8E3A-4D6A-9B2B-13B10A000001")
@@ -69,6 +72,7 @@ final class BLEManager: NSObject, ObservableObject {
     private var commandCharacteristic: CBCharacteristic?
     private var lifecycleActive = true
     private var reconnectWorkItem: DispatchWorkItem?
+    private var enrollmentCycle = 0
 
     override init() {
         super.init()
@@ -76,16 +80,19 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     func arm() {
+        beginEnrollmentUI()
         send("ARM")
         trackingState = .acquire
     }
 
     func stop() {
+        cancelEnrollmentUI()
         send("STOP")
         trackingState = .idle
     }
 
     func home() {
+        cancelEnrollmentUI()
         send("HOME")
         trackingState = .home
     }
@@ -97,7 +104,22 @@ final class BLEManager: NSObject, ObservableObject {
         targetX = 0.5
         targetY = 0.5
         trackingState = .idle
+        cancelEnrollmentUI()
         send("MODE,\(mode.rawValue)")
+    }
+
+    private func beginEnrollmentUI() {
+        enrollmentCycle += 1
+        isEnrolling = true
+        enrollmentProgress = 0
+        enrollmentStatus = "Giữ \(selectedMode.title.lowercased()) trước MaixCAM"
+    }
+
+    private func cancelEnrollmentUI() {
+        enrollmentCycle += 1
+        isEnrolling = false
+        enrollmentProgress = 0
+        enrollmentStatus = "Giữ chủ thể trước MaixCAM"
     }
 
     func suspendForBackground() {
@@ -169,6 +191,33 @@ final class BLEManager: NSObject, ObservableObject {
             }
         } else if head == "MAIX" {
             maixVersion = fields.dropFirst().joined(separator: " • ")
+        } else if head == "ENROLL", fields.count >= 4 {
+            let progress = min(100, max(0, Double(fields[1]) ?? 0)) / 100
+            if let mode = TrackingMode(rawValue: fields[2].uppercased()) {
+                selectedMode = mode
+            }
+            let status = fields[3].uppercased()
+            enrollmentProgress = progress
+            switch status {
+            case "READY":
+                isEnrolling = true
+                enrollmentProgress = 1
+                enrollmentStatus = "Đã xác nhận \(selectedMode.title.lowercased())"
+                let cycle = enrollmentCycle
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { [weak self] in
+                    guard let self, self.enrollmentCycle == cycle else { return }
+                    self.isEnrolling = false
+                }
+            case "RETRY":
+                isEnrolling = true
+                enrollmentProgress = 0
+                enrollmentStatus = "Đưa \(selectedMode.title.lowercased()) vào giữa hình"
+            case "START", "SCANNING":
+                isEnrolling = true
+                enrollmentStatus = "Giữ \(selectedMode.title.lowercased()) trước MaixCAM"
+            default:
+                break
+            }
         } else if head == "MODE", fields.count >= 2,
                   let mode = TrackingMode(rawValue: fields[1].uppercased()) {
             selectedMode = mode
@@ -233,6 +282,7 @@ extension BLEManager: CBCentralManagerDelegate {
     ) {
         isConnected = false
         trackingState = .disconnected
+        cancelEnrollmentUI()
         commandCharacteristic = nil
         trackerPeripheral = nil
         confidence = 0
