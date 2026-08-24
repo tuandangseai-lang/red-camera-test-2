@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v2.7
+// SE Rocket Tracker v2.8 - geared pan/tilt rig
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -22,19 +22,30 @@ constexpr uint8_t PHONE_CHARGING_LEVEL = HIGH;
 constexpr uint8_t PHONE_CHARGE_CUT_LEVEL = LOW;
 constexpr uint32_t CHARGE_RESUME_DELAY_MS = 10000;
 
+// Module 0.8 gear set supplied with the SE mount:
+//   30T / 96T pan  = 3.20:1
+//   30T / 48T tilt = 1.60:1
+// Rates computed from the camera image are output-axis rates.  The servo must
+// turn this many times faster to produce the requested camera movement.
+constexpr float PAN_GEAR_RATIO = 96.0f / 30.0f;
+constexpr float TILT_GEAR_RATIO = 48.0f / 30.0f;
+
 constexpr float PAN_HOME_DEG = 90.0f;
-constexpr float TILT_HOME_DEG = 90.0f;
-constexpr float PAN_MIN_DEG = 15.0f;
-constexpr float PAN_MAX_DEG = 165.0f;
-constexpr float TILT_MIN_DEG = 35.0f;
-constexpr float TILT_MAX_DEG = 145.0f;
-constexpr float PAN_DIRECTION = -1.0f;
-constexpr float TILT_DIRECTION = 1.0f;
+constexpr float TILT_HOME_DEG = 30.0f;
+constexpr float PAN_MIN_DEG = 5.0f;
+constexpr float PAN_MAX_DEG = 175.0f;
+constexpr float TILT_MIN_DEG = 5.0f;
+constexpr float TILT_MAX_DEG = 175.0f;
+// One external gear mesh reverses each output axis. These are the geared-rig
+// defaults. If one physical axis moves away from the target, change only that
+// axis sign; do not swap GPIO 18/19 or the Maix X/Y coordinates.
+constexpr float PAN_DIRECTION = 1.0f;
+constexpr float TILT_DIRECTION = -1.0f;
 constexpr int SERVO_MIN_US = 900;
 constexpr int SERVO_MAX_US = 2100;
 
 constexpr uint32_t UART_BAUD = 115200;
-constexpr uint32_t CONTROL_PERIOD_US = 20000;  // MG995: 50 Hz
+constexpr uint32_t CONTROL_PERIOD_US = 20000;  // MG996R: 50 Hz
 constexpr uint32_t TARGET_STALE_MS = 180;
 constexpr uint32_t COAST_LIMIT_MS = 420;
 constexpr uint32_t SEARCH_LIMIT_MS = 850;
@@ -482,6 +493,7 @@ float adaptiveGainFromSize(const TargetPacket &target) {
 }
 
 float axisDesiredRate(float error, float velocity, float direction,
+                      float gearRatio,
                       float maxSpeed, float sizeGain, float startDeadband,
                       float stopDeadband, float proportionalGain,
                       float feedForwardGain, float minimumRate, bool &moving) {
@@ -495,7 +507,10 @@ float axisDesiredRate(float error, float velocity, float direction,
 
   const float proportional = error * proportionalGain;
   const float feedForward = velocity * feedForwardGain;
-  float desired = direction * (proportional + feedForward) * sizeGain;
+  // Convert the requested output/camera rate to motor-shaft rate. The final
+  // clamp remains a physical MG996 safety limit.
+  float desired = direction * (proportional + feedForward) * sizeGain *
+                  gearRatio;
   if (absoluteError > startDeadband * 1.8f && fabsf(desired) < minimumRate) {
     desired = copysignf(minimumRate, desired);
   }
@@ -688,12 +703,14 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
     const float tiltMax = rocketBoost ? Config::ROCKET_BOOST_TILT_SPEED_DPS
                                       : Config::MAX_TILT_SPEED_DPS;
     const float desiredPan = axisDesiredRate(
-        predictedX - targetCenterX, filteredVX, Config::PAN_DIRECTION, panMax,
+        predictedX - targetCenterX, filteredVX, Config::PAN_DIRECTION,
+        Config::PAN_GEAR_RATIO, panMax,
         sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.440f : 0.340f,
         rocketBoost ? 0.082f : 0.058f, rocketBoost ? 18.0f : 9.0f,
         panMoving);
     const float desiredTilt = axisDesiredRate(
-        predictedY - targetCenterY, filteredVY, Config::TILT_DIRECTION, tiltMax,
+        predictedY - targetCenterY, filteredVY, Config::TILT_DIRECTION,
+        Config::TILT_GEAR_RATIO, tiltMax,
         sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.455f : 0.355f,
         rocketBoost ? 0.086f : 0.062f, rocketBoost ? 18.0f : 9.0f,
         tiltMoving);
@@ -721,20 +738,31 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
     const float elapsed = (nowMs - lostStartedAtMs) / 1000.0f;
     const bool rocketSearch = selectedTrackingMode == "ROCKET";
     const float predictionLimit = rocketSearch ? 0.62f : 0.42f;
-    const float searchSpeed = rocketSearch ? 125.0f : Config::SEARCH_SPEED_LIMIT_DPS;
+    const float outputSearchSpeed =
+        rocketSearch ? 125.0f : Config::SEARCH_SPEED_LIMIT_DPS;
+    const float panSearchSpeed = min(
+        outputSearchSpeed * Config::PAN_GEAR_RATIO,
+        rocketSearch ? Config::ROCKET_BOOST_PAN_SPEED_DPS
+                     : Config::MAX_PAN_SPEED_DPS);
+    const float tiltSearchSpeed = min(
+        outputSearchSpeed * Config::TILT_GEAR_RATIO,
+        rocketSearch ? Config::ROCKET_BOOST_TILT_SPEED_DPS
+                     : Config::MAX_TILT_SPEED_DPS);
     const float coastTime = min(elapsed, predictionLimit);
     const float predictedX = filteredX + filteredVX * coastTime +
                              0.5f * filteredAX * coastTime * coastTime;
     const float predictedY = filteredY + filteredVY * coastTime +
                              0.5f * filteredAY * coastTime * coastTime;
     const float desiredPan = clampFloat(
-        Config::PAN_DIRECTION * ((predictedX - targetCenterX) * (rocketSearch ? 0.205f : 0.115f) +
-                                 filteredVX * (rocketSearch ? 0.034f : 0.018f)),
-        -searchSpeed, searchSpeed);
+        Config::PAN_DIRECTION * Config::PAN_GEAR_RATIO *
+            ((predictedX - targetCenterX) * (rocketSearch ? 0.205f : 0.115f) +
+             filteredVX * (rocketSearch ? 0.034f : 0.018f)),
+        -panSearchSpeed, panSearchSpeed);
     const float desiredTilt = clampFloat(
-        Config::TILT_DIRECTION * ((predictedY - targetCenterY) * (rocketSearch ? 0.220f : 0.105f) +
-                                  filteredVY * (rocketSearch ? 0.038f : 0.016f)),
-        -searchSpeed, searchSpeed);
+        Config::TILT_DIRECTION * Config::TILT_GEAR_RATIO *
+            ((predictedY - targetCenterY) * (rocketSearch ? 0.220f : 0.105f) +
+             filteredVY * (rocketSearch ? 0.038f : 0.016f)),
+        -tiltSearchSpeed, tiltSearchSpeed);
     panRate = moveToward(panRate, desiredPan,
                          (rocketSearch ? Config::ROCKET_BOOST_PAN_ACCEL_DPS2 * 0.65f
                                        : Config::MAX_PAN_ACCEL_DPS2 * 0.55f) * dt);
@@ -750,17 +778,23 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
     }
     searchActive = filterReady;
     if (filterReady) {
+      const float panSearchSpeed = min(
+          Config::SEARCH_SPEED_LIMIT_DPS * Config::PAN_GEAR_RATIO,
+          Config::MAX_PAN_SPEED_DPS);
+      const float tiltSearchSpeed = min(
+          Config::SEARCH_SPEED_LIMIT_DPS * Config::TILT_GEAR_RATIO,
+          Config::MAX_TILT_SPEED_DPS);
       panRate = moveToward(
           panRate,
-          clampFloat(Config::PAN_DIRECTION * filteredVX * 0.018f,
-                     -Config::SEARCH_SPEED_LIMIT_DPS,
-                     Config::SEARCH_SPEED_LIMIT_DPS),
+          clampFloat(Config::PAN_DIRECTION * Config::PAN_GEAR_RATIO *
+                          filteredVX * 0.018f,
+                     -panSearchSpeed, panSearchSpeed),
           Config::MAX_PAN_ACCEL_DPS2 * 0.4f * dt);
       tiltRate = moveToward(
           tiltRate,
-          clampFloat(Config::TILT_DIRECTION * filteredVY * 0.016f,
-                     -Config::SEARCH_SPEED_LIMIT_DPS,
-                     Config::SEARCH_SPEED_LIMIT_DPS),
+          clampFloat(Config::TILT_DIRECTION * Config::TILT_GEAR_RATIO *
+                          filteredVY * 0.016f,
+                     -tiltSearchSpeed, tiltSearchSpeed),
           Config::MAX_TILT_ACCEL_DPS2 * 0.4f * dt);
     } else {
       holdServos(dt);
@@ -904,7 +938,8 @@ void handlePhoneCommand(String command) {
              command == "ALIGN_CENTER") {
     beginCenterCalibration();
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,2.7.0");
+    notifyPhone("ESP32,SE_GIMBAL,2.8.0");
+    notifyPhone("RIG,GEARED,3.20,1.60,90,30,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
                 lroundf(targetCenterY));
@@ -944,7 +979,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,2.7.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,2.8.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -959,7 +994,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v2.7.0");
+  Serial.println("\nSE AI Tracker ESP32 v2.8.0 (geared 3.20/1.60)");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);

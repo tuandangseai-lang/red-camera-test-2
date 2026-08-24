@@ -12,7 +12,8 @@ import os
 import gc
 
 
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.6.0"
+MOUNT_PROFILE = "MAIX_TILT_TOP"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
 NANOTRACK_MODEL_PATH = "/root/models/nanotrack.mud"
@@ -337,7 +338,9 @@ class RocketTracker:
                     self._write("A,{0},MODE_ERROR".format(parts[1]))
             elif command == "PING":
                 print("UART command: PING", flush=True)
-                self._write("A,{0},PONG,{1},{2}".format(parts[1], APP_VERSION, self.active_mode))
+                self._write("A,{0},PONG,{1},{2},{3}".format(
+                    parts[1], APP_VERSION, self.active_mode, MOUNT_PROFILE
+                ))
 
     def _clear_target(self):
         # ByteTrack keeps identities internally. Recreate it at each ARM/STOP/
@@ -940,17 +943,18 @@ class RocketTracker:
             ),
             flush=True,
         )
-        self._write("B,SE_TRACKER,{0},{1},{2}".format(
+        self._write("B,SE_TRACKER,{0},{1},{2},{3}".format(
             APP_VERSION, self.active_mode,
-            "CUSTOM" if self.custom_model else "FALLBACK"))
+            "CUSTOM" if self.custom_model else "FALLBACK", MOUNT_PROFILE))
         while not app.need_exit():
             now_ms = time.ticks_ms()
             self._read_commands()
             if ticks_delta(now_ms, self.last_status_ms) >= 2000:
                 self._write(
-                    "B,SE_TRACKER,{0},{1},{2}".format(
+                    "B,SE_TRACKER,{0},{1},{2},{3}".format(
                         APP_VERSION, self.active_mode,
-                        "CUSTOM" if self.custom_model else "FALLBACK"
+                        "CUSTOM" if self.custom_model else "FALLBACK",
+                        MOUNT_PROFILE
                     )
                 )
                 self.last_status_ms = now_ms

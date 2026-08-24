@@ -61,8 +61,9 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var targetHeight = 0.08
     @Published private(set) var lockedTargetName = "Tên lửa nước"
     @Published private(set) var panAngle = 90.0
-    @Published private(set) var tiltAngle = 90.0
+    @Published private(set) var tiltAngle = 30.0
     @Published private(set) var maixVersion = "Đang chờ MaixCAM"
+    @Published private(set) var rigVersion = "Bánh răng P 3,20:1 • T 1,60:1"
     @Published private(set) var selectedMode: TrackingMode = .waterRocket
     @Published private(set) var isEnrolling = false
     @Published private(set) var enrollmentProgress = 0.0
@@ -264,6 +265,8 @@ final class BLEManager: NSObject, ObservableObject {
             }
         } else if head == "MAIX" {
             maixVersion = fields.dropFirst().joined(separator: " • ")
+        } else if head == "RIG", fields.count >= 7 {
+            rigVersion = "Bánh răng P \(fields[2]):1 • T \(fields[3]):1"
         } else if head == "CALIBRATE", fields.count >= 2 {
             switch fields[1].uppercased() {
             case "START":
