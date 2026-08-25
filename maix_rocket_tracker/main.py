@@ -12,7 +12,7 @@ import os
 import gc
 
 
-APP_VERSION = "1.14.0"
+APP_VERSION = "1.15.0"
 MOUNT_PROFILE = "MAIX_TILT_TOP"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
@@ -42,7 +42,7 @@ IDLE_FRAME_INTERVAL_MS = 120
 ENROLL_DURATION_MS = 3000
 ENROLL_REPORT_INTERVAL_MS = 80
 ENROLL_MIN_VISIBLE_RATIO = 0.12
-MAX_SELECTION_CANDIDATES = 6
+MAX_SELECTION_CANDIDATES = 12
 CANDIDATE_REPORT_INTERVAL_MS = 70
 REFINE_DURATION_MS = 1800
 REFINE_MIN_VISIBLE_RATIO = 0.22
@@ -55,6 +55,7 @@ NANO_MAX_CENTRE_JUMP_RATIO = 0.34
 NANO_MIN_BOX_SIDE = 4
 APPEARANCE_TEMPLATE_LIMIT = 4
 APPEARANCE_DIVERSITY_MIN = 0.055
+CUSTOM_ROCKET_CLASS_ID = 1000
 
 STATE_IDLE = 0
 STATE_ACQUIRE = 1
@@ -98,6 +99,26 @@ def target_label(mode, class_id):
     if 0 <= class_id < len(COCO_LABELS):
         return COCO_LABELS[class_id]
     return mode
+
+
+def candidate_label(class_id):
+    """Label one frozen proposal without forcing every box into the active tab."""
+    if class_id == CUSTOM_ROCKET_CLASS_ID:
+        return "WATER_ROCKET"
+    if 0 <= class_id < len(COCO_LABELS):
+        return COCO_LABELS[class_id]
+    return "VUNG_TU_CHON"
+
+
+class DetectionRecord:
+    """Small detector-neutral record used by the universal 3-second scan."""
+    def __init__(self, detected, class_id=None):
+        self.x = detected.x
+        self.y = detected.y
+        self.w = detected.w
+        self.h = detected.h
+        self.class_id = detected.class_id if class_id is None else class_id
+        self.score = detected.score
 
 
 def crc8_xor(text):
@@ -296,6 +317,8 @@ class RocketTracker:
         self.refine_signatures = []
         self.refine_manual = False
         self.selected_candidate_slot = -1
+        self.selected_waiting_center = False
+        self.identity_is_manual = False
         self.nano_active = False
         self.nano_last_score = 0.0
         self.nano_last_init_frame = -1000
@@ -389,6 +412,35 @@ class RocketTracker:
                     objects.append(detected)
         return objects
 
+    def _detect_enrollment_objects(self, frame):
+        """Return every visible proposal during the 3-second selection scan.
+
+        The selected tab controls the tracker *after* the user taps a box.  It
+        must not hide other visible objects while the user is still choosing.
+        A custom rocket result receives a private class id so it cannot collide
+        with COCO class 0 (PERSON) in the shared ByteTracker.
+        """
+        objects = []
+        if self.detector_path == FALLBACK_MODEL_PATH:
+            detected = self.detector.detect(
+                frame, conf_th=0.12, iou_th=DETECT_IOU
+            )
+            objects.extend(DetectionRecord(item) for item in detected)
+        else:
+            detected = self.detector.detect(
+                frame, conf_th=DETECT_CONFIDENCE, iou_th=DETECT_IOU
+            )
+            objects.extend(
+                DetectionRecord(item, CUSTOM_ROCKET_CLASS_ID)
+                for item in detected
+            )
+            if self.bottle_detector is not None:
+                general = self.bottle_detector.detect(
+                    frame, conf_th=0.12, iou_th=DETECT_IOU
+                )
+                objects.extend(DetectionRecord(item) for item in general)
+        return objects
+
     def _new_byte_tracker(self):
         return tracker.ByteTracker(
             35,   # retain identity briefly when detections disappear
@@ -453,10 +505,18 @@ class RocketTracker:
                     slot = int(parts[3])
                 except Exception:
                     slot = -1
-                if self._begin_refinement(slot, time.ticks_ms()):
+                if self._select_candidate(slot, time.ticks_ms()):
                     self._write("A,{0},SELECTED,{1}".format(parts[1], slot))
                 else:
                     self._write("A,{0},SELECT_ERROR,{1}".format(parts[1], slot))
+            elif command == "REFINE":
+                if self._begin_refinement(self.selected_candidate_slot,
+                                          time.ticks_ms()):
+                    self._write("A,{0},REFINING,{1}".format(
+                        parts[1], self.selected_candidate_slot
+                    ))
+                else:
+                    self._write("A,{0},REFINE_ERROR".format(parts[1]))
             elif command == "PING":
                 print("UART command: PING", flush=True)
                 self._write("A,{0},PONG,{1},{2},{3}".format(
@@ -499,6 +559,8 @@ class RocketTracker:
         self.refine_signatures = []
         self.refine_manual = False
         self.selected_candidate_slot = -1
+        self.selected_waiting_center = False
+        self.identity_is_manual = False
 
     def _begin_enrollment(self):
         self.enrolling = True
@@ -520,6 +582,8 @@ class RocketTracker:
         self.refining = False
         self.refine_manual = False
         self.selected_candidate_slot = -1
+        self.selected_waiting_center = False
+        self.identity_is_manual = False
         self.state = STATE_ACQUIRE
         self._write("E,0,{0},START".format(self.active_mode))
 
@@ -536,6 +600,8 @@ class RocketTracker:
         self.refining = False
         self.refine_manual = False
         self.selected_candidate_slot = -1
+        self.selected_waiting_center = False
+        self.identity_is_manual = False
 
     def _appearance_signature(self, frame, box):
         """Spatial colour/edge descriptor for re-identifying one selected subject.
@@ -800,21 +866,20 @@ class RocketTracker:
         # reflection or nearby object.  It may command LOCK only while YOLO has
         # semantically confirmed the same box very recently.
         yolo_recent = self.frame_index - self.last_yolo_lock_frame <= 8
-        manual_object = (self.active_mode == "OBJECT" and
-                         self.enrollment_class_id < 0 and
-                         bool(self.appearance_templates))
+        manual_object = self.identity_is_manual and bool(self.appearance_templates)
         self.state = (STATE_LOCKED if (yolo_recent or manual_object) and
                       score >= NANO_STRONG_SCORE else STATE_WEAK)
         return True
 
-    def _detections_to_tracks(self, objects):
+    def _detections_to_tracks(self, objects, universal=False):
         converted = []
         for obj in objects:
-            if obj.class_id not in self.valid_class_ids:
-                continue
-            if (not self.enrolling and self.enrollment_class_id >= 0 and
-                    obj.class_id != self.enrollment_class_id):
-                continue
+            if not universal:
+                if self.enrollment_class_id >= 0:
+                    if obj.class_id != self.enrollment_class_id:
+                        continue
+                elif obj.class_id not in self.valid_class_ids:
+                    continue
             converted.append(tracker.Object(
                 obj.x, obj.y, obj.w, obj.h, obj.class_id, obj.score
             ))
@@ -949,6 +1014,8 @@ class RocketTracker:
         self.refining = False
         self.refine_manual = False
         self.selected_candidate_slot = -1
+        self.selected_waiting_center = False
+        self.identity_is_manual = False
         self.target_id = -1
         self.pending_target_id = -1
         self.pending_target_frames = 0
@@ -994,29 +1061,24 @@ class RocketTracker:
         if elapsed < ENROLL_DURATION_MS:
             return
 
-        if self.active_mode in ("OBJECT", "ROCKET") and self.nano_tracker is not None:
-            # COCO cannot name every handmade object, while the custom rocket
-            # model may reject a plain empty PET bottle. Always offer one
-            # frozen central proposal in these two tabs. NanoTrack and the
-            # appearance signature learn the exact selected pixels afterward.
+        if (not self.enroll_votes and
+                self.active_mode in ("OBJECT", "ROCKET") and
+                self.nano_tracker is not None):
+            # Last-resort manual region only when no neural proposal exists.
+            # It must never replace or hide the real full-screen object list.
             width = self.camera.width()
             height = self.camera.height()
             region_w = max(24, int(width * 0.30))
             region_h = max(24, int(height * (0.48 if self.active_mode == "ROCKET" else 0.36)))
             region = ((width - region_w) // 2,
                       (height - region_h) // 2, region_w, region_h)
-            already_covered = any(
-                iou(region, value[0]) >= 0.42
-                for value in self.enroll_last_seen.values()
-            )
-            if not already_covered:
-                manual_id = -1001
-                self.enroll_votes[manual_id] = self.enroll_total_frames
-                self.enroll_last_seen[manual_id] = (region, 0.62, -1)
-                signature = self._appearance_signature(frame, region)
-                if signature is not None:
-                    self.enroll_signature_sums[manual_id] = list(signature)
-                    self.enroll_signature_counts[manual_id] = 1
+            manual_id = -1001
+            self.enroll_votes[manual_id] = self.enroll_total_frames
+            self.enroll_last_seen[manual_id] = (region, 0.62, -1)
+            signature = self._appearance_signature(frame, region)
+            if signature is not None:
+                self.enroll_signature_sums[manual_id] = list(signature)
+                self.enroll_signature_counts[manual_id] = 1
         if not self.enroll_votes:
             self._restart_enrollment(now_ms)
             return
@@ -1035,7 +1097,20 @@ class RocketTracker:
             rank_score = visible_ratio * 0.62 + confidence * 0.30 + min(0.08, area_ratio)
             ranked.append((rank_score, target_id))
         ranked.sort(reverse=True)
-        ranked = ranked[:MAX_SELECTION_CANDIDATES]
+        # The custom rocket detector and COCO can describe the same pixels.
+        # Keep one stable box per physical subject so every visible object is
+        # tappable without stacking two buttons on top of each other.
+        deduplicated = []
+        for ranked_item in ranked:
+            candidate_box = self.enroll_last_seen[ranked_item[1]][0]
+            if any(iou(candidate_box,
+                       self.enroll_last_seen[saved[1]][0]) >= 0.68
+                   for saved in deduplicated):
+                continue
+            deduplicated.append(ranked_item)
+            if len(deduplicated) >= MAX_SELECTION_CANDIDATES:
+                break
+        ranked = deduplicated
         if not ranked:
             self._restart_enrollment(now_ms)
             return
@@ -1062,7 +1137,9 @@ class RocketTracker:
                 "class_id": class_id,
                 "manual": (target_id < 0 or
                            (self.active_mode == "ROCKET" and
-                            self.custom_model and class_id == 39)),
+                            self.custom_model and
+                            class_id != CUSTOM_ROCKET_CLASS_ID)),
+                "label": candidate_label(class_id),
                 "signature": signature,
             }
             self.selection_order.append(slot)
@@ -1093,7 +1170,7 @@ class RocketTracker:
         bw = int(clamp(w / width * 1000.0, 0, 1000))
         bh = int(clamp(h / height * 1000.0, 0, 1000))
         confidence = int(clamp(candidate["confidence"] * 100.0, 0, 100))
-        label = target_label(self.active_mode, candidate["class_id"])
+        label = candidate.get("label", candidate_label(candidate["class_id"]))
         self._write("D,{0},{1},{2},{3},{4},{5},{6},{7},{8}".format(
             slot, candidate["track_id"], candidate["class_id"], confidence,
             cx, cy, bw, bh, label
@@ -1106,12 +1183,13 @@ class RocketTracker:
         # a different slot. Candidate packets still repeat for BLE reliability.
         self._emit_candidates(now_ms)
 
-    def _begin_refinement(self, slot, now_ms):
+    def _select_candidate(self, slot, now_ms):
         # SELECT is retried by the iPhone until its BLE acknowledgement arrives.
-        # Treat a duplicate for the already selected frozen slot as success;
-        # replying SELECT_ERROR here could incorrectly reopen the chooser after
-        # MaixCAM had already started refinement.
-        if self.enabled and self.refining and self.selected_candidate_slot == slot:
+        # A selection only chooses an identity. Refinement intentionally waits
+        # until the user puts that same identity on the iPhone '+' and presses
+        # Căn tâm.
+        if (self.enabled and self.selected_candidate_slot == slot and
+                (self.selected_waiting_center or self.refining)):
             return True
         if not self.enabled or not self.awaiting_selection:
             return False
@@ -1120,8 +1198,42 @@ class RocketTracker:
             self._emit_candidates(now_ms, True)
             return False
         self.awaiting_selection = False
-        self.refining = True
+        self.selected_waiting_center = True
+        self.refining = False
         self.selected_candidate_slot = slot
+        self.identity_is_manual = bool(candidate.get("manual", False))
+        self.refine_manual = self.identity_is_manual
+        self.target_id = candidate["track_id"]
+        raw_class_id = candidate["class_id"]
+        self.enrollment_class_id = (0 if raw_class_id == CUSTOM_ROCKET_CLASS_ID
+                                    else raw_class_id)
+        self.locked_label = ("WATER_ROCKET" if self.active_mode == "ROCKET"
+                             else candidate.get("label", self.active_mode))
+        self.last_box = candidate["box"]
+        self.last_confidence = candidate["confidence"]
+        selected_signature = candidate.get("signature")
+        if selected_signature is not None:
+            self.appearance_template = list(selected_signature)
+            self.appearance_templates = [list(selected_signature)]
+        self.filter.reset()
+        self.nano_active = False
+        self.state = STATE_ACQUIRE
+        self._write("E,100,{0},SELECTED,{1}".format(
+            self.active_mode, self.locked_label
+        ))
+        print("Candidate selected; waiting for iPhone centre: slot={0} id={1}".format(
+            slot, self.target_id
+        ), flush=True)
+        return True
+
+    def _begin_refinement(self, slot, now_ms):
+        if self.enabled and self.refining and self.selected_candidate_slot == slot:
+            return True
+        if (not self.enabled or not self.selected_waiting_center or
+                slot != self.selected_candidate_slot):
+            return False
+        self.selected_waiting_center = False
+        self.refining = True
         self.refine_started_ms = now_ms
         self.refine_last_report_ms = 0
         self.refine_total_frames = 0
@@ -1129,22 +1241,10 @@ class RocketTracker:
         self.refine_signature_sum = None
         self.refine_signature_count = 0
         self.refine_signatures = []
-        self.refine_manual = bool(candidate.get("manual", False))
-        self.target_id = candidate["track_id"]
-        self.enrollment_class_id = candidate["class_id"]
-        self.locked_label = target_label(self.active_mode, self.enrollment_class_id)
-        self.last_box = candidate["box"]
-        self.last_confidence = candidate["confidence"]
-        selected_signature = candidate.get("signature")
-        if selected_signature is not None:
-            self.refine_signature_sum = list(selected_signature)
+        if self.appearance_template is not None:
+            self.refine_signature_sum = list(self.appearance_template)
             self.refine_signature_count = 1
-            self.refine_signatures = [list(selected_signature)]
-            self.appearance_template = list(selected_signature)
-            self.appearance_templates = [list(selected_signature)]
-        self.filter.reset()
-        self.nano_active = False
-        self.state = STATE_ACQUIRE
+            self.refine_signatures = [list(self.appearance_template)]
         self._write("E,0,{0},REFINE,{1}".format(
             self.active_mode, self.locked_label
         ))
@@ -1152,6 +1252,20 @@ class RocketTracker:
             slot, self.target_id
         ), flush=True)
         return True
+
+    def _update_selected_waiting(self, frame, now_ms):
+        """Follow the chosen identity while the user moves it onto iPhone '+'."""
+        if self.last_box is None:
+            return
+        if not self.nano_active:
+            self._start_nano_tracker(frame, self.last_box)
+        nano_result = self._track_with_nano(frame, now_ms)
+        if nano_result is None:
+            return
+        box, confidence = nano_result
+        self.last_box = box
+        self.last_confidence = confidence
+        self._update_motion_filter(box, now_ms, confidence)
 
     def _update_refinement(self, tracks, frame, now_ms):
         self.refine_total_frames += 1
@@ -1240,6 +1354,7 @@ class RocketTracker:
                         APPEARANCE_DIVERSITY_MIN * 0.55):
                     self.appearance_templates.append(signature)
         self.refining = False
+        self.selected_waiting_center = False
         self.selection_candidates = {}
         self.selection_order = []
         self.pending_target_id = -1
@@ -1334,7 +1449,8 @@ class RocketTracker:
     def _send_target(self, now_ms):
         self.sequence = (self.sequence + 1) & 0xFFFF
         if (not self.enabled or self.enrolling or self.awaiting_selection or
-                self.refining or not self.filter.valid):
+                self.selected_waiting_center or self.refining or
+                not self.filter.valid):
             payload = "T,{0},{1},500,500,0,0,0,0,0,{2}".format(
                 self.sequence, now_ms, self.state
             )
@@ -1361,17 +1477,18 @@ class RocketTracker:
     def _run_enabled_frame(self, frame, now_ms):
         """Fuse semantic YOLO detections with low-latency single-object tracking."""
         if self.enrolling:
-            objects = self._detect_objects(
-                frame,
-                include_bottle=(self.active_mode == "ROCKET"),
-            )
+            objects = self._detect_enrollment_objects(frame)
             self.last_yolo_frame = self.frame_index
-            tracks = self._detections_to_tracks(objects)
+            tracks = self._detections_to_tracks(objects, universal=True)
             self._update_enrollment(tracks, frame, now_ms)
             return
 
         if self.awaiting_selection:
             self._update_selection_candidates([], now_ms)
+            return
+
+        if self.selected_waiting_center:
+            self._update_selected_waiting(frame, now_ms)
             return
 
         if self.refining:

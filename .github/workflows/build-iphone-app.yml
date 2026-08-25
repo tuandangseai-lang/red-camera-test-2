@@ -1,4 +1,4 @@
-name: Tao IPA SE v7.3 build66 - khoa o va xac nhan lua chon
+name: Tao IPA SE v7.4 build67 - quet tat ca va can tam sau khi chon
 
 on:
   workflow_dispatch:
@@ -60,6 +60,8 @@ jobs:
           grep -q "SelectionCandidate" "RedCameraTest/BLEManager.swift"
           grep -q "candidateSelectionOverlay" "RedCameraTest/ContentView.swift"
           grep -q "SpatialTapGesture" "RedCameraTest/ContentView.swift"
+          grep -q 'case "SELECTED"' "RedCameraTest/BLEManager.swift"
+          grep -q 'case "CENTER"' "RedCameraTest/BLEManager.swift"
           grep -q "MaixCAM" "RedCameraTest/ContentView.swift"
           if grep -q "import Vision" "RedCameraTest/CameraController.swift"; then
             echo "iPhone khong duoc chay AI Vision trong kien truc MaixCAM"
@@ -101,18 +103,18 @@ jobs:
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "7.3"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "66"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "7.4"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "67"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v7.3-build66-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v7.4-build67-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v7.3-build66-unsigned-ipa
-          path: SE-v7.3-build66-unsigned.ipa
+          name: SE-v7.4-build67-unsigned-ipa
+          path: SE-v7.4-build67-unsigned.ipa
           if-no-files-found: error
           retention-days: 7

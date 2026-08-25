@@ -128,8 +128,8 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     var canCalibrateCenter: Bool {
-        isConnected && trackingState == .lock &&
-            hasSelectedCandidate && needsCenterCalibration
+        isConnected && hasSelectedCandidate && needsCenterCalibration &&
+            !isConfirmingCandidate && !isRefining && !isCalibrating
     }
 
     override init() {
@@ -169,10 +169,11 @@ final class BLEManager: NSObject, ObservableObject {
                 : "Hãy quét 3 giây và chạm chọn chủ thể trước"
             return
         }
-        isCalibrating = true
-        calibrationProgress = 0
-        calibrationStatus = "Giữ đúng mục tiêu tại dấu + giữa iPhone"
-        trackingState = .calibrate
+        isRefining = true
+        isEnrolling = true
+        enrollmentProgress = 0
+        enrollmentStatus = "Đang tinh chỉnh đúng vật tại dấu +"
+        trackingState = .refine
         send("CALIBRATE_CENTER")
     }
 
@@ -214,7 +215,7 @@ final class BLEManager: NSObject, ObservableObject {
             )
         }
         selectionTimeoutWorkItem = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6, execute: timeout)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8, execute: timeout)
     }
 
     func selectCandidate(atX x: Double, y: Double) {
@@ -269,11 +270,11 @@ final class BLEManager: NSObject, ObservableObject {
                   self.enrollmentCycle == cycle,
                   self.isEnrolling,
                   self.enrollmentProgress < 0.01 else { return }
-            self.enrollmentStatus = "Không có dữ liệu từ MaixCAM • kiểm tra TX Maix → GPIO21"
-            self.connectionText = "Lỗi dây Maix TX → ESP32 GPIO21"
+            self.enrollmentStatus = "MaixCAM chưa phản hồi ổn định • đang thử kết nối lại"
+            self.connectionText = "Đang kiểm tra đường truyền MaixCAM"
         }
         enrollmentWatchdogWorkItem = watchdog
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6, execute: watchdog)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 7.5, execute: watchdog)
     }
 
     private func cancelEnrollmentUI() {
@@ -453,6 +454,9 @@ final class BLEManager: NSObject, ObservableObject {
                     ((Double(fields[8]) ?? 80) / 1000) * 0.48))
             }
         } else if head == "MAIX" {
+            enrollmentWatchdogWorkItem?.cancel()
+            enrollmentWatchdogWorkItem = nil
+            connectionText = "MaixCAM và ESP32 đang hoạt động"
             maixVersion = fields.dropFirst().joined(separator: " • ")
         } else if head == "RIG", fields.count >= 7 {
             rigVersion = "Bánh răng P \(fields[2]):1 • T \(fields[3]):1"
@@ -547,6 +551,20 @@ final class BLEManager: NSObject, ObservableObject {
                 hasSelectedCandidate = false
                 trackingState = .choose
                 enrollmentStatus = "Đã quét xong • chạm đúng vật cần theo dõi"
+            case "SELECTED":
+                confirmCandidateSelection()
+                if fields.count >= 5 {
+                    lockedTargetName = localizedTargetName(fields[4])
+                }
+                hasSelectedCandidate = true
+                isChoosingTarget = false
+                isRefining = false
+                isEnrolling = false
+                finishCandidateSelection()
+                needsCenterCalibration = true
+                trackingState = .lock
+                enrollmentStatus = "Đã chọn \(lockedTargetName) • đưa vào dấu + rồi bấm Căn tâm"
+                calibrationStatus = "Đặt \(lockedTargetName.lowercased()) đúng dấu + rồi bấm Căn tâm"
             case "REFINE":
                 confirmCandidateSelection()
                 isChoosingTarget = false
@@ -623,7 +641,19 @@ final class BLEManager: NSObject, ObservableObject {
                 selectedCandidateID = slot
                 isConfirmingCandidate = true
                 enrollmentStatus = "Đã gửi ô số \(slot) • đang chờ MaixCAM xác nhận"
-            case "REFINE", "ACK":
+            case "CENTER", "ACK":
+                confirmCandidateSelection()
+                selectedCandidateID = slot
+                hasSelectedCandidate = true
+                isChoosingTarget = false
+                isRefining = false
+                isEnrolling = false
+                finishCandidateSelection()
+                needsCenterCalibration = true
+                trackingState = .lock
+                enrollmentStatus = "Đã chọn \(lockedTargetName) • đưa vào dấu + rồi bấm Căn tâm"
+                calibrationStatus = "Đặt \(lockedTargetName.lowercased()) đúng dấu + rồi bấm Căn tâm"
+            case "REFINING", "REFINE":
                 confirmCandidateSelection()
                 selectedCandidateID = slot
                 hasSelectedCandidate = true
@@ -642,8 +672,8 @@ final class BLEManager: NSObject, ObservableObject {
         } else if head == "LINK", fields.count >= 2 {
             switch fields[1].uppercased() {
             case "MAIX_TX_MISSING":
-                enrollmentStatus = "Không có dữ liệu từ MaixCAM • kiểm tra TX Maix → GPIO21"
-                connectionText = "Lỗi dây Maix TX → ESP32 GPIO21"
+                enrollmentStatus = "MaixCAM không phản hồi sau nhiều lần thử • kiểm tra UART và nguồn"
+                connectionText = "Mất phản hồi UART MaixCAM"
             case "MAIX_OK":
                 connectionText = "MaixCAM và ESP32 đang hoạt động"
             default:

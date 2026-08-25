@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.4.0 - frozen selection + acknowledged tap + predictive gimbal
+// SE Rocket Tracker v3.5.0 - universal selection + explicit centre/refine flow
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -48,8 +48,9 @@ constexpr int SERVO_MIN_US = 900;
 constexpr int SERVO_MAX_US = 2100;
 
 constexpr uint32_t UART_BAUD = 115200;
-constexpr uint32_t MAIX_FIRST_REPLY_TIMEOUT_MS = 1500;
-constexpr uint32_t MAIX_PING_RETRY_MS = 500;
+constexpr uint32_t MAIX_FIRST_REPLY_TIMEOUT_MS = 6500;
+constexpr uint32_t MAIX_PING_RETRY_MS = 900;
+constexpr uint8_t MAIX_MIN_PINGS_BEFORE_FAULT = 3;
 constexpr uint32_t CONTROL_PERIOD_US = 20000;  // MG996R: 50 Hz
 constexpr uint32_t TARGET_STALE_MS = 180;
 constexpr uint32_t COAST_LIMIT_MS = 420;
@@ -152,6 +153,9 @@ uint8_t enrollmentProgress = 0;
 bool centerCalibrationActive = false;
 bool alignmentReady = false;
 bool targetIdentityReady = false;
+bool candidateSelected = false;
+bool pendingCenterAfterRefine = false;
+int selectedCandidateSlot = -1;
 String lockedTargetToken = "WATER_ROCKET";
 
 float panAngle = Config::PAN_HOME_DEG;
@@ -189,6 +193,7 @@ uint32_t lastMaixPingAtMs = 0;
 uint32_t lastMaixPacketAtMs = 0;
 bool maixRxSeenThisSession = false;
 bool maixLinkFaultReported = false;
+uint8_t maixPingAttemptsThisSession = 0;
 float targetCenterX = 500.0f;
 float targetCenterY = 500.0f;
 uint32_t centerCalibrationStartedAtMs = 0;
@@ -379,11 +384,15 @@ void armSession() {
   enrollmentActive = true;
   alignmentReady = false;
   targetIdentityReady = false;
+  candidateSelected = false;
+  pendingCenterAfterRefine = false;
+  selectedCandidateSlot = -1;
   enrollmentProgress = 0;
   armStartedAtMs = millis();
   lastMaixPingAtMs = 0;
   maixRxSeenThisSession = false;
   maixLinkFaultReported = false;
+  maixPingAttemptsThisSession = 0;
   homeRequested = false;
   setPhoneCharging(false);
   chargeResumePending = false;
@@ -409,6 +418,9 @@ void selectTrackingMode(String mode) {
   enrollmentActive = false;
   alignmentReady = false;
   targetIdentityReady = false;
+  candidateSelected = false;
+  pendingCenterAfterRefine = false;
+  selectedCandidateSlot = -1;
   enrollmentProgress = 0;
   cancelCenterCalibration();
   resetTrackingFilter();
@@ -424,6 +436,9 @@ void stopSession() {
   enrollmentActive = false;
   alignmentReady = false;
   targetIdentityReady = false;
+  candidateSelected = false;
+  pendingCenterAfterRefine = false;
+  selectedCandidateSlot = -1;
   enrollmentProgress = 0;
   cancelCenterCalibration();
   resetTrackingFilter();
@@ -440,6 +455,9 @@ void requestHome() {
   enrollmentActive = false;
   alignmentReady = false;
   targetIdentityReady = false;
+  candidateSelected = false;
+  pendingCenterAfterRefine = false;
+  selectedCandidateSlot = -1;
   enrollmentProgress = 0;
   cancelCenterCalibration();
   resetTrackingFilter();
@@ -529,8 +547,10 @@ void processMaixLine(char *line) {
     const int errorMarker = acknowledgment.indexOf(",SELECT_ERROR,");
     if (selectedMarker >= 0) {
       const int slot = acknowledgment.substring(selectedMarker + 10).toInt();
+      selectedCandidateSlot = slot;
+      candidateSelected = true;
       enrollmentActive = true;
-      notifyPhone(String("SELECTION,") + slot + ",REFINE");
+      notifyPhone(String("SELECTION,") + slot + ",CENTER");
     } else if (errorMarker >= 0) {
       const int slot = acknowledgment.substring(errorMarker + 14).toInt();
       notifyPhone(String("SELECTION,") + slot + ",RETRY");
@@ -543,8 +563,16 @@ void processMaixLine(char *line) {
           constrain(enrollment.substring(0, firstComma).toInt(), 0, 100));
     }
     const int readyMarker = enrollment.indexOf(",READY,");
+    const int selectedMarker = enrollment.indexOf(",SELECTED,");
     const bool ready = readyMarker >= 0 || enrollment.endsWith(",READY");
     enrollmentActive = !ready;
+    if (selectedMarker >= 0) {
+      lockedTargetToken = enrollment.substring(selectedMarker + 10);
+      lockedTargetToken.trim();
+      candidateSelected = true;
+      targetIdentityReady = false;
+      alignmentReady = false;
+    }
     if (readyMarker >= 0) {
       lockedTargetToken = enrollment.substring(readyMarker + 7);
       lockedTargetToken.trim();
@@ -556,7 +584,12 @@ void processMaixLine(char *line) {
       // subject on the iPhone '+' and explicitly presses Căn tâm.
       alignmentReady = false;
       targetIdentityReady = true;
-      notifyPhone("CALIBRATE,REQUIRED,PLACE_ON_IPHONE_CENTER");
+      if (pendingCenterAfterRefine) {
+        pendingCenterAfterRefine = false;
+        beginCenterCalibration();
+      } else {
+        notifyPhone("CALIBRATE,REQUIRED,PLACE_ON_IPHONE_CENTER");
+      }
     }
     Serial.printf("[MAIX ENROLL] %s\n", enrollment.c_str());
   } else if (strncmp(bodyText, "D,", 2) == 0) {
@@ -594,10 +627,13 @@ void monitorMaixLink() {
       (lastMaixPingAtMs == 0 ||
        now - lastMaixPingAtMs >= Config::MAIX_PING_RETRY_MS)) {
     lastMaixPingAtMs = now;
+    maixPingAttemptsThisSession = min<uint8_t>(
+        maixPingAttemptsThisSession + 1, 20);
     sendMaixCommand("PING");
   }
 
   if (elapsed >= Config::MAIX_FIRST_REPLY_TIMEOUT_MS &&
+      maixPingAttemptsThisSession >= Config::MAIX_MIN_PINGS_BEFORE_FAULT &&
       !maixLinkFaultReported) {
     maixLinkFaultReported = true;
     notifyPhone("LINK,MAIX_TX_MISSING");
@@ -1164,12 +1200,15 @@ void handlePhoneCommand(String command) {
   } else if (command.startsWith("SELECT,")) {
     const String slotText = command.substring(7);
     const int slot = slotText.toInt();
-    if (slot > 0 && slot <= 9 && sessionArmed) {
+    if (slot > 0 && slot <= 12 && sessionArmed) {
       // Do not discard a real screen tap because an ENROLL notification and
       // the BLE write crossed in flight. MaixCAM remains the authority and
       // will answer SELECTED or SELECT_ERROR for this frozen candidate slot.
       enrollmentActive = true;
       targetIdentityReady = false;
+      candidateSelected = false;
+      pendingCenterAfterRefine = false;
+      selectedCandidateSlot = slot;
       alignmentReady = false;
       sendMaixCommand("SELECT", String(slot).c_str());
       notifyPhone(String("SELECTION,") + slot + ",PENDING");
@@ -1188,9 +1227,20 @@ void handlePhoneCommand(String command) {
     requestHome();
   } else if (command == "CALIBRATE" || command == "CALIBRATE_CENTER" ||
              command == "ALIGN_CENTER") {
-    beginCenterCalibration();
+    if (candidateSelected && !targetIdentityReady) {
+      // The tap only chooses an identity. The user has now placed that same
+      // identity on the iPhone '+', so ask MaixCAM to memorise the current view.
+      pendingCenterAfterRefine = true;
+      enrollmentActive = true;
+      sendMaixCommand("REFINE");
+      notifyPhone(String("SELECTION,") + selectedCandidateSlot + ",REFINING");
+      notifyPhone(String("ENROLL,0,") + selectedTrackingMode + ",REFINE," +
+                  lockedTargetToken);
+    } else {
+      beginCenterCalibration();
+    }
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,3.4.0");
+    notifyPhone("ESP32,SE_GIMBAL,3.5.0");
     notifyPhone("RIG,GEARED,3.20,1.60,90,120,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
@@ -1249,7 +1299,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v3.4.0 (geared 3.20/1.60)");
+  Serial.println("\nSE AI Tracker ESP32 v3.5.0 (geared 3.20/1.60)");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);
