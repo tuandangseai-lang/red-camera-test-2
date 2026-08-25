@@ -86,6 +86,7 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var isRefining = false
     @Published private(set) var candidates: [SelectionCandidate] = []
     @Published private(set) var selectedCandidateID: Int?
+    @Published private(set) var hasSelectedCandidate = false
     @Published private(set) var enrollmentProgress = 0.0
     @Published private(set) var enrollmentStatus = "Giữ chủ thể trước MaixCAM"
     @Published private(set) var isCalibrating = false
@@ -121,6 +122,11 @@ final class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    var canCalibrateCenter: Bool {
+        isConnected && trackingState == .lock &&
+            hasSelectedCandidate && needsCenterCalibration
+    }
+
     override init() {
         super.init()
         central = CBCentralManager(delegate: self, queue: .main)
@@ -152,8 +158,10 @@ final class BLEManager: NSObject, ObservableObject {
 
     func calibrateCenter() {
         guard isConnected else { return }
-        guard trackingState == .lock else {
-            calibrationStatus = "Hãy khóa chủ thể trước khi căn tâm"
+        guard canCalibrateCenter else {
+            calibrationStatus = hasSelectedCandidate
+                ? "Hãy chờ MaixCAM ghi nhớ xong mục tiêu"
+                : "Hãy quét 3 giây và chạm chọn chủ thể trước"
             return
         }
         isCalibrating = true
@@ -166,6 +174,7 @@ final class BLEManager: NSObject, ObservableObject {
     func selectCandidate(_ candidate: SelectionCandidate) {
         guard isConnected, isChoosingTarget else { return }
         selectedCandidateID = candidate.id
+        hasSelectedCandidate = true
         lockedTargetName = candidate.label
         isChoosingTarget = false
         isRefining = true
@@ -216,6 +225,7 @@ final class BLEManager: NSObject, ObservableObject {
         let cycle = enrollmentCycle
         enrollmentWatchdogWorkItem?.cancel()
         clearCandidateSelection()
+        hasSelectedCandidate = false
         isEnrolling = true
         isRefining = false
         enrollmentProgress = 0
@@ -238,6 +248,7 @@ final class BLEManager: NSObject, ObservableObject {
         enrollmentWatchdogWorkItem?.cancel()
         enrollmentWatchdogWorkItem = nil
         clearCandidateSelection()
+        hasSelectedCandidate = false
         isEnrolling = false
         isRefining = false
         enrollmentProgress = 0
@@ -247,6 +258,11 @@ final class BLEManager: NSObject, ObservableObject {
     private func clearCandidateSelection() {
         isChoosingTarget = false
         selectedCandidateID = nil
+        candidates = []
+    }
+
+    private func finishCandidateSelection() {
+        isChoosingTarget = false
         candidates = []
     }
 
@@ -454,7 +470,7 @@ final class BLEManager: NSObject, ObservableObject {
                 }
                 isEnrolling = false
                 isRefining = false
-                clearCandidateSelection()
+                finishCandidateSelection()
                 enrollmentProgress = 1
                 needsCenterCalibration = true
                 calibrationStatus = "Đặt \(lockedTargetName.lowercased()) đúng dấu + rồi bấm Căn tâm"
@@ -465,6 +481,7 @@ final class BLEManager: NSObject, ObservableObject {
                 isRefining = false
                 isChoosingTarget = true
                 selectedCandidateID = nil
+                hasSelectedCandidate = false
                 trackingState = .choose
                 enrollmentStatus = "Đã quét xong • chạm đúng vật cần theo dõi"
             case "REFINE":
@@ -517,6 +534,21 @@ final class BLEManager: NSObject, ObservableObject {
             } else {
                 candidates.append(candidate)
                 candidates.sort { $0.id < $1.id }
+            }
+            // CHOOSE is intentionally sent once by MaixCAM, while candidate
+            // packets are repeated.  If BLE drops that one state packet, use
+            // any valid candidate as authoritative proof that the 3-second
+            // scan has completed and open the tap-to-select UI immediately.
+            if (isEnrolling || trackingState == .acquire || trackingState == .choose) &&
+                !hasSelectedCandidate && !isRefining {
+                enrollmentWatchdogWorkItem?.cancel()
+                enrollmentWatchdogWorkItem = nil
+                isEnrolling = false
+                isChoosingTarget = true
+                trackingState = .choose
+                enrollmentProgress = 1
+                enrollmentStatus = "Đã quét xong • chạm đúng vật cần theo dõi"
+                connectionText = "MaixCAM đã gửi danh sách mục tiêu"
             }
         } else if head == "SELECTION", fields.count >= 3,
                   fields[2].uppercased() == "REFINE" {

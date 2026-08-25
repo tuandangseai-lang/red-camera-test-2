@@ -352,8 +352,8 @@ struct ContentView: View {
                     controlButton(icon: "scope", title: "Căn tâm", color: .cyan)
                 }
                 .buttonStyle(.plain)
-                .disabled(!bluetooth.isConnected || bluetooth.trackingState != .lock)
-                .opacity(bluetooth.isConnected && bluetooth.trackingState == .lock ? 1 : 0.38)
+                .disabled(!bluetooth.canCalibrateCenter)
+                .opacity(bluetooth.canCalibrateCenter ? 1 : 0.38)
             }
         }
         .padding(.top, 14)
