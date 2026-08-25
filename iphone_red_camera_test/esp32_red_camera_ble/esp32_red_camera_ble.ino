@@ -6,14 +6,14 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.1.1 - 5 mm aim point + UART link diagnostics
+// SE Rocket Tracker v3.1.2 - MaixCAM RX moved to GPIO21
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
 namespace Config {
 constexpr uint8_t PAN_SERVO_PIN = 19;   // horizontal / left-right axis
 constexpr uint8_t TILT_SERVO_PIN = 18;  // vertical / up-down axis
-constexpr uint8_t MAIX_RX_PIN = 16;     // <- MaixCAM Type-C adapter TX (UART0/A16)
+constexpr uint8_t MAIX_RX_PIN = 21;     // <- MaixCAM Type-C adapter TX (UART0/A16)
 constexpr uint8_t MAIX_TX_PIN = 17;     // -> MaixCAM Type-C adapter RX (UART0/A17)
 constexpr uint8_t STATUS_LED_PIN = 25;
 constexpr uint8_t PHONE_CHARGE_RELAY_PIN = 26;
@@ -535,7 +535,7 @@ void monitorMaixLink() {
     notifyPhone("LINK,MAIX_TX_MISSING");
     Serial.println(
         "[MAIX LINK ERROR] Maix received commands but ESP32 received no reply; "
-        "check Maix TX/A16 -> ESP32 GPIO16 and common GND");
+        "check Maix TX/A16 -> ESP32 GPIO21 and common GND");
   }
 }
 
@@ -1118,7 +1118,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.1.1");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.1.2");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -1133,7 +1133,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v3.1.1 (geared 3.20/1.60)");
+  Serial.println("\nSE AI Tracker ESP32 v3.1.2 (geared 3.20/1.60)");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);

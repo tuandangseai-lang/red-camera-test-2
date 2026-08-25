@@ -196,8 +196,8 @@ final class BLEManager: NSObject, ObservableObject {
                   self.enrollmentCycle == cycle,
                   self.isEnrolling,
                   self.enrollmentProgress < 0.01 else { return }
-            self.enrollmentStatus = "Không có dữ liệu từ MaixCAM • kiểm tra TX Maix → GPIO16"
-            self.connectionText = "Lỗi dây Maix TX → ESP32 GPIO16"
+            self.enrollmentStatus = "Không có dữ liệu từ MaixCAM • kiểm tra TX Maix → GPIO21"
+            self.connectionText = "Lỗi dây Maix TX → ESP32 GPIO21"
         }
         enrollmentWatchdogWorkItem = watchdog
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.6, execute: watchdog)
@@ -458,8 +458,8 @@ final class BLEManager: NSObject, ObservableObject {
         } else if head == "LINK", fields.count >= 2 {
             switch fields[1].uppercased() {
             case "MAIX_TX_MISSING":
-                enrollmentStatus = "Không có dữ liệu từ MaixCAM • kiểm tra TX Maix → GPIO16"
-                connectionText = "Lỗi dây Maix TX → ESP32 GPIO16"
+                enrollmentStatus = "Không có dữ liệu từ MaixCAM • kiểm tra TX Maix → GPIO21"
+                connectionText = "Lỗi dây Maix TX → ESP32 GPIO21"
             case "MAIX_OK":
                 connectionText = "MaixCAM và ESP32 đang hoạt động"
             default:
