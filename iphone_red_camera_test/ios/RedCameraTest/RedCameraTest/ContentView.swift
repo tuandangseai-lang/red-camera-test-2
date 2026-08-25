@@ -509,7 +509,7 @@ struct ContentView: View {
                     Label {
                         Text(
                             bluetooth.candidates.isEmpty
-                                ? "Đã quét xong • đang nhận danh sách từ MaixCAM"
+                                ? "Không có ô AI • chạm trực tiếp lên vật"
                                 : !bluetooth.isCandidateListReady
                                     ? "Đang nhận đủ \(bluetooth.candidates.count)/\(bluetooth.expectedCandidateCount) vật"
                                 : bluetooth.isConfirmingCandidate

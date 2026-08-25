@@ -12,7 +12,7 @@ import os
 import gc
 
 
-APP_VERSION = "1.18.0"
+APP_VERSION = "1.19.0"
 MOUNT_PROFILE = "MAIX_TILT_TOP"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
@@ -512,6 +512,16 @@ class RocketTracker:
                     self._write("A,{0},SELECTED,{1}".format(parts[1], slot))
                 else:
                     self._write("A,{0},SELECT_ERROR,{1}".format(parts[1], slot))
+            elif command == "SELECT_POINT" and len(parts) >= 5:
+                try:
+                    point_x = int(parts[3])
+                    point_y = int(parts[4])
+                except Exception:
+                    point_x, point_y = -1, -1
+                if self._select_manual_point(point_x, point_y, time.ticks_ms()):
+                    self._write("A,{0},SELECTED,0".format(parts[1]))
+                else:
+                    self._write("A,{0},SELECT_ERROR,0".format(parts[1]))
             elif command == "REFINE":
                 if self._begin_refinement(self.selected_candidate_slot,
                                           time.ticks_ms()):
@@ -1068,11 +1078,16 @@ class RocketTracker:
         if elapsed < ENROLL_DURATION_MS:
             return
 
-        # Never invent one fixed centre rectangle when the detector found
-        # nothing. That fake proposal was the single motionless box seen on the
-        # iPhone. Retry the real full-screen detector instead.
+        # End after exactly one scan. If YOLO does not know the object, the
+        # iPhone opens point-selection mode instead of restarting forever.
         if not self.enroll_votes:
-            self._restart_enrollment(now_ms)
+            self.enrolling = False
+            self.awaiting_selection = True
+            self.state = STATE_ACQUIRE
+            self.selection_candidates = {}
+            self.selection_order = []
+            self._emit_candidates(now_ms, True)
+            print("Candidate selection ready: manual point fallback", flush=True)
             return
 
         ranked = []
@@ -1104,7 +1119,13 @@ class RocketTracker:
                 break
         ranked = deduplicated
         if not ranked:
-            self._restart_enrollment(now_ms)
+            self.enrolling = False
+            self.awaiting_selection = True
+            self.state = STATE_ACQUIRE
+            self.selection_candidates = {}
+            self.selection_order = []
+            self._emit_candidates(now_ms, True)
+            print("Candidate selection ready: filtered point fallback", flush=True)
             return
 
         self.enrolling = False
@@ -1260,6 +1281,42 @@ class RocketTracker:
             slot, self.target_id
         ), flush=True)
         return True
+
+    def _select_manual_point(self, point_x, point_y, now_ms):
+        """Create a real local ROI when YOLO has no class for the tapped item."""
+        if (not self.enabled or not self.awaiting_selection or
+                point_x < 0 or point_x > 1000 or point_y < 0 or point_y > 1000):
+            return False
+        width = float(max(1, self.camera.width()))
+        height = float(max(1, self.camera.height()))
+        if self.active_mode == "PERSON":
+            box_w, box_h = width * 0.20, height * 0.34
+        elif self.active_mode == "ROCKET":
+            box_w, box_h = width * 0.16, height * 0.28
+        elif self.active_mode == "ANIMAL":
+            box_w, box_h = width * 0.25, height * 0.24
+        else:
+            box_w, box_h = width * 0.22, height * 0.22
+        center_x = point_x / 1000.0 * width
+        center_y = point_y / 1000.0 * height
+        box = (
+            clamp(center_x - box_w * 0.5, 0, width - box_w),
+            clamp(center_y - box_h * 0.5, 0, height - box_h),
+            box_w, box_h,
+        )
+        self.selection_candidates = {
+            0: {
+                "track_id": -1000,
+                "box": box,
+                "confidence": 0.55,
+                "class_id": -1,
+                "manual": True,
+                "label": self.active_mode,
+                "signature": None,
+            }
+        }
+        self.selection_order = [0]
+        return self._select_candidate(0, now_ms)
 
     def _begin_refinement(self, slot, now_ms):
         if self.enabled and self.refining and self.selected_candidate_slot == slot:

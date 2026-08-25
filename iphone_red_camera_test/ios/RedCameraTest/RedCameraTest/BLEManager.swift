@@ -111,6 +111,7 @@ final class BLEManager: NSObject, ObservableObject {
     private var lifecycleActive = true
     private var reconnectWorkItem: DispatchWorkItem?
     private var enrollmentWatchdogWorkItem: DispatchWorkItem?
+    private var scanCompletionWorkItem: DispatchWorkItem?
     private var selectionRetryWorkItem: DispatchWorkItem?
     private var selectionTimeoutWorkItem: DispatchWorkItem?
     private var enrollmentCycle = 0
@@ -217,13 +218,38 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     func selectCandidate(atX x: Double, y: Double) {
-        guard isConnected, isChoosingTarget, isCandidateListReady else { return }
+        guard isConnected, isChoosingTarget else { return }
+        if candidates.isEmpty {
+            selectManualPoint(atX: x, y: y)
+            return
+        }
         // The displayed boxes are projected from MaixCAM into the iPhone view.
         // Prefer a box containing the finger, otherwise choose the nearest one.
         let selected = candidates.min { first, second in
             candidateTapScore(first, x: x, y: y) < candidateTapScore(second, x: x, y: y)
         }
         if let selected { selectCandidate(selected) }
+    }
+
+    private func selectManualPoint(atX x: Double, y: Double) {
+        cancelSelectionAcknowledgement()
+        selectedCandidateID = 0
+        hasSelectedCandidate = true
+        lockedTargetName = selectedMode.title
+        isChoosingTarget = false
+        isRefining = false
+        isEnrolling = false
+        enrollmentProgress = 1
+        needsCenterCalibration = true
+        trackingState = .lock
+        enrollmentStatus = "Đã chọn vùng \(selectedMode.title.lowercased()) • đưa vào dấu + rồi bấm Căn tâm"
+        calibrationStatus = "Đưa \(selectedMode.title.lowercased()) đúng dấu + rồi bấm Căn tâm"
+        finishCandidateSelection()
+
+        // Inverse of the fixed-camera projection used for MaixCAM boxes.
+        let rawX = min(0.95, max(0.05, savedMaixCenterX + (x - 0.5) / 0.62))
+        let rawY = min(0.95, max(0.05, savedMaixCenterY + (y - 0.5) / 0.48))
+        send("SELECT_POINT,\(Int((rawX * 1000).rounded())),\(Int((rawY * 1000).rounded()))")
     }
 
     private func candidateTapScore(_ candidate: SelectionCandidate, x: Double, y: Double) -> Double {
@@ -257,12 +283,32 @@ final class BLEManager: NSObject, ObservableObject {
         enrollmentCycle += 1
         let cycle = enrollmentCycle
         enrollmentWatchdogWorkItem?.cancel()
+        scanCompletionWorkItem?.cancel()
         clearCandidateSelection()
         hasSelectedCandidate = false
         isEnrolling = true
         isRefining = false
         enrollmentProgress = 0
         enrollmentStatus = "Giữ \(selectedMode.title.lowercased()) trước MaixCAM"
+
+        // The visible scan is exactly three seconds. Never leave the UI waiting
+        // forever for one CHOOSE packet or for a detector class it does not know.
+        let completion = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.enrollmentCycle == cycle,
+                  self.isSessionActive,
+                  !self.hasSelectedCandidate,
+                  !self.isRefining else { return }
+            self.isEnrolling = false
+            self.isChoosingTarget = true
+            self.enrollmentProgress = 1
+            self.trackingState = .choose
+            self.enrollmentStatus = self.candidates.isEmpty
+                ? "Đã quét xong • chạm trực tiếp lên vật cần theo dõi"
+                : "Đã quét xong • chạm đúng ô cần theo dõi"
+        }
+        scanCompletionWorkItem = completion
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.25, execute: completion)
 
         let watchdog = DispatchWorkItem { [weak self] in
             guard let self,
@@ -280,6 +326,8 @@ final class BLEManager: NSObject, ObservableObject {
         enrollmentCycle += 1
         enrollmentWatchdogWorkItem?.cancel()
         enrollmentWatchdogWorkItem = nil
+        scanCompletionWorkItem?.cancel()
+        scanCompletionWorkItem = nil
         clearCandidateSelection()
         hasSelectedCandidate = false
         isEnrolling = false
@@ -556,6 +604,7 @@ final class BLEManager: NSObject, ObservableObject {
             }
             switch status {
             case "READY":
+                scanCompletionWorkItem?.cancel()
                 confirmCandidateSelection()
                 if fields.count >= 5 {
                     lockedTargetName = localizedTargetName(fields[4])
@@ -569,6 +618,7 @@ final class BLEManager: NSObject, ObservableObject {
                 enrollmentStatus = "Đã nhớ màu và hình dạng • hãy căn tâm thủ công"
                 trackingState = .lock
             case "CHOOSE":
+                scanCompletionWorkItem?.cancel()
                 expectedCandidateCount = fields.count >= 5 ? max(0, Int(fields[4]) ?? 0) : 0
                 // MaixCAM repeats CHOOSE for reliability. Do not let a repeat
                 // erase the user's tap while SELECT acknowledgement is in flight.
@@ -584,6 +634,7 @@ final class BLEManager: NSObject, ObservableObject {
                 trackingState = .choose
                 enrollmentStatus = "Đã quét xong • đang nhận đủ danh sách vật"
             case "SELECTED":
+                scanCompletionWorkItem?.cancel()
                 confirmCandidateSelection()
                 if fields.count >= 5 {
                     lockedTargetName = localizedTargetName(fields[4])

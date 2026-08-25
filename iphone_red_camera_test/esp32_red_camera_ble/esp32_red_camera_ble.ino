@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.8.0 - immediate selection + lightweight refine/calibration
+// SE Rocket Tracker v3.9.0 - bounded scan + direct point fallback
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -1222,6 +1222,27 @@ void handlePhoneCommand(String command) {
   command.toUpperCase();
   if (command.startsWith("MODE,")) {
     selectTrackingMode(command.substring(5));
+  } else if (command.startsWith("SELECT_POINT,")) {
+    const String pointText = command.substring(13);
+    const int separator = pointText.indexOf(',');
+    const int pointX = separator > 0 ? pointText.substring(0, separator).toInt() : -1;
+    const int pointY = separator > 0 ? pointText.substring(separator + 1).toInt() : -1;
+    if (sessionArmed && pointX >= 0 && pointX <= 1000 &&
+        pointY >= 0 && pointY <= 1000) {
+      enrollmentActive = true;
+      targetIdentityReady = false;
+      candidateSelected = true;
+      pendingCenterAfterRefine = false;
+      selectedCandidateSlot = 0;
+      alignmentReady = false;
+      const String argument = String(pointX) + "," + String(pointY);
+      sendMaixCommand("SELECT_POINT", argument.c_str());
+      notifyPhone("SELECTION,0,ACK");
+      panRate = tiltRate = 0.0f;
+      panMoving = tiltMoving = false;
+    } else {
+      notifyPhone("SELECTION,0,ERROR");
+    }
   } else if (command.startsWith("SELECT,")) {
     const String slotText = command.substring(7);
     const int slot = slotText.toInt();
@@ -1267,7 +1288,7 @@ void handlePhoneCommand(String command) {
       beginCenterCalibration();
     }
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,3.8.0");
+    notifyPhone("ESP32,SE_GIMBAL,3.9.0");
     notifyPhone("RIG,GEARED,3.20,1.60,90,120,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
@@ -1311,7 +1332,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.8.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.9.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -1326,7 +1347,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v3.8.0 (geared 3.20/1.60)");
+  Serial.println("\nSE AI Tracker ESP32 v3.9.0 (geared 3.20/1.60)");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);
