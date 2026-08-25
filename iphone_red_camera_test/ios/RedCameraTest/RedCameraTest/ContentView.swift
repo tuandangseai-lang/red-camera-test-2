@@ -303,7 +303,7 @@ struct ContentView: View {
 
     private var bottomControls: some View {
         let sessionActive = camera.isRecording || bluetooth.isSessionActive
-        VStack(spacing: 13) {
+        return VStack(spacing: 13) {
             Text(camera.statusText)
                 .font(.custom("Arial", size: 13).weight(.semibold))
                 .foregroundStyle(.white.opacity(0.86))
