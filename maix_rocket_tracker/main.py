@@ -12,7 +12,7 @@ import os
 import gc
 
 
-APP_VERSION = "1.19.0"
+APP_VERSION = "1.20.2"
 MOUNT_PROFILE = "MAIX_TILT_TOP"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
@@ -37,22 +37,25 @@ LOCK_CONFIRM_FRAMES = 2
 LOST_AFTER_FRAMES = 4
 DROP_AFTER_FRAMES = 22
 MAX_PREDICT_SECONDS = 0.50
-PREVIEW_EVERY_N_FRAMES = 6
+PREVIEW_INTERVAL_MS = 40
+TARGET_REPORT_INTERVAL_MS = 25
 IDLE_FRAME_INTERVAL_MS = 120
 ENROLL_DURATION_MS = 3000
 ENROLL_REPORT_INTERVAL_MS = 80
-ENROLL_MIN_VISIBLE_RATIO = 0.12
+ENROLL_MIN_VISIBLE_RATIO = 0.02
 MAX_SELECTION_CANDIDATES = 12
-CANDIDATE_REPORT_INTERVAL_MS = 70
+# The complete frozen candidate snapshot is sent once at the end of the scan.
+# Repeating D/CHOOSE packets kept the CV loop busy enough to starve UART RX on
+# this MaixCAM firmware, so reliability is handled by ESP32 command retries.
+CANDIDATE_REPORT_INTERVAL_MS = 650
 CHOOSE_REPORT_INTERVAL_MS = 650
-SELECTION_DETECT_INTERVAL = 3
 REFINE_DURATION_MS = 1100
-REFINE_MIN_VISIBLE_RATIO = 0.22
+REFINE_MIN_VISIBLE_RATIO = 0.0
 NANO_MIN_SCORE = 0.46
 NANO_STRONG_SCORE = 0.68
 NANO_REINIT_FRAMES = 24
-YOLO_ROCKET_INTERVAL = 2
-YOLO_GENERAL_INTERVAL = 4
+YOLO_ROCKET_INTERVAL = 6
+YOLO_GENERAL_INTERVAL = 8
 NANO_MAX_CENTRE_JUMP_RATIO = 0.34
 NANO_MIN_BOX_SIDE = 4
 APPEARANCE_TEMPLATE_LIMIT = 4
@@ -289,7 +292,14 @@ class RocketTracker:
         self.last_box = None
         self.last_confidence = 0.0
         self.rx_buffer = ""
+        self.rx_chunks = []
+        # MaixPy invokes this callback on its UART worker thread. Polling UART0
+        # from the neural-inference loop intermittently stopped receiving after
+        # the scan produced several outbound packets on this firmware.
+        self.serial.set_received_callback(self._on_uart_received)
         self.last_status_ms = 0
+        self.last_target_report_ms = 0
+        self.last_preview_ms = 0
         self.last_fps_ms = time.ticks_ms()
         self.fps_frames = 0
         self.fps = 0.0
@@ -301,6 +311,7 @@ class RocketTracker:
         self.enroll_last_seen = {}
         self.enroll_signature_sums = {}
         self.enroll_signature_counts = {}
+        self.enroll_next_proposal_id = -1
         self.enrollment_class_id = -1
         self.appearance_template = None
         self.appearance_templates = []
@@ -430,18 +441,24 @@ class RocketTracker:
             )
             objects.extend(DetectionRecord(item) for item in detected)
         else:
-            detected = self.detector.detect(
-                frame, conf_th=DETECT_CONFIDENCE, iou_th=DETECT_IOU
-            )
-            objects.extend(
-                DetectionRecord(item, CUSTOM_ROCKET_CLASS_ID)
-                for item in detected
-            )
-            if self.bottle_detector is not None:
+            # Rocket mode owns two neural nets. Running both sequentially on
+            # every image halves the useful frame rate, so alternate them and
+            # retain their proposals in the three-second spatial accumulator.
+            run_general = (self.bottle_detector is not None and
+                           self.frame_index % 2 == 1)
+            if run_general:
                 general = self.bottle_detector.detect(
-                    frame, conf_th=0.12, iou_th=DETECT_IOU
+                    frame, conf_th=0.10, iou_th=DETECT_IOU
                 )
                 objects.extend(DetectionRecord(item) for item in general)
+            else:
+                detected = self.detector.detect(
+                    frame, conf_th=0.12, iou_th=DETECT_IOU
+                )
+                objects.extend(
+                    DetectionRecord(item, CUSTOM_ROCKET_CLASS_ID)
+                    for item in detected
+                )
         return objects
 
     def _new_byte_tracker(self):
@@ -461,14 +478,22 @@ class RocketTracker:
     def _write(self, payload):
         self.serial.write_str(make_packet(payload))
 
-    def _read_commands(self):
-        data = self.serial.read()
-        if not data:
-            return
+    def _on_uart_received(self, _serial, data):
         try:
-            self.rx_buffer += bytes(data).decode("ascii", errors="ignore")
+            chunk = bytes(data).decode("ascii", errors="ignore")
         except Exception:
             return
+        if chunk:
+            # list.append is atomic under MaixPy's Python runtime. Parsing and
+            # all state changes remain on the CV thread in _read_commands().
+            self.rx_chunks.append(chunk)
+
+    def _read_commands(self):
+        if not self.rx_chunks:
+            return
+        chunks = self.rx_chunks
+        self.rx_chunks = []
+        self.rx_buffer += "".join(chunks)
         if len(self.rx_buffer) > 512:
             self.rx_buffer = self.rx_buffer[-256:]
         while "\n" in self.rx_buffer:
@@ -585,6 +610,7 @@ class RocketTracker:
         self.enroll_last_seen = {}
         self.enroll_signature_sums = {}
         self.enroll_signature_counts = {}
+        self.enroll_next_proposal_id = -1
         self.enrollment_class_id = -1
         self.appearance_template = None
         self.appearance_templates = []
@@ -608,6 +634,7 @@ class RocketTracker:
         self.enroll_last_seen = {}
         self.enroll_signature_sums = {}
         self.enroll_signature_counts = {}
+        self.enroll_next_proposal_id = -1
         self.awaiting_selection = False
         self.selection_candidates = {}
         self.selection_order = []
@@ -1023,6 +1050,7 @@ class RocketTracker:
         self.enroll_last_seen = {}
         self.enroll_signature_sums = {}
         self.enroll_signature_counts = {}
+        self.enroll_next_proposal_id = -1
         self.awaiting_selection = False
         self.selection_candidates = {}
         self.selection_order = []
@@ -1046,20 +1074,70 @@ class RocketTracker:
         self.state = STATE_ACQUIRE
         self._write("E,0,{0},RETRY".format(self.active_mode))
 
-    def _update_enrollment(self, tracks, frame, now_ms):
+    def _update_enrollment(self, objects, frame, now_ms):
+        """Collect tappable objects without trusting unstable ByteTrack IDs.
+
+        With two alternating detectors a stationary object can receive a new
+        ByteTrack ID on every sighting. Spatial clustering keeps that object as
+        one proposal, so one valid detection is enough to appear after 3 s.
+        """
         self.enroll_total_frames += 1
-        for candidate in tracks:
-            if candidate.lost or not candidate.history:
+        for detected in objects:
+            box = (float(detected.x), float(detected.y),
+                   float(detected.w), float(detected.h))
+            if box[2] < 4 or box[3] < 4:
                 continue
-            obj = candidate.history[-1]
-            box = (obj.x, obj.y, obj.w, obj.h)
-            target_id = candidate.id
+            confidence = clamp(float(detected.score), 0.0, 1.0)
+            class_id = int(detected.class_id)
+            target_id = None
+            best_match = 0.0
+            cx = box[0] + box[2] * 0.5
+            cy = box[1] + box[3] * 0.5
+            area = max(1.0, box[2] * box[3])
+            for proposal_id, saved in self.enroll_last_seen.items():
+                old_box, old_confidence, old_class = saved
+                old_cx = old_box[0] + old_box[2] * 0.5
+                old_cy = old_box[1] + old_box[3] * 0.5
+                distance = math.sqrt((cx - old_cx) ** 2 + (cy - old_cy) ** 2)
+                scale = max(10.0, box[2], box[3], old_box[2], old_box[3])
+                proximity = clamp(1.0 - distance / scale, 0.0, 1.0)
+                old_area = max(1.0, old_box[2] * old_box[3])
+                size_ratio = min(area, old_area) / max(area, old_area)
+                overlap = iou(box, old_box)
+                class_compatible = class_id == old_class or overlap >= 0.55
+                if (not class_compatible or size_ratio < 0.22 or
+                        (overlap < 0.16 and proximity < 0.48)):
+                    continue
+                match = max(overlap, proximity * size_ratio)
+                if match > best_match:
+                    best_match = match
+                    target_id = proposal_id
+
+            if target_id is None:
+                target_id = self.enroll_next_proposal_id
+                self.enroll_next_proposal_id -= 1
+                merged_box = box
+                merged_confidence = confidence
+                merged_class = class_id
+            else:
+                old_box, old_confidence, old_class = self.enroll_last_seen[target_id]
+                alpha = 0.48 if self.enroll_votes.get(target_id, 0) < 3 else 0.30
+                merged_box = tuple(
+                    old_box[index] * (1.0 - alpha) + box[index] * alpha
+                    for index in range(4)
+                )
+                merged_confidence = max(confidence, old_confidence * 0.92)
+                merged_class = old_class
+                if (class_id == CUSTOM_ROCKET_CLASS_ID or
+                        confidence > old_confidence + 0.08):
+                    merged_class = class_id
+
             self.enroll_votes[target_id] = self.enroll_votes.get(target_id, 0) + 1
             self.enroll_last_seen[target_id] = (
-                box, clamp(candidate.score, 0.0, 1.0), obj.class_id
+                merged_box, merged_confidence, merged_class
             )
-            if self.frame_index % 2 == 0:
-                signature = self._appearance_signature(frame, box)
+            if self.frame_index % 3 == 0:
+                signature = self._appearance_signature(frame, merged_box)
                 if signature is not None:
                     if target_id not in self.enroll_signature_sums:
                         self.enroll_signature_sums[target_id] = [0.0] * len(signature)
@@ -1148,10 +1226,9 @@ class RocketTracker:
                 "box": box,
                 "confidence": confidence,
                 "class_id": class_id,
-                "manual": (target_id < 0 or
-                           (self.active_mode == "ROCKET" and
-                            self.custom_model and
-                            class_id != CUSTOM_ROCKET_CLASS_ID)),
+                # Selection proposals are spatial ROIs. NanoTrack owns their
+                # identity after the tap, independent of detector ID changes.
+                "manual": True,
                 "label": candidate_label(class_id),
                 "signature": signature,
             }
@@ -1183,13 +1260,15 @@ class RocketTracker:
         # CHOOSE is a state transition, not a one-shot packet. Repeating it
         # prevents BLE/UART loss without letting an early candidate packet make
         # the iPhone leave the full three-second scan prematurely.
-        if (force or
-                ticks_delta(now_ms, self.choose_last_report_ms) >= CHOOSE_REPORT_INTERVAL_MS):
+        if force:
             self._write("E,100,{0},CHOOSE,{1}".format(
                 self.active_mode, len(self.selection_order)
             ))
             self.choose_last_report_ms = now_ms
-        if not force and ticks_delta(now_ms, self.candidate_last_report_ms) < CANDIDATE_REPORT_INTERVAL_MS:
+        else:
+            # Candidate boxes are a frozen snapshot. Do not continuously fill
+            # the UART while waiting for the user's tap; SELECT/STOP must have
+            # immediate access to the receive side.
             return
         if not self.selection_order:
             return
@@ -1257,8 +1336,8 @@ class RocketTracker:
         self.selected_waiting_center = True
         self.refining = False
         self.selected_candidate_slot = slot
-        self.identity_is_manual = bool(candidate.get("manual", False))
-        self.refine_manual = self.identity_is_manual
+        self.identity_is_manual = True
+        self.refine_manual = True
         self.target_id = candidate["track_id"]
         raw_class_id = candidate["class_id"]
         self.enrollment_class_id = (0 if raw_class_id == CUSTOM_ROCKET_CLASS_ID
@@ -1428,10 +1507,19 @@ class RocketTracker:
             return
 
         visible_ratio = self.refine_visible_frames / float(max(1, self.refine_total_frames))
-        if (visible_ratio < REFINE_MIN_VISIBLE_RATIO or self.last_box is None or
-                not self.filter.valid):
-            self._restart_enrollment(now_ms)
-            return
+        # Refinement is a bounded setup step, never a hidden route back to the
+        # three-second scan. Transparent PET can briefly defeat NanoTrack; in
+        # that case retain the exact ROI chosen by the user and finish anyway.
+        if self.last_box is None:
+            width = float(max(1, self.camera.width()))
+            height = float(max(1, self.camera.height()))
+            self.last_box = (width * 0.42, height * 0.36,
+                             width * 0.16, height * 0.28)
+            self.last_confidence = 0.45
+        if not self.filter.valid:
+            self._update_motion_filter(
+                self.last_box, now_ms, max(0.45, self.last_confidence)
+            )
         if self.refine_signature_count > 0:
             self.appearance_template = [
                 value / self.refine_signature_count
@@ -1539,10 +1627,21 @@ class RocketTracker:
         self.state = STATE_LOCKED
 
     def _send_target(self, now_ms):
+        # The setup states can run much faster than neural inference. Without a
+        # rate limit they flooded UART with ~1000 empty target packets/second,
+        # blocking SELECT, REFINE and STOP commands after the 3-second scan.
+        if ticks_delta(now_ms, self.last_target_report_ms) < TARGET_REPORT_INTERVAL_MS:
+            return
+        self.last_target_report_ms = now_ms
+        # ESP32 already knows setup is active from E packets and holds both
+        # servos. Do not send meaningless 500,500 target packets during scan,
+        # selection or refinement; on MaixCAM's UART driver those writes can
+        # starve the receive side that carries SELECT/REFINE/STOP.
+        if (self.enabled and (self.enrolling or self.awaiting_selection or
+                             self.selected_waiting_center or self.refining)):
+            return
         self.sequence = (self.sequence + 1) & 0xFFFF
-        if (not self.enabled or self.enrolling or self.awaiting_selection or
-                self.selected_waiting_center or self.refining or
-                not self.filter.valid):
+        if not self.enabled or not self.filter.valid:
             payload = "T,{0},{1},500,500,0,0,0,0,0,{2}".format(
                 self.sequence, now_ms, self.state
             )
@@ -1571,17 +1670,13 @@ class RocketTracker:
         if self.enrolling:
             objects = self._detect_enrollment_objects(frame)
             self.last_yolo_frame = self.frame_index
-            tracks = self._detections_to_tracks(objects, universal=True)
-            self._update_enrollment(tracks, frame, now_ms)
+            self._update_enrollment(objects, frame, now_ms)
             return
 
         if self.awaiting_selection:
-            tracks = []
-            if self.frame_index - self.last_yolo_frame >= SELECTION_DETECT_INTERVAL:
-                objects = self._detect_enrollment_objects(frame)
-                self.last_yolo_frame = self.frame_index
-                tracks = self._detections_to_tracks(objects, universal=True)
-            self._update_selection_candidates(tracks, now_ms)
+            # Keep the complete scan snapshot stable under the user's finger.
+            # Re-running YOLO here wastes FPS and can renumber the boxes.
+            self._emit_candidates(now_ms)
             return
 
         if self.selected_waiting_center:
@@ -1658,9 +1753,9 @@ class RocketTracker:
                     continue
                 x, y, w, h = candidate["box"]
                 frame.draw_rect(int(x), int(y), int(w), int(h),
-                                color=image.COLOR_CYAN, thickness=2)
+                                color=image.COLOR_BLUE, thickness=2)
                 frame.draw_string(int(x), max(2, int(y) - 14), str(slot),
-                                  color=image.COLOR_CYAN, scale=1.0)
+                                  color=image.COLOR_BLUE, scale=1.0)
         if self.filter.valid:
             aim_side = max(8, int(min(width, height) * 0.05))
             x = int(self.filter.cx - aim_side * 0.5)
@@ -1714,8 +1809,9 @@ class RocketTracker:
                 self._run_enabled_frame(frame, now_ms)
             self._send_target(now_ms)
             self._update_fps(now_ms)
-            if self.frame_index % PREVIEW_EVERY_N_FRAMES == 0:
+            if ticks_delta(now_ms, self.last_preview_ms) >= PREVIEW_INTERVAL_MS:
                 self._draw_preview(frame)
+                self.last_preview_ms = now_ms
             self.frame_index += 1
             # Keep the sensor alive while idle, but do not heat the SoC by
             # rendering 60 preview frames per second before the user arms it.

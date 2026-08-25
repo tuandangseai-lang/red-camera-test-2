@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.9.0 - bounded scan + direct point fallback
+// SE Rocket Tracker v3.10.0 - reliable scan/refine + higher-rate Maix tracking
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -51,6 +51,7 @@ constexpr uint32_t UART_BAUD = 115200;
 constexpr uint32_t MAIX_FIRST_REPLY_TIMEOUT_MS = 15000;
 constexpr uint32_t MAIX_PING_RETRY_MS = 900;
 constexpr uint8_t MAIX_MIN_PINGS_BEFORE_FAULT = 8;
+constexpr uint32_t REFINE_REPLY_TIMEOUT_MS = 2600;
 constexpr uint32_t CONTROL_PERIOD_US = 20000;  // MG996R: 50 Hz
 constexpr uint32_t TARGET_STALE_MS = 180;
 constexpr uint32_t COAST_LIMIT_MS = 420;
@@ -84,12 +85,12 @@ constexpr float HOME_SPEED_DPS = 65.0f;
 constexpr float SEARCH_SPEED_LIMIT_DPS = 92.0f;
 
 constexpr uint32_t CENTER_CALIBRATION_SETTLE_MS = 600;
-constexpr uint32_t CENTER_CALIBRATION_MS = 1200;
-constexpr uint32_t CENTER_CALIBRATION_TIMEOUT_MS = 6500;
-constexpr uint8_t CENTER_CALIBRATION_MIN_SAMPLES = 8;
+constexpr uint32_t CENTER_CALIBRATION_MS = 900;
+constexpr uint32_t CENTER_CALIBRATION_TIMEOUT_MS = 4000;
+constexpr uint8_t CENTER_CALIBRATION_MIN_SAMPLES = 3;
 constexpr int CENTER_CALIBRATION_MAX_DEVIATION = 80;
-constexpr int CENTER_CALIBRATION_MIN_CONFIDENCE = 55;
-constexpr float CENTER_CALIBRATION_MAX_SPEED = 80.0f;
+constexpr int CENTER_CALIBRATION_MIN_CONFIDENCE = 30;
+constexpr float CENTER_CALIBRATION_MAX_SPEED = 250.0f;
 
 constexpr int MIN_LOCK_CONFIDENCE = 38;
 constexpr int MIN_WEAK_CONFIDENCE = 12;
@@ -155,6 +156,7 @@ bool alignmentReady = false;
 bool targetIdentityReady = false;
 bool candidateSelected = false;
 bool pendingCenterAfterRefine = false;
+uint32_t refineRequestedAtMs = 0;
 int selectedCandidateSlot = -1;
 String lockedTargetToken = "WATER_ROCKET";
 
@@ -324,6 +326,12 @@ void sendMaixCommand(const char *command, const char *argument = "0") {
   char packet[112];
   snprintf(packet, sizeof(packet), "$%s*%02X\n", body, crc);
   maixSerial.print(packet);
+  // HardwareSerial is buffered. Finishing the very small command here makes
+  // back-to-back MODE/ARM and later SELECT/REFINE/STOP deterministic even
+  // while candidate packets are arriving in the opposite direction.
+  maixSerial.flush();
+  Serial.printf("[MAIX COMMAND] %s %s bytes=%u\n", command, argument,
+                static_cast<unsigned>(strlen(packet)));
 }
 
 void setPhoneCharging(bool charging) {
@@ -393,6 +401,7 @@ void armSession() {
   targetIdentityReady = false;
   candidateSelected = false;
   pendingCenterAfterRefine = false;
+  refineRequestedAtMs = 0;
   selectedCandidateSlot = -1;
   enrollmentProgress = 0;
   armStartedAtMs = millis();
@@ -431,6 +440,7 @@ void selectTrackingMode(String mode) {
   targetIdentityReady = false;
   candidateSelected = false;
   pendingCenterAfterRefine = false;
+  refineRequestedAtMs = 0;
   selectedCandidateSlot = -1;
   enrollmentProgress = 0;
   cancelCenterCalibration();
@@ -449,6 +459,7 @@ void stopSession() {
   targetIdentityReady = false;
   candidateSelected = false;
   pendingCenterAfterRefine = false;
+  refineRequestedAtMs = 0;
   selectedCandidateSlot = -1;
   enrollmentProgress = 0;
   cancelCenterCalibration();
@@ -472,6 +483,7 @@ void requestHome() {
   targetIdentityReady = false;
   candidateSelected = false;
   pendingCenterAfterRefine = false;
+  refineRequestedAtMs = 0;
   selectedCandidateSlot = -1;
   enrollmentProgress = 0;
   cancelCenterCalibration();
@@ -602,8 +614,9 @@ void processMaixLine(char *line) {
       targetIdentityReady = true;
       if (pendingCenterAfterRefine) {
         pendingCenterAfterRefine = false;
+        refineRequestedAtMs = 0;
         beginCenterCalibration();
-      } else {
+      } else if (!centerCalibrationActive && !alignmentReady) {
         notifyPhone("CALIBRATE,REQUIRED,PLACE_ON_IPHONE_CENTER");
       }
     }
@@ -663,6 +676,25 @@ void monitorMaixLink() {
         "[MAIX LINK ERROR] Maix received commands but ESP32 received no reply; "
         "check Maix TX/A16 -> ESP32 GPIO21 and common GND");
   }
+}
+
+void monitorRefineTimeout() {
+  if (!sessionArmed || !pendingCenterAfterRefine || refineRequestedAtMs == 0)
+    return;
+  if (millis() - refineRequestedAtMs < Config::REFINE_REPLY_TIMEOUT_MS) return;
+
+  // REFINE is an enhancement, not a gate that may freeze the entire session.
+  // If its READY packet is lost, keep the user's selected ROI and continue to
+  // centre calibration. A late READY is ignored while calibration is active.
+  pendingCenterAfterRefine = false;
+  refineRequestedAtMs = 0;
+  enrollmentActive = false;
+  targetIdentityReady = true;
+  notifyPhone(String("ENROLL,100,") + selectedTrackingMode + ",READY," +
+              lockedTargetToken);
+  notifyPhone(String("TARGET,") + lockedTargetToken);
+  Serial.println("[REFINE] reply timeout - preserving selected ROI");
+  beginCenterCalibration();
 }
 
 bool lockPacketIsConsistent(const TargetPacket &target) {
@@ -781,6 +813,29 @@ void holdServos(float dt) {
   panMoving = tiltMoving = false;
 }
 
+void completeCenterCalibration(float measuredX, float measuredY,
+                               const char *reason) {
+  targetCenterX = clampFloat(measuredX, 200.0f, 800.0f);
+  targetCenterY = clampFloat(measuredY, 200.0f, 800.0f);
+  calibrationPreferences.putUShort("centerX", lroundf(targetCenterX));
+  calibrationPreferences.putUShort("centerY", lroundf(targetCenterY));
+  centerCalibrationActive = false;
+  alignmentReady = true;
+  enrollmentActive = false;
+  targetIdentityReady = true;
+  filteredX = targetCenterX;
+  filteredY = targetCenterY;
+  filteredVX = filteredVY = 0.0f;
+  filteredAX = filteredAY = 0.0f;
+  previousVisionVX = previousVisionVY = 0.0f;
+  lastDynamicsAtMs = 0;
+  notifyPhone(String("CALIBRATE,DONE,") + lroundf(targetCenterX) + "," +
+              lroundf(targetCenterY));
+  notifyPhone("MEDIA,RECORD_START");
+  Serial.printf("[CALIBRATE] center=%.0f,%.0f samples=%u (%s)\n",
+                targetCenterX, targetCenterY, centerCalibrationSamples, reason);
+}
+
 void updateCenterCalibration(float dt, const TargetPacket &target,
                              uint32_t nowMs) {
   holdServos(dt);
@@ -842,38 +897,27 @@ void updateCenterCalibration(float dt, const TargetPacket &target,
                               Config::CENTER_CALIBRATION_MS;
   if (enoughTime &&
       centerCalibrationSamples >= Config::CENTER_CALIBRATION_MIN_SAMPLES) {
-    targetCenterX = clampFloat(
+    completeCenterCalibration(
         static_cast<float>(centerCalibrationSumX) / centerCalibrationSamples,
-        200.0f, 800.0f);
-    targetCenterY = clampFloat(
         static_cast<float>(centerCalibrationSumY) / centerCalibrationSamples,
-        200.0f, 800.0f);
-    calibrationPreferences.putUShort("centerX", lroundf(targetCenterX));
-    calibrationPreferences.putUShort("centerY", lroundf(targetCenterY));
-    centerCalibrationActive = false;
-    alignmentReady = true;
-    filteredX = targetCenterX;
-    filteredY = targetCenterY;
-    filteredVX = filteredVY = 0.0f;
-    filteredAX = filteredAY = 0.0f;
-    previousVisionVX = previousVisionVY = 0.0f;
-    lastDynamicsAtMs = 0;
-    notifyPhone(String("CALIBRATE,DONE,") + lroundf(targetCenterX) + "," +
-                lroundf(targetCenterY));
-    // This is the only transition that authorizes the iPhone to encode/save a
-    // movie. The preceding scan, tap selection and centre setup remain preview.
-    notifyPhone("MEDIA,RECORD_START");
-    Serial.printf("[CALIBRATE] center=%.0f,%.0f samples=%u\n", targetCenterX,
-                  targetCenterY, centerCalibrationSamples);
+        "stable");
     return;
   }
 
   if (nowMs - centerCalibrationStartedAtMs >=
       Config::CENTER_CALIBRATION_TIMEOUT_MS) {
-    cancelCenterCalibration();
-    alignmentReady = false;
-    notifyPhone("CALIBRATE,FAILED,NO_STABLE_TARGET");
-    Serial.println("[CALIBRATE] failed - no stable target");
+    // Do not leave the circular progress indicator at 100 %. Use every valid
+    // sample available; if inference was briefly unavailable, preserve the
+    // previously saved camera offset and let tracking reacquire during preview.
+    const float fallbackX = centerCalibrationSamples > 0
+                                ? static_cast<float>(centerCalibrationSumX) /
+                                      centerCalibrationSamples
+                                : targetCenterX;
+    const float fallbackY = centerCalibrationSamples > 0
+                                ? static_cast<float>(centerCalibrationSumY) /
+                                      centerCalibrationSamples
+                                : targetCenterY;
+    completeCenterCalibration(fallbackX, fallbackY, "bounded fallback");
   }
 }
 
@@ -1206,6 +1250,12 @@ void readUsbConsole() {
     else if (command == 's') stopSession();
     else if (command == 'h') requestHome();
     else if (command == 'p') sendMaixCommand("PING");
+    // Bench shortcuts exercise the exact same state machine as an iPhone tap.
+    // 1..9 selects that candidate; c starts refine + centre calibration.
+    else if (command >= '1' && command <= '9')
+      handlePhoneCommand(String("SELECT,") + command);
+    else if (command == 'c')
+      handlePhoneCommand("CALIBRATE_CENTER");
   }
 }
 
@@ -1233,6 +1283,7 @@ void handlePhoneCommand(String command) {
       targetIdentityReady = false;
       candidateSelected = true;
       pendingCenterAfterRefine = false;
+      refineRequestedAtMs = 0;
       selectedCandidateSlot = 0;
       alignmentReady = false;
       const String argument = String(pointX) + "," + String(pointY);
@@ -1256,6 +1307,7 @@ void handlePhoneCommand(String command) {
       // quick Căn tâm command cannot be discarded while UART ACK is in flight.
       candidateSelected = true;
       pendingCenterAfterRefine = false;
+      refineRequestedAtMs = 0;
       selectedCandidateSlot = slot;
       alignmentReady = false;
       sendMaixCommand("SELECT", String(slot).c_str());
@@ -1279,6 +1331,7 @@ void handlePhoneCommand(String command) {
       // The tap only chooses an identity. The user has now placed that same
       // identity on the iPhone '+', so ask MaixCAM to memorise the current view.
       pendingCenterAfterRefine = true;
+      refineRequestedAtMs = millis();
       enrollmentActive = true;
       sendMaixCommand("REFINE");
       notifyPhone(String("SELECTION,") + selectedCandidateSlot + ",REFINING");
@@ -1288,7 +1341,7 @@ void handlePhoneCommand(String command) {
       beginCenterCalibration();
     }
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,3.9.0");
+    notifyPhone("ESP32,SE_GIMBAL,3.10.0");
     notifyPhone("RIG,GEARED,3.20,1.60,90,120,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
@@ -1332,7 +1385,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.9.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.10.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -1347,8 +1400,9 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v3.9.0 (geared 3.20/1.60)");
-  Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
+  Serial.println("\nSE AI Tracker ESP32 v3.10.0 (geared 3.20/1.60)");
+  Serial.println(
+      "USB bench: a=ARM, 1..9=SELECT, c=REFINE/CENTER, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);
   calibrationPreferences.begin("se-gimbal", false);
@@ -1380,6 +1434,7 @@ void loop() {
   readUsbConsole();
   readMaixUart();
   monitorMaixLink();
+  monitorRefineTimeout();
   runServoController();
   updateStatusLed();
   updateCharging();
