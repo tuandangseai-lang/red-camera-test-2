@@ -12,7 +12,7 @@ import os
 import gc
 
 
-APP_VERSION = "1.15.0"
+APP_VERSION = "1.16.0"
 MOUNT_PROFILE = "MAIX_TILT_TOP"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
@@ -44,6 +44,7 @@ ENROLL_REPORT_INTERVAL_MS = 80
 ENROLL_MIN_VISIBLE_RATIO = 0.12
 MAX_SELECTION_CANDIDATES = 12
 CANDIDATE_REPORT_INTERVAL_MS = 70
+SELECTION_DETECT_INTERVAL = 3
 REFINE_DURATION_MS = 1800
 REFINE_MIN_VISIBLE_RATIO = 0.22
 NANO_MIN_SCORE = 0.46
@@ -1061,24 +1062,9 @@ class RocketTracker:
         if elapsed < ENROLL_DURATION_MS:
             return
 
-        if (not self.enroll_votes and
-                self.active_mode in ("OBJECT", "ROCKET") and
-                self.nano_tracker is not None):
-            # Last-resort manual region only when no neural proposal exists.
-            # It must never replace or hide the real full-screen object list.
-            width = self.camera.width()
-            height = self.camera.height()
-            region_w = max(24, int(width * 0.30))
-            region_h = max(24, int(height * (0.48 if self.active_mode == "ROCKET" else 0.36)))
-            region = ((width - region_w) // 2,
-                      (height - region_h) // 2, region_w, region_h)
-            manual_id = -1001
-            self.enroll_votes[manual_id] = self.enroll_total_frames
-            self.enroll_last_seen[manual_id] = (region, 0.62, -1)
-            signature = self._appearance_signature(frame, region)
-            if signature is not None:
-                self.enroll_signature_sums[manual_id] = list(signature)
-                self.enroll_signature_counts[manual_id] = 1
+        # Never invent one fixed centre rectangle when the detector found
+        # nothing. That fake proposal was the single motionless box seen on the
+        # iPhone. Retry the real full-screen detector instead.
         if not self.enroll_votes:
             self._restart_enrollment(now_ms)
             return
@@ -1151,19 +1137,12 @@ class RocketTracker:
             self.active_mode, len(self.selection_order)
         ), flush=True)
 
-    def _emit_candidates(self, now_ms, force=False):
-        if not force and ticks_delta(now_ms, self.candidate_last_report_ms) < CANDIDATE_REPORT_INTERVAL_MS:
-            return
-        if not self.selection_order:
-            return
-        width = max(1.0, float(self.camera.width()))
-        height = max(1.0, float(self.camera.height()))
-        self.candidate_report_index %= len(self.selection_order)
-        slot = self.selection_order[self.candidate_report_index]
-        self.candidate_report_index = (self.candidate_report_index + 1) % len(self.selection_order)
+    def _emit_candidate_slot(self, slot):
         candidate = self.selection_candidates.get(slot)
         if candidate is None:
             return
+        width = max(1.0, float(self.camera.width()))
+        height = max(1.0, float(self.camera.height()))
         x, y, w, h = candidate["box"]
         cx = int(clamp((x + w * 0.5) / width * 1000.0, 0, 1000))
         cy = int(clamp((y + h * 0.5) / height * 1000.0, 0, 1000))
@@ -1175,12 +1154,56 @@ class RocketTracker:
             slot, candidate["track_id"], candidate["class_id"], confidence,
             cx, cy, bw, bh, label
         ))
+
+    def _emit_candidates(self, now_ms, force=False):
+        if not force and ticks_delta(now_ms, self.candidate_last_report_ms) < CANDIDATE_REPORT_INTERVAL_MS:
+            return
+        if not self.selection_order:
+            return
+        if force:
+            # Send the complete snapshot immediately. The ESP32 queue has room
+            # for all 12 candidates; later packets repeat one slot at a time for
+            # reliability and live movement updates.
+            for slot in self.selection_order:
+                self._emit_candidate_slot(slot)
+            self.candidate_report_index = 0
+            self.candidate_last_report_ms = now_ms
+            return
+        self.candidate_report_index %= len(self.selection_order)
+        slot = self.selection_order[self.candidate_report_index]
+        self.candidate_report_index = (self.candidate_report_index + 1) % len(self.selection_order)
+        self._emit_candidate_slot(slot)
         self.candidate_last_report_ms = now_ms
 
     def _update_selection_candidates(self, tracks, now_ms):
-        # Deliberately freeze the 3-second snapshot. Moving rectangles forced
-        # the iPhone to redraw continuously and made a real finger tap land on
-        # a different slot. Candidate packets still repeat for BLE reliability.
+        # Keep each slot attached to the ByteTrack identity captured during the
+        # 3-second scan. Boxes now follow slow hand/object motion while the user
+        # chooses, instead of remaining stuck on the old snapshot.
+        live_by_id = {}
+        for track_item in tracks:
+            if track_item.lost or not track_item.history:
+                continue
+            live_by_id[track_item.id] = track_item
+        for slot in self.selection_order:
+            candidate = self.selection_candidates.get(slot)
+            if candidate is None:
+                continue
+            track_item = live_by_id.get(candidate["track_id"])
+            if track_item is None:
+                continue
+            obj = track_item.history[-1]
+            old_x, old_y, old_w, old_h = candidate["box"]
+            alpha = 0.70
+            candidate["box"] = (
+                old_x * (1.0 - alpha) + obj.x * alpha,
+                old_y * (1.0 - alpha) + obj.y * alpha,
+                old_w * (1.0 - alpha) + obj.w * alpha,
+                old_h * (1.0 - alpha) + obj.h * alpha,
+            )
+            candidate["confidence"] = clamp(
+                candidate["confidence"] * 0.35 + track_item.score * 0.65,
+                0.0, 1.0
+            )
         self._emit_candidates(now_ms)
 
     def _select_candidate(self, slot, now_ms):
@@ -1484,7 +1507,12 @@ class RocketTracker:
             return
 
         if self.awaiting_selection:
-            self._update_selection_candidates([], now_ms)
+            tracks = []
+            if self.frame_index - self.last_yolo_frame >= SELECTION_DETECT_INTERVAL:
+                objects = self._detect_enrollment_objects(frame)
+                self.last_yolo_frame = self.frame_index
+                tracks = self._detections_to_tracks(objects, universal=True)
+            self._update_selection_candidates(tracks, now_ms)
             return
 
         if self.selected_waiting_center:

@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.5.0 - universal selection + explicit centre/refine flow
+// SE Rocket Tracker v3.6.0 - live multi-select + reliable stop/cancel flow
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -288,6 +288,12 @@ void notifyPhone(const String &message) {
   portEXIT_CRITICAL(&phoneEventMux);
 }
 
+void clearPhoneNotifications() {
+  portENTER_CRITICAL(&phoneEventMux);
+  phoneEventTail = phoneEventHead;
+  portEXIT_CRITICAL(&phoneEventMux);
+}
+
 void flushPhoneNotifications() {
   if (!phoneConnected || eventCharacteristic == nullptr) return;
   const uint32_t now = millis();
@@ -443,6 +449,9 @@ void stopSession() {
   cancelCenterCalibration();
   resetTrackingFilter();
   sendMaixCommand("DISARM");
+  // Remove delayed CHOOSE/CANDIDATE packets before publishing IDLE. Without
+  // this, a packet queued before the pause tap could reopen the selection UI.
+  clearPhoneNotifications();
   notifyPhone("CANDIDATES,CLEAR");
   chargeResumePending = true;
   chargeResumeAtMs = millis() + Config::CHARGE_RESUME_DELAY_MS;
@@ -1240,7 +1249,7 @@ void handlePhoneCommand(String command) {
       beginCenterCalibration();
     }
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,3.5.0");
+    notifyPhone("ESP32,SE_GIMBAL,3.6.0");
     notifyPhone("RIG,GEARED,3.20,1.60,90,120,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
@@ -1284,7 +1293,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.4.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.6.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -1299,7 +1308,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v3.5.0 (geared 3.20/1.60)");
+  Serial.println("\nSE AI Tracker ESP32 v3.6.0 (geared 3.20/1.60)");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);

@@ -23,19 +23,19 @@ struct ContentView: View {
                 .allowsHitTesting(false)
 
                 trackingOverlay(in: geometry.size)
-                controls
                 if bluetooth.isEnrolling {
                     enrollmentOverlay
                 }
                 if bluetooth.isCalibrating {
                     calibrationOverlay
                 }
-                // Selection must be the topmost interactive layer.  The old
-                // ordering placed it under the recording controls, so candidate
-                // boxes could be visible but taps were swallowed by the UI.
                 if bluetooth.isChoosingTarget {
                     candidateSelectionOverlay(in: geometry.size)
                 }
+                // Keep the transport controls above every scan/refine overlay.
+                // The candidate layer used to cover the record button, making
+                // it impossible to stop during the 3-second/selection phase.
+                controls
             }
         }
         .preferredColorScheme(.dark)
@@ -260,9 +260,10 @@ struct ContentView: View {
     private var modeTabs: some View {
         HStack(spacing: 8) {
             ForEach(TrackingMode.allCases) { mode in
-                let selected = bluetooth.selectedMode == mode
-                Button {
-                    if camera.isRecording {
+            let selected = bluetooth.selectedMode == mode
+            let sessionActive = camera.isRecording || bluetooth.isSessionActive
+            Button {
+                    if sessionActive {
                         bluetooth.stop()
                         camera.stopRecording()
                     }
@@ -301,6 +302,7 @@ struct ContentView: View {
     }
 
     private var bottomControls: some View {
+        let sessionActive = camera.isRecording || bluetooth.isSessionActive
         VStack(spacing: 13) {
             Text(camera.statusText)
                 .font(.custom("Arial", size: 13).weight(.semibold))
@@ -323,7 +325,7 @@ struct ContentView: View {
                 Spacer()
 
                 Button {
-                    if camera.isRecording {
+                    if sessionActive {
                         bluetooth.stop()
                         camera.stopRecording()
                     } else {
@@ -335,14 +337,14 @@ struct ContentView: View {
                         Circle()
                             .stroke(.white.opacity(0.92), lineWidth: 5)
                             .frame(width: 82, height: 82)
-                        RoundedRectangle(cornerRadius: camera.isRecording ? 8 : 32, style: .continuous)
-                            .fill(camera.isRecording ? Color.red : Color.white)
-                            .frame(width: camera.isRecording ? 34 : 64, height: camera.isRecording ? 34 : 64)
-                            .animation(.spring(response: 0.28, dampingFraction: 0.78), value: camera.isRecording)
+                        RoundedRectangle(cornerRadius: sessionActive ? 8 : 32, style: .continuous)
+                            .fill(sessionActive ? Color.red : Color.white)
+                            .frame(width: sessionActive ? 34 : 64, height: sessionActive ? 34 : 64)
+                            .animation(.spring(response: 0.28, dampingFraction: 0.78), value: sessionActive)
                     }
                 }
-                .disabled(!camera.isReady || (!camera.isRecording && !bluetooth.isConnected))
-                .opacity(camera.isReady && (camera.isRecording || bluetooth.isConnected) ? 1 : 0.42)
+                .disabled(!camera.isReady || (!sessionActive && !bluetooth.isConnected))
+                .opacity(camera.isReady && (sessionActive || bluetooth.isConnected) ? 1 : 0.42)
 
                 Spacer()
 
@@ -372,7 +374,9 @@ struct ContentView: View {
             x: size.width * bluetooth.targetX,
             y: size.height * bluetooth.targetY
         )
-        let locked = bluetooth.trackingState == .lock
+        // Before centre calibration show only the iPhone '+'; do not draw a
+        // second square that looks like a target the user must fit into.
+        let locked = bluetooth.trackingState == .lock && !bluetooth.needsCenterCalibration
         let searching = bluetooth.trackingState == .search
         // iPhone 15 renders roughly 6 logical points per millimetre.  A fixed
         // 30 pt reticle is therefore about 5 mm and shows the actual aim point;
@@ -472,7 +476,7 @@ struct ContentView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(bluetooth.isConfirmingCandidate)
+                .disabled(bluetooth.isConfirmingCandidate || !bluetooth.isCandidateListReady)
                 .position(point)
                 .accessibilityLabel("Chọn \(candidate.label), độ tin cậy \(candidate.confidence) phần trăm")
             }
@@ -484,6 +488,8 @@ struct ContentView: View {
                         Text(
                             bluetooth.candidates.isEmpty
                                 ? "Đã quét xong • đang nhận danh sách từ MaixCAM"
+                                : !bluetooth.isCandidateListReady
+                                    ? "Đang nhận đủ \(bluetooth.candidates.count)/\(bluetooth.expectedCandidateCount) vật"
                                 : bluetooth.isConfirmingCandidate
                                     ? "Đang xác nhận đúng ô với MaixCAM"
                                     : "Chạm trực tiếp vào vật cần theo dõi"
@@ -532,7 +538,7 @@ struct ContentView: View {
                                     }
                                 }
                                 .buttonStyle(.plain)
-                                .disabled(bluetooth.isConfirmingCandidate)
+                                .disabled(bluetooth.isConfirmingCandidate || !bluetooth.isCandidateListReady)
                             }
                         }
                         .padding(.horizontal, 14)
