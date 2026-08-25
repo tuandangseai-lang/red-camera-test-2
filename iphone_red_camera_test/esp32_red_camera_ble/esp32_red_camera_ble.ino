@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.7.0 - setup-only scan + verified recording handoff
+// SE Rocket Tracker v3.8.0 - immediate selection + lightweight refine/calibration
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -83,10 +83,10 @@ constexpr float ROCKET_BOOST_TILT_JERK_DPS3 = 28500.0f;
 constexpr float HOME_SPEED_DPS = 65.0f;
 constexpr float SEARCH_SPEED_LIMIT_DPS = 92.0f;
 
-constexpr uint32_t CENTER_CALIBRATION_SETTLE_MS = 1800;
-constexpr uint32_t CENTER_CALIBRATION_MS = 2200;
-constexpr uint32_t CENTER_CALIBRATION_TIMEOUT_MS = 10000;
-constexpr uint8_t CENTER_CALIBRATION_MIN_SAMPLES = 14;
+constexpr uint32_t CENTER_CALIBRATION_SETTLE_MS = 600;
+constexpr uint32_t CENTER_CALIBRATION_MS = 1200;
+constexpr uint32_t CENTER_CALIBRATION_TIMEOUT_MS = 6500;
+constexpr uint8_t CENTER_CALIBRATION_MIN_SAMPLES = 8;
 constexpr int CENTER_CALIBRATION_MAX_DEVIATION = 80;
 constexpr int CENTER_CALIBRATION_MIN_CONFIDENCE = 55;
 constexpr float CENTER_CALIBRATION_MAX_SPEED = 80.0f;
@@ -1231,12 +1231,14 @@ void handlePhoneCommand(String command) {
       // will answer SELECTED or SELECT_ERROR for this frozen candidate slot.
       enrollmentActive = true;
       targetIdentityReady = false;
-      candidateSelected = false;
+      // The iPhone tap is authoritative. Mark it selected immediately so a
+      // quick Căn tâm command cannot be discarded while UART ACK is in flight.
+      candidateSelected = true;
       pendingCenterAfterRefine = false;
       selectedCandidateSlot = slot;
       alignmentReady = false;
       sendMaixCommand("SELECT", String(slot).c_str());
-      notifyPhone(String("SELECTION,") + slot + ",PENDING");
+      notifyPhone(String("SELECTION,") + slot + ",ACK");
       panRate = tiltRate = 0.0f;
       panMoving = tiltMoving = false;
     } else {
@@ -1265,7 +1267,7 @@ void handlePhoneCommand(String command) {
       beginCenterCalibration();
     }
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,3.7.0");
+    notifyPhone("ESP32,SE_GIMBAL,3.8.0");
     notifyPhone("RIG,GEARED,3.20,1.60,90,120,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
@@ -1309,7 +1311,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.7.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.8.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -1324,7 +1326,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v3.7.0 (geared 3.20/1.60)");
+  Serial.println("\nSE AI Tracker ESP32 v3.8.0 (geared 3.20/1.60)");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);

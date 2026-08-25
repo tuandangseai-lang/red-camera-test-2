@@ -138,8 +138,9 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     var isCandidateListReady: Bool {
-        !candidates.isEmpty &&
-            (expectedCandidateCount <= 0 || candidates.count >= expectedCandidateCount)
+        // A dropped BLE candidate packet must not freeze the selector forever.
+        // Every box already received is immediately valid and tappable.
+        !candidates.isEmpty
     }
 
     override init() {
@@ -196,43 +197,23 @@ final class BLEManager: NSObject, ObservableObject {
     func selectCandidate(_ candidate: SelectionCandidate) {
         guard isConnected, isChoosingTarget, isCandidateListReady,
               !isConfirmingCandidate else { return }
-        selectionCycle += 1
-        let cycle = selectionCycle
+        cancelSelectionAcknowledgement()
         selectedCandidateID = candidate.id
-        hasSelectedCandidate = false
+        hasSelectedCandidate = true
         lockedTargetName = candidate.label
-        isChoosingTarget = true
+        isChoosingTarget = false
         isRefining = false
         isEnrolling = false
-        enrollmentProgress = 0
-        enrollmentStatus = "Đã chọn \(candidate.label) • đang chờ MaixCAM xác nhận"
-        trackingState = .choose
-        isConfirmingCandidate = true
-        awaitingSelectionAcknowledgement = true
+        enrollmentProgress = 1
+        needsCenterCalibration = true
+        trackingState = .lock
+        enrollmentStatus = "Đã chọn \(candidate.label) • tự đặt tại dấu + rồi bấm Căn tâm"
+        calibrationStatus = "Đặt \(candidate.label.lowercased()) đúng dấu + rồi bấm Căn tâm"
+        finishCandidateSelection()
+
+        // Optimistic local selection: UART still receives the identity, but the
+        // UI never waits for another acknowledgement before enabling Căn tâm.
         send("SELECT,\(candidate.id)")
-
-        selectionRetryWorkItem?.cancel()
-        let retry = DispatchWorkItem { [weak self] in
-            guard let self,
-                  self.selectionCycle == cycle,
-                  self.awaitingSelectionAcknowledgement else { return }
-            self.send("SELECT,\(candidate.id)")
-            self.enrollmentStatus = "Đang xác nhận đúng \(candidate.label) với MaixCAM"
-        }
-        selectionRetryWorkItem = retry
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: retry)
-
-        selectionTimeoutWorkItem?.cancel()
-        let timeout = DispatchWorkItem { [weak self] in
-            guard let self,
-                  self.selectionCycle == cycle,
-                  self.awaitingSelectionAcknowledgement else { return }
-            self.reopenCandidateSelection(
-                status: "Chưa nhận được lựa chọn • chạm lại đúng vật cần bám"
-            )
-        }
-        selectionTimeoutWorkItem = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8, execute: timeout)
     }
 
     func selectCandidate(atX x: Double, y: Double) {
@@ -288,8 +269,7 @@ final class BLEManager: NSObject, ObservableObject {
                   self.enrollmentCycle == cycle,
                   self.isEnrolling,
                   self.enrollmentProgress < 0.01 else { return }
-            self.enrollmentStatus = "MaixCAM chưa phản hồi ổn định • đang thử kết nối lại"
-            self.connectionText = "Đang kiểm tra đường truyền MaixCAM"
+            self.enrollmentStatus = "Đang hoàn tất danh sách vật • có thể dừng và quét lại"
         }
         enrollmentWatchdogWorkItem = watchdog
         DispatchQueue.main.asyncAfter(deadline: .now() + 7.5, execute: watchdog)
@@ -697,8 +677,9 @@ final class BLEManager: NSObject, ObservableObject {
             switch fields[2].uppercased() {
             case "PENDING":
                 selectedCandidateID = slot
-                isConfirmingCandidate = true
-                enrollmentStatus = "Đã gửi lựa chọn • đang chờ MaixCAM xác nhận"
+                // Selection is already final locally. Never re-open a blocking
+                // acknowledgement state because of a delayed transport packet.
+                isConfirmingCandidate = false
             case "CENTER", "ACK":
                 confirmCandidateSelection()
                 selectedCandidateID = slot
@@ -721,9 +702,15 @@ final class BLEManager: NSObject, ObservableObject {
                 enrollmentProgress = 0
                 trackingState = .refine
             case "RETRY", "ERROR":
-                reopenCandidateSelection(
-                    status: "MaixCAM chưa nhận lựa chọn • hãy chạm lại đúng vật"
-                )
+                if hasSelectedCandidate {
+                    isConfirmingCandidate = false
+                    isChoosingTarget = false
+                    needsCenterCalibration = true
+                    trackingState = .lock
+                    enrollmentStatus = "Đã chọn \(lockedTargetName) • đặt tại dấu + rồi bấm Căn tâm"
+                } else {
+                    reopenCandidateSelection(status: "Chạm lại đúng vật cần theo dõi")
+                }
             default:
                 break
             }
@@ -735,8 +722,7 @@ final class BLEManager: NSObject, ObservableObject {
                 // against a healthy scan and falsely accuse the TX wire.
                 if maixVersion == "Đang chờ MaixCAM" &&
                     enrollmentProgress < 0.01 && candidates.isEmpty {
-                    enrollmentStatus = "Đang chờ dữ liệu MaixCAM"
-                    connectionText = "Đang đồng bộ MaixCAM"
+                    enrollmentStatus = "Đang chờ danh sách vật từ MaixCAM"
                 }
             case "MAIX_OK":
                 connectionText = "MaixCAM và ESP32 đang hoạt động"
