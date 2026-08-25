@@ -4,6 +4,8 @@ struct ContentView: View {
     @StateObject private var camera = CameraController()
     @StateObject private var bluetooth = BLEManager()
     @Environment(\.scenePhase) private var scenePhase
+    @State private var enrollmentPhaseStartedAt = Date()
+    @State private var calibrationPhaseStartedAt = Date()
 
     var body: some View {
         GeometryReader { geometry in
@@ -53,14 +55,44 @@ struct ContentView: View {
                 break
             }
         }
+        .onChange(of: bluetooth.isEnrolling) { _, active in
+            if active { enrollmentPhaseStartedAt = Date() }
+        }
+        .onChange(of: bluetooth.isRefining) { _, active in
+            if active { enrollmentPhaseStartedAt = Date() }
+        }
+        .onChange(of: bluetooth.isCalibrating) { _, active in
+            if active { calibrationPhaseStartedAt = Date() }
+        }
     }
 
     private var enrollmentOverlay: some View {
-        let complete = bluetooth.enrollmentProgress >= 0.999
-        let duration = bluetooth.isRefining ? 2.0 : 3.0
-        let remaining = max(1, Int(ceil((1 - bluetooth.enrollmentProgress) * duration)))
-        let activeColor: Color = bluetooth.isRefining ? .cyan : .red
-        return ZStack {
+        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { timeline in
+            let duration = bluetooth.isRefining ? 2.0 : 3.0
+            let elapsed = max(0, timeline.date.timeIntervalSince(enrollmentPhaseStartedAt))
+            // The local clock keeps the ring moving even if one BLE progress
+            // packet is delayed.  Stop at 98% until MaixCAM confirms completion.
+            let localProgress = min(0.98, elapsed / duration * 0.98)
+            let smoothProgress = min(1, max(bluetooth.enrollmentProgress, localProgress))
+            let complete = bluetooth.enrollmentProgress >= 0.999
+            let remaining = max(1, Int(ceil((1 - smoothProgress) * duration)))
+            let activeColor: Color = bluetooth.isRefining ? .cyan : .red
+            enrollmentRing(
+                progress: smoothProgress,
+                complete: complete,
+                remaining: remaining,
+                activeColor: activeColor
+            )
+        }
+    }
+
+    private func enrollmentRing(
+        progress: Double,
+        complete: Bool,
+        remaining: Int,
+        activeColor: Color
+    ) -> some View {
+        ZStack {
             Circle()
                 .fill(.black.opacity(0.58))
                 .frame(width: 176, height: 176)
@@ -71,7 +103,7 @@ struct ContentView: View {
                 .frame(width: 154, height: 154)
 
             Circle()
-                .trim(from: 0, to: max(0.012, bluetooth.enrollmentProgress))
+                .trim(from: 0, to: max(0.012, progress))
                 .stroke(
                     complete ? Color.green : activeColor,
                     style: StrokeStyle(lineWidth: 8, lineCap: .round)
@@ -79,7 +111,6 @@ struct ContentView: View {
                 .frame(width: 154, height: 154)
                 .rotationEffect(.degrees(-90))
                 .shadow(color: (complete ? Color.green : activeColor).opacity(0.55), radius: 7)
-                .animation(.linear(duration: 0.10), value: bluetooth.enrollmentProgress)
 
             VStack(spacing: 7) {
                 Image(systemName: complete ? "checkmark" : bluetooth.isRefining ? "viewfinder.circle" : bluetooth.selectedMode.icon)
@@ -103,6 +134,17 @@ struct ContentView: View {
     }
 
     private var calibrationOverlay: some View {
+        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { timeline in
+            let elapsed = max(0, timeline.date.timeIntervalSince(calibrationPhaseStartedAt))
+            // Calibration normally takes about four seconds.  Animate locally
+            // to 92%, then wait for verified stable samples before showing done.
+            let localProgress = min(0.92, elapsed / 4.0 * 0.92)
+            let smoothProgress = min(1, max(bluetooth.calibrationProgress, localProgress))
+            calibrationRing(progress: smoothProgress)
+        }
+    }
+
+    private func calibrationRing(progress: Double) -> some View {
         let complete = bluetooth.calibrationProgress >= 0.999
         return ZStack {
             Circle()
@@ -114,14 +156,13 @@ struct ContentView: View {
                 .frame(width: 164, height: 164)
 
             Circle()
-                .trim(from: 0, to: max(0.012, bluetooth.calibrationProgress))
+                .trim(from: 0, to: max(0.012, progress))
                 .stroke(
                     complete ? Color.green : Color.cyan,
                     style: StrokeStyle(lineWidth: 7, lineCap: .round)
                 )
                 .frame(width: 164, height: 164)
                 .rotationEffect(.degrees(-90))
-                .animation(.linear(duration: 0.10), value: bluetooth.calibrationProgress)
 
             Image(systemName: complete ? "checkmark" : "scope")
                 .font(.system(size: 42, weight: .bold))
@@ -185,7 +226,7 @@ struct ContentView: View {
                             .font(.custom("Arial", size: 14).monospacedDigit().weight(.bold))
                     }
                 } else {
-                    Text("0,5× cố định • 4K60")
+                    Text("0,5× cố định • 1080p60 mát máy")
                         .font(.custom("Arial", size: 13).weight(.bold))
                         .foregroundStyle(.white.opacity(0.82))
                 }
@@ -354,8 +395,10 @@ struct ContentView: View {
                     .frame(width: aimBoxSide, height: aimBoxSide)
                     .position(point)
                     .shadow(color: stateColor.opacity(0.48), radius: 6)
-                    .animation(.linear(duration: 0.045), value: bluetooth.targetX)
-                    .animation(.linear(duration: 0.045), value: bluetooth.targetY)
+                    // ESP32 publishes at 20 Hz.  A 65 ms linear bridge removes
+                    // visible stepping without adding the sluggish 100+ ms lag
+                    // that makes a fast rocket appear behind the reticle.
+                    .animation(.linear(duration: 0.065), value: point)
 
                 Text("MaixCAM • \(bluetooth.lockedTargetName)")
                     .font(.custom("Arial", size: 12).weight(.bold))

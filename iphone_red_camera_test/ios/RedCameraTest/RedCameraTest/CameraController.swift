@@ -148,10 +148,14 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func configureCamera(_ camera: AVCaptureDevice) {
+        // MaixCAM performs all AI work.  Recording 4K60 on the iPhone adds no
+        // tracking accuracy but is the dominant source of heat and throttling.
+        // 1080p60 preserves the fast water-rocket motion while using far less
+        // encoder bandwidth and memory pressure.
         let preferred = camera.formats
             .filter { format in
                 let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-                guard dimensions.width == 3840, dimensions.height == 2160 else { return false }
+                guard dimensions.width == 1920, dimensions.height == 1080 else { return false }
                 return format.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= 59.0 }
             }
             .max { lhs, rhs in
@@ -161,7 +165,7 @@ final class CameraController: NSObject, ObservableObject {
             ?? camera.formats
                 .filter { format in
                     let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-                    return dimensions.width >= 1920 && dimensions.height >= 1080
+                    return dimensions.width == 1920 && dimensions.height == 1080
                 }
                 .max { lhs, rhs in
                     let left = CMVideoFormatDescriptionGetDimensions(lhs.formatDescription)
@@ -211,7 +215,9 @@ final class CameraController: NSObject, ObservableObject {
             connection.videoRotationAngle = 90
         }
         if connection.isVideoStabilizationSupported {
-            connection.preferredVideoStabilizationMode = .cinematic
+            // The phone is already on a powered gimbal. Standard stabilization
+            // avoids the extra crop/compute cost of Cinematic stabilization.
+            connection.preferredVideoStabilizationMode = .standard
         }
         if movieOutput.availableVideoCodecTypes.contains(.hevc) {
             movieOutput.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.hevc], for: connection)

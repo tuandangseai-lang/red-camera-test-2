@@ -12,7 +12,7 @@ import os
 import gc
 
 
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.13.0"
 MOUNT_PROFILE = "MAIX_TILT_TOP"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
@@ -496,9 +496,18 @@ class RocketTracker:
         width = max(1, frame.width())
         height = max(1, frame.height())
         samples = []
-        for fy in (0.22, 0.40, 0.58, 0.76):
+        # Stay inside the subject.  For people, bias the samples toward the
+        # torso/clothes so a yellow-shirt subject cannot be replaced by a
+        # nearby person merely because both detections share the PERSON class.
+        y_fractions = ((0.18, 0.34, 0.50, 0.68)
+                       if self.active_mode == "PERSON"
+                       else (0.22, 0.40, 0.58, 0.76))
+        x_fractions = ((0.30, 0.42, 0.58, 0.70)
+                       if self.active_mode == "PERSON"
+                       else (0.22, 0.40, 0.58, 0.76))
+        for fy in y_fractions:
             py = int(clamp(y + h * fy, 0, height - 1))
-            for fx in (0.22, 0.40, 0.58, 0.76):
+            for fx in x_fractions:
                 px = int(clamp(x + w * fx, 0, width - 1))
                 try:
                     pixel = frame.get_pixel(px, py, True)
@@ -531,7 +540,25 @@ class RocketTracker:
                                  samples[row * 4 + column][2])
         aspect = clamp(math.log(max(0.12, w / float(max(1, h)))) / 2.5,
                        -1.0, 1.0)
-        return spatial + gradients + [aspect]
+        # A global chromaticity histogram is much more discriminative than a
+        # class label alone and remains stable when exposure changes.  It is
+        # intentionally tiny (16 bins) so it adds almost no MaixCAM heat.
+        colour_histogram = [0.0] * 16
+        saturation_sum = 0.0
+        luminance_sum = 0.0
+        for red_chroma, green_chroma, luminance in samples:
+            red_bin = int(clamp(red_chroma * 4.0, 0, 3))
+            green_bin = int(clamp(green_chroma * 4.0, 0, 3))
+            colour_histogram[red_bin * 4 + green_bin] += 1.0
+            blue_chroma = max(0.0, 1.0 - red_chroma - green_chroma)
+            saturation_sum += max(red_chroma, green_chroma, blue_chroma) - min(
+                red_chroma, green_chroma, blue_chroma
+            )
+            luminance_sum += luminance
+        inv_count = 1.0 / len(samples)
+        colour_histogram = [value * inv_count for value in colour_histogram]
+        return (spatial + gradients + [aspect] + colour_histogram +
+                [saturation_sum * inv_count, luminance_sum * inv_count])
 
     def _appearance_similarity(self, signature):
         if signature is None:
@@ -543,17 +570,24 @@ class RocketTracker:
             return None
         similarities = []
         for template in templates:
-            if len(signature) != len(template) or len(signature) < 73:
+            if len(signature) != len(template) or len(signature) < 91:
                 continue
-            # 16 cells x (R chroma, G chroma, luminance), 24 gradients, aspect.
+            # 16 cells x (R chroma, G chroma, luminance), 24 gradients,
+            # aspect, 16-bin colour histogram, saturation and luminance.
             spatial_error = sum(abs(signature[i] - template[i])
                                 for i in range(48)) / 48.0
             gradient_error = sum(abs(signature[i] - template[i])
                                  for i in range(48, 72)) / 24.0
             shape_error = abs(signature[72] - template[72])
+            colour_error = sum(abs(signature[i] - template[i])
+                               for i in range(73, 89)) / 2.0
+            saturation_error = abs(signature[89] - template[89])
+            luminance_error = abs(signature[90] - template[90])
             similarities.append(clamp(
-                1.0 - spatial_error * 1.20 - gradient_error * 0.80 -
-                shape_error * 0.20, 0.0, 1.0
+                1.0 - spatial_error * 0.80 - gradient_error * 0.45 -
+                shape_error * 0.12 - colour_error * 0.95 -
+                saturation_error * 0.30 - luminance_error * 0.10,
+                0.0, 1.0
             ))
         if not similarities:
             return None
@@ -764,39 +798,42 @@ class RocketTracker:
                     self._appearance_signature(frame, box)
                 )
                 if appearance is not None:
-                    if appearance < 0.32 and raw_confidence < 0.58:
+                    colour_gate = 0.42 if self.active_mode == "PERSON" else 0.35
+                    if appearance < colour_gate and raw_confidence < 0.72:
                         return 0.0, box
-                    return (raw_confidence * 0.58 + appearance * 0.32 +
-                            centre_prior * 0.03 + size_prior * 0.07), box
+                    return (raw_confidence * 0.45 + appearance * 0.43 +
+                            centre_prior * 0.02 + size_prior * 0.10), box
                 return (raw_confidence * 0.82 + centre_prior * 0.08 +
                         size_prior * 0.10), box
             return (raw_confidence * 0.68 + centre_prior * 0.22 +
                     size_prior * 0.10), box
 
-        score = raw_confidence * 0.34
-        if track_item.id == self.target_id:
-            score += 0.30
-        elif self.appearance_template is not None or self.appearance_templates:
+        score = raw_confidence * 0.28
+        appearance = None
+        if self.appearance_template is not None or self.appearance_templates:
             appearance = self._appearance_similarity(
                 self._appearance_signature(frame, box)
             )
             if appearance is not None:
-                if appearance < 0.30 and raw_confidence < 0.62:
+                colour_gate = 0.40 if self.active_mode == "PERSON" else 0.34
+                if appearance < colour_gate and raw_confidence < 0.74:
                     return 0.0, box
-                score += appearance * 0.30
+                score += appearance * 0.34
+        if track_item.id == self.target_id:
+            score += 0.26
         if self.last_box is not None:
             overlap = iou(box, self.last_box)
             score += overlap * 0.10
             old_area = max(1.0, self.last_box[2] * self.last_box[3])
             new_area = max(1.0, obj.w * obj.h)
-            score += (min(old_area, new_area) / max(old_area, new_area)) * 0.06
+            score += (min(old_area, new_area) / max(old_area, new_area)) * 0.05
         predicted = self.filter.predict(now_ms)
         if predicted is not None:
             px, py, _, _ = predicted
             diagonal = math.sqrt(camera_width ** 2 + camera_height ** 2)
             distance = math.sqrt((aim_x - px) ** 2 +
                                  (aim_y - py) ** 2) / max(1.0, diagonal)
-            score += clamp(1.0 - distance * 4.5, 0.0, 1.0) * 0.20
+            score += clamp(1.0 - distance * 4.5, 0.0, 1.0) * 0.16
         return score, box
 
     def _select_target(self, tracks, now_ms, frame):
@@ -948,12 +985,20 @@ class RocketTracker:
         for slot, ranked_item in enumerate(ranked, 1):
             target_id = ranked_item[1]
             box, confidence, class_id = self.enroll_last_seen[target_id]
+            signature = None
+            signature_count = self.enroll_signature_counts.get(target_id, 0)
+            if signature_count > 0 and target_id in self.enroll_signature_sums:
+                signature = [
+                    value / signature_count
+                    for value in self.enroll_signature_sums[target_id]
+                ]
             self.selection_candidates[slot] = {
                 "track_id": target_id,
                 "box": box,
                 "confidence": confidence,
                 "class_id": class_id,
                 "manual": target_id < 0,
+                "signature": signature,
             }
             self.selection_order.append(slot)
         self._write("E,100,{0},CHOOSE,{1}".format(
@@ -1046,6 +1091,13 @@ class RocketTracker:
         self.locked_label = target_label(self.active_mode, self.enrollment_class_id)
         self.last_box = candidate["box"]
         self.last_confidence = candidate["confidence"]
+        selected_signature = candidate.get("signature")
+        if selected_signature is not None:
+            self.refine_signature_sum = list(selected_signature)
+            self.refine_signature_count = 1
+            self.refine_signatures = [list(selected_signature)]
+            self.appearance_template = list(selected_signature)
+            self.appearance_templates = [list(selected_signature)]
         self.filter.reset()
         self.nano_active = False
         self.state = STATE_ACQUIRE

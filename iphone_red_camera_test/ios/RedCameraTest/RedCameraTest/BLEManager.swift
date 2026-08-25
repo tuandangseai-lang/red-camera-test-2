@@ -77,7 +77,7 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var targetHeight = 0.08
     @Published private(set) var lockedTargetName = "Tên lửa nước"
     @Published private(set) var panAngle = 90.0
-    @Published private(set) var tiltAngle = 30.0
+    @Published private(set) var tiltAngle = 120.0
     @Published private(set) var maixVersion = "Đang chờ MaixCAM"
     @Published private(set) var rigVersion = "Bánh răng P 3,20:1 • T 1,60:1"
     @Published private(set) var selectedMode: TrackingMode = .waterRocket
@@ -91,6 +91,7 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var isCalibrating = false
     @Published private(set) var calibrationProgress = 0.0
     @Published private(set) var calibrationStatus = "Đặt mục tiêu vào dấu + giữa iPhone"
+    @Published private(set) var needsCenterCalibration = false
 
     private let serviceUUID = CBUUID(string: "7E57A000-8E3A-4D6A-9B2B-13B10A000001")
     private let eventUUID = CBUUID(string: "7E57A001-8E3A-4D6A-9B2B-13B10A000001")
@@ -111,7 +112,10 @@ final class BLEManager: NSObject, ObservableObject {
         switch trackingState {
         case .choose: return "Chạm vào khung của vật cần bám"
         case .refine: return "Đang tinh chỉnh: \(lockedTargetName)"
-        case .lock: return "Đã khóa: \(lockedTargetName)"
+        case .lock:
+            return needsCenterCalibration
+                ? "Đã chọn \(lockedTargetName) • đặt vào dấu + rồi bấm Căn tâm"
+                : "Đã khóa: \(lockedTargetName)"
         case .search: return "Đang bắt lại: \(lockedTargetName)"
         default: return trackingState.title
         }
@@ -124,6 +128,7 @@ final class BLEManager: NSObject, ObservableObject {
 
     func arm() {
         cancelCalibrationUI()
+        needsCenterCalibration = false
         beginEnrollmentUI()
         send("ARM")
         trackingState = .acquire
@@ -134,6 +139,7 @@ final class BLEManager: NSObject, ObservableObject {
         cancelCalibrationUI()
         send("STOP")
         trackingState = .idle
+        needsCenterCalibration = false
     }
 
     func home() {
@@ -141,6 +147,7 @@ final class BLEManager: NSObject, ObservableObject {
         cancelCalibrationUI()
         send("HOME")
         trackingState = .home
+        needsCenterCalibration = false
     }
 
     func calibrateCenter() {
@@ -151,7 +158,7 @@ final class BLEManager: NSObject, ObservableObject {
         }
         isCalibrating = true
         calibrationProgress = 0
-        calibrationStatus = "Đặt mục tiêu vào dấu +, cách ít nhất 20 cm"
+        calibrationStatus = "Giữ đúng mục tiêu tại dấu + giữa iPhone"
         trackingState = .calibrate
         send("CALIBRATE_CENTER")
     }
@@ -164,7 +171,7 @@ final class BLEManager: NSObject, ObservableObject {
         isRefining = true
         isEnrolling = true
         enrollmentProgress = 0
-        enrollmentStatus = "Giữ \(candidate.label.lowercased()) ổn định để MaixCAM ghi nhớ"
+        enrollmentStatus = "Đã chọn \(candidate.label.lowercased()) • MaixCAM đang ghi nhớ màu và hình dạng"
         trackingState = .refine
         send("SELECT,\(candidate.id)")
     }
@@ -197,6 +204,7 @@ final class BLEManager: NSObject, ObservableObject {
         targetWidth = 0.08
         targetHeight = 0.08
         lockedTargetName = mode.title
+        needsCenterCalibration = false
         trackingState = .idle
         cancelEnrollmentUI()
         cancelCalibrationUI()
@@ -400,6 +408,7 @@ final class BLEManager: NSObject, ObservableObject {
                 }
                 calibrationProgress = 1
                 calibrationStatus = "Đã căn tâm hai camera"
+                needsCenterCalibration = false
                 trackingState = .lock
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
                     self?.isCalibrating = false
@@ -411,6 +420,13 @@ final class BLEManager: NSObject, ObservableObject {
                     ? "Hãy khóa chủ thể rồi căn tâm lại"
                     : "Không thấy chủ thể ổn định, hãy thử lại"
                 trackingState = .acquire
+                needsCenterCalibration = true
+            case "REQUIRED":
+                isCalibrating = false
+                calibrationProgress = 0
+                needsCenterCalibration = true
+                calibrationStatus = "Đặt \(lockedTargetName.lowercased()) đúng dấu + rồi bấm Căn tâm"
+                trackingState = .lock
             case "SAVED":
                 if fields.count >= 4 {
                     savedMaixCenterX = min(0.8, max(0.2, (Double(fields[2]) ?? 500) / 1000))
@@ -440,7 +456,9 @@ final class BLEManager: NSObject, ObservableObject {
                 isRefining = false
                 clearCandidateSelection()
                 enrollmentProgress = 1
-                enrollmentStatus = "MaixCAM đã khóa \(lockedTargetName.lowercased())"
+                needsCenterCalibration = true
+                calibrationStatus = "Đặt \(lockedTargetName.lowercased()) đúng dấu + rồi bấm Căn tâm"
+                enrollmentStatus = "Đã nhớ màu và hình dạng • hãy căn tâm thủ công"
                 trackingState = .lock
             case "CHOOSE":
                 isEnrolling = false

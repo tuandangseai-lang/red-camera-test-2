@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.2.1 - tap-select + dual-camera alignment + stable predictive gimbal
+// SE Rocket Tracker v3.3.0 - colour identity + manual alignment + fast predictive gimbal
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -31,11 +31,14 @@ constexpr float PAN_GEAR_RATIO = 96.0f / 30.0f;
 constexpr float TILT_GEAR_RATIO = 48.0f / 30.0f;
 
 constexpr float PAN_HOME_DEG = 90.0f;
-constexpr float TILT_HOME_DEG = 30.0f;
+// Re-index the tilt gear so the camera is level at 120 servo degrees.  With
+// the 1.60:1 gear set this leaves about 69 camera degrees upward but only
+// about 30 degrees downward, matching a water rocket's flight envelope.
+constexpr float TILT_HOME_DEG = 120.0f;
 constexpr float PAN_MIN_DEG = 5.0f;
 constexpr float PAN_MAX_DEG = 175.0f;
-constexpr float TILT_MIN_DEG = 5.0f;
-constexpr float TILT_MAX_DEG = 175.0f;
+constexpr float TILT_MIN_DEG = 10.0f;
+constexpr float TILT_MAX_DEG = 168.0f;
 // One external gear mesh reverses each output axis. These are the geared-rig
 // defaults. If one physical axis moves away from the target, change only that
 // axis sign; do not swap GPIO 18/19 or the Maix X/Y coordinates.
@@ -51,7 +54,7 @@ constexpr uint32_t CONTROL_PERIOD_US = 20000;  // MG996R: 50 Hz
 constexpr uint32_t TARGET_STALE_MS = 180;
 constexpr uint32_t COAST_LIMIT_MS = 420;
 constexpr uint32_t SEARCH_LIMIT_MS = 850;
-constexpr uint32_t TELEMETRY_PERIOD_MS = 80;
+constexpr uint32_t TELEMETRY_PERIOD_MS = 50;
 constexpr uint32_t BLE_NOTIFY_PERIOD_MS = 18;
 constexpr uint8_t BLE_EVENT_QUEUE_SIZE = 20;
 constexpr size_t BLE_EVENT_MAX_LENGTH = 144;
@@ -59,23 +62,23 @@ constexpr size_t BLE_EVENT_MAX_LENGTH = 144;
 // Maix detector coordinates are 0...1000. On a 320-pixel model one pixel is
 // already 3.1 units, so the previous 2.6-unit deadband reacted to sub-pixel
 // detector noise and continually reversed the geared MG995/996.
-constexpr float START_DEADBAND = 10.0f;
-constexpr float STOP_DEADBAND = 5.0f;
-constexpr float FAST_START_DEADBAND = 4.0f;
-constexpr float FAST_STOP_DEADBAND = 2.0f;
-constexpr float MAX_PAN_SPEED_DPS = 255.0f;
-constexpr float MAX_TILT_SPEED_DPS = 300.0f;
-constexpr float MAX_PAN_ACCEL_DPS2 = 2250.0f;
-constexpr float MAX_TILT_ACCEL_DPS2 = 2450.0f;
-constexpr float ROCKET_BOOST_PAN_SPEED_DPS = 320.0f;
-constexpr float ROCKET_BOOST_TILT_SPEED_DPS = 360.0f;
-constexpr float ROCKET_BOOST_PAN_ACCEL_DPS2 = 3400.0f;
-constexpr float ROCKET_BOOST_TILT_ACCEL_DPS2 = 3450.0f;
-constexpr float MAX_DECEL_DPS2 = 2800.0f;
-constexpr float MAX_PAN_JERK_DPS3 = 16500.0f;
-constexpr float MAX_TILT_JERK_DPS3 = 14500.0f;
-constexpr float ROCKET_BOOST_PAN_JERK_DPS3 = 23500.0f;
-constexpr float ROCKET_BOOST_TILT_JERK_DPS3 = 20500.0f;
+constexpr float START_DEADBAND = 6.0f;
+constexpr float STOP_DEADBAND = 3.0f;
+constexpr float FAST_START_DEADBAND = 2.2f;
+constexpr float FAST_STOP_DEADBAND = 1.2f;
+constexpr float MAX_PAN_SPEED_DPS = 285.0f;
+constexpr float MAX_TILT_SPEED_DPS = 330.0f;
+constexpr float MAX_PAN_ACCEL_DPS2 = 3000.0f;
+constexpr float MAX_TILT_ACCEL_DPS2 = 3250.0f;
+constexpr float ROCKET_BOOST_PAN_SPEED_DPS = 360.0f;
+constexpr float ROCKET_BOOST_TILT_SPEED_DPS = 390.0f;
+constexpr float ROCKET_BOOST_PAN_ACCEL_DPS2 = 4300.0f;
+constexpr float ROCKET_BOOST_TILT_ACCEL_DPS2 = 4400.0f;
+constexpr float MAX_DECEL_DPS2 = 3600.0f;
+constexpr float MAX_PAN_JERK_DPS3 = 22500.0f;
+constexpr float MAX_TILT_JERK_DPS3 = 20500.0f;
+constexpr float ROCKET_BOOST_PAN_JERK_DPS3 = 31000.0f;
+constexpr float ROCKET_BOOST_TILT_JERK_DPS3 = 28500.0f;
 constexpr float HOME_SPEED_DPS = 65.0f;
 constexpr float SEARCH_SPEED_LIMIT_DPS = 92.0f;
 
@@ -148,6 +151,7 @@ bool enrollmentActive = false;
 uint8_t enrollmentProgress = 0;
 bool centerCalibrationActive = false;
 bool alignmentReady = false;
+bool targetIdentityReady = false;
 String lockedTargetToken = "WATER_ROCKET";
 
 float panAngle = Config::PAN_HOME_DEG;
@@ -218,7 +222,7 @@ float updateJerkLimitedRate(float rate, float desiredRate, float &acceleration,
   const bool slowing = reversing || fabsf(desiredRate) < fabsf(rate);
   const float accelerationLimit =
       slowing ? maximumDeceleration : maximumAcceleration;
-  const float responseSeconds = slowing ? 0.060f : 0.085f;
+  const float responseSeconds = slowing ? 0.042f : 0.060f;
   const float targetAcceleration = clampFloat(
       (desiredRate - rate) / responseSeconds, -accelerationLimit,
       accelerationLimit);
@@ -349,7 +353,7 @@ void cancelCenterCalibration() {
 }
 
 void beginCenterCalibration() {
-  if (!sessionArmed || enrollmentActive) {
+  if (!sessionArmed || enrollmentActive || !targetIdentityReady) {
     notifyPhone("CALIBRATE,FAILED,LOCK_FIRST");
     return;
   }
@@ -374,6 +378,7 @@ void armSession() {
   sessionArmed = true;
   enrollmentActive = true;
   alignmentReady = false;
+  targetIdentityReady = false;
   enrollmentProgress = 0;
   armStartedAtMs = millis();
   lastMaixPingAtMs = 0;
@@ -403,6 +408,7 @@ void selectTrackingMode(String mode) {
   lockedTargetToken = mode == "ROCKET" ? "WATER_ROCKET" : mode;
   enrollmentActive = false;
   alignmentReady = false;
+  targetIdentityReady = false;
   enrollmentProgress = 0;
   cancelCenterCalibration();
   resetTrackingFilter();
@@ -417,6 +423,7 @@ void stopSession() {
   sessionArmed = false;
   enrollmentActive = false;
   alignmentReady = false;
+  targetIdentityReady = false;
   enrollmentProgress = 0;
   cancelCenterCalibration();
   resetTrackingFilter();
@@ -432,6 +439,7 @@ void requestHome() {
   sessionArmed = false;
   enrollmentActive = false;
   alignmentReady = false;
+  targetIdentityReady = false;
   enrollmentProgress = 0;
   cancelCenterCalibration();
   resetTrackingFilter();
@@ -533,7 +541,11 @@ void processMaixLine(char *line) {
     notifyPhone(String("ENROLL,") + enrollment);
     if (ready) {
       notifyPhone(String("TARGET,") + lockedTargetToken);
-      beginCenterCalibration();
+      // Never calibrate automatically: the user first places the chosen
+      // subject on the iPhone '+' and explicitly presses Căn tâm.
+      alignmentReady = false;
+      targetIdentityReady = true;
+      notifyPhone("CALIBRATE,REQUIRED,PLACE_ON_IPHONE_CENTER");
     }
     Serial.printf("[MAIX ENROLL] %s\n", enrollment.c_str());
   } else if (strncmp(bodyText, "D,", 2) == 0) {
@@ -1089,6 +1101,8 @@ void publishTelemetry() {
     state = "CALIBRATE";
   else if (searchActive)
     state = "SEARCH";
+  else if (sessionArmed && targetIdentityReady && !alignmentReady)
+    state = "LOCK";
   else if (sessionArmed && !enrollmentActive && alignmentReady &&
            acceptedVisionLock &&
            target.state == VISION_LOCKED)
@@ -1157,8 +1171,8 @@ void handlePhoneCommand(String command) {
              command == "ALIGN_CENTER") {
     beginCenterCalibration();
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,3.2.1");
-    notifyPhone("RIG,GEARED,3.20,1.60,90,30,MAIX_TILT_TOP");
+    notifyPhone("ESP32,SE_GIMBAL,3.3.0");
+    notifyPhone("RIG,GEARED,3.20,1.60,90,120,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
                 lroundf(targetCenterY));
