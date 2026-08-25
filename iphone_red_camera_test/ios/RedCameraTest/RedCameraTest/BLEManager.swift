@@ -101,6 +101,7 @@ final class BLEManager: NSObject, ObservableObject {
     private var commandCharacteristic: CBCharacteristic?
     private var lifecycleActive = true
     private var reconnectWorkItem: DispatchWorkItem?
+    private var enrollmentWatchdogWorkItem: DispatchWorkItem?
     private var enrollmentCycle = 0
 
     var trackingTitle: String {
@@ -182,15 +183,30 @@ final class BLEManager: NSObject, ObservableObject {
 
     private func beginEnrollmentUI() {
         enrollmentCycle += 1
+        let cycle = enrollmentCycle
+        enrollmentWatchdogWorkItem?.cancel()
         clearCandidateSelection()
         isEnrolling = true
         isRefining = false
         enrollmentProgress = 0
         enrollmentStatus = "Giữ \(selectedMode.title.lowercased()) trước MaixCAM"
+
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.enrollmentCycle == cycle,
+                  self.isEnrolling,
+                  self.enrollmentProgress < 0.01 else { return }
+            self.enrollmentStatus = "Không có dữ liệu từ MaixCAM • kiểm tra TX Maix → GPIO16"
+            self.connectionText = "Lỗi dây Maix TX → ESP32 GPIO16"
+        }
+        enrollmentWatchdogWorkItem = watchdog
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6, execute: watchdog)
     }
 
     private func cancelEnrollmentUI() {
         enrollmentCycle += 1
+        enrollmentWatchdogWorkItem?.cancel()
+        enrollmentWatchdogWorkItem = nil
         clearCandidateSelection()
         isEnrolling = false
         isRefining = false
@@ -360,6 +376,11 @@ final class BLEManager: NSObject, ObservableObject {
             }
             let status = fields[3].uppercased()
             enrollmentProgress = progress
+            if progress > 0 {
+                enrollmentWatchdogWorkItem?.cancel()
+                enrollmentWatchdogWorkItem = nil
+                connectionText = "MaixCAM và ESP32 đang hoạt động"
+            }
             switch status {
             case "READY":
                 if fields.count >= 5 {
@@ -434,6 +455,16 @@ final class BLEManager: NSObject, ObservableObject {
             isEnrolling = true
             enrollmentProgress = 0
             trackingState = .refine
+        } else if head == "LINK", fields.count >= 2 {
+            switch fields[1].uppercased() {
+            case "MAIX_TX_MISSING":
+                enrollmentStatus = "Không có dữ liệu từ MaixCAM • kiểm tra TX Maix → GPIO16"
+                connectionText = "Lỗi dây Maix TX → ESP32 GPIO16"
+            case "MAIX_OK":
+                connectionText = "MaixCAM và ESP32 đang hoạt động"
+            default:
+                break
+            }
         } else if head == "ESP32" {
             connectionText = "ESP32 SE đã sẵn sàng"
         }

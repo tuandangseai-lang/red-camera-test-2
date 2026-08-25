@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.1 - 5 mm aim point + head/shape tracking
+// SE Rocket Tracker v3.1.1 - 5 mm aim point + UART link diagnostics
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -45,6 +45,8 @@ constexpr int SERVO_MIN_US = 900;
 constexpr int SERVO_MAX_US = 2100;
 
 constexpr uint32_t UART_BAUD = 115200;
+constexpr uint32_t MAIX_FIRST_REPLY_TIMEOUT_MS = 1500;
+constexpr uint32_t MAIX_PING_RETRY_MS = 500;
 constexpr uint32_t CONTROL_PERIOD_US = 20000;  // MG996R: 50 Hz
 constexpr uint32_t TARGET_STALE_MS = 180;
 constexpr uint32_t COAST_LIMIT_MS = 420;
@@ -162,6 +164,11 @@ uint32_t lastControlAtUs = 0;
 uint32_t lastTelemetryAtMs = 0;
 uint32_t lastSerialLogAtMs = 0;
 uint32_t chargeResumeAtMs = 0;
+uint32_t armStartedAtMs = 0;
+uint32_t lastMaixPingAtMs = 0;
+uint32_t lastMaixPacketAtMs = 0;
+bool maixRxSeenThisSession = false;
+bool maixLinkFaultReported = false;
 float targetCenterX = 500.0f;
 float targetCenterY = 500.0f;
 uint32_t centerCalibrationStartedAtMs = 0;
@@ -323,6 +330,10 @@ void armSession() {
   enrollmentActive = true;
   alignmentReady = false;
   enrollmentProgress = 0;
+  armStartedAtMs = millis();
+  lastMaixPingAtMs = 0;
+  maixRxSeenThisSession = false;
+  maixLinkFaultReported = false;
   homeRequested = false;
   setPhoneCharging(false);
   chargeResumePending = false;
@@ -438,6 +449,14 @@ void processMaixLine(char *line) {
     return;
   }
 
+  lastMaixPacketAtMs = millis();
+  maixRxSeenThisSession = true;
+  if (maixLinkFaultReported) {
+    maixLinkFaultReported = false;
+    notifyPhone("LINK,MAIX_OK");
+    Serial.println("[MAIX LINK] RX recovered");
+  }
+
   if (strncmp(bodyText, "T,", 2) == 0) {
     char mutableBody[160];
     strlcpy(mutableBody, bodyText, sizeof(mutableBody));
@@ -495,6 +514,28 @@ void readMaixUart() {
         uartLineLength = 0;
       }
     }
+  }
+}
+
+void monitorMaixLink() {
+  if (!sessionArmed || !enrollmentActive || maixRxSeenThisSession) return;
+
+  const uint32_t now = millis();
+  const uint32_t elapsed = now - armStartedAtMs;
+  if (elapsed >= Config::MAIX_PING_RETRY_MS &&
+      (lastMaixPingAtMs == 0 ||
+       now - lastMaixPingAtMs >= Config::MAIX_PING_RETRY_MS)) {
+    lastMaixPingAtMs = now;
+    sendMaixCommand("PING");
+  }
+
+  if (elapsed >= Config::MAIX_FIRST_REPLY_TIMEOUT_MS &&
+      !maixLinkFaultReported) {
+    maixLinkFaultReported = true;
+    notifyPhone("LINK,MAIX_TX_MISSING");
+    Serial.println(
+        "[MAIX LINK ERROR] Maix received commands but ESP32 received no reply; "
+        "check Maix TX/A16 -> ESP32 GPIO16 and common GND");
   }
 }
 
@@ -1077,7 +1118,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,2.8.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.1.1");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -1092,7 +1133,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v2.8.0 (geared 3.20/1.60)");
+  Serial.println("\nSE AI Tracker ESP32 v3.1.1 (geared 3.20/1.60)");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);
@@ -1124,6 +1165,7 @@ void setup() {
 void loop() {
   readUsbConsole();
   readMaixUart();
+  monitorMaixLink();
   runServoController();
   updateStatusLed();
   updateCharging();
