@@ -70,6 +70,9 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var connectionText = "Đang bật Bluetooth..."
     @Published private(set) var isConnected = false
     @Published private(set) var isSessionActive = false
+    // Recording is a separate phase from setup. ARM only scans/selects; the
+    // ESP32 raises this flag after centre calibration has really completed.
+    @Published private(set) var shouldRecordVideo = false
     @Published private(set) var trackingState: GimbalTrackingState = .disconnected
     @Published private(set) var confidence = 0
     @Published private(set) var targetX = 0.5
@@ -146,6 +149,7 @@ final class BLEManager: NSObject, ObservableObject {
 
     func arm() {
         cancelCalibrationUI()
+        shouldRecordVideo = false
         needsCenterCalibration = false
         beginEnrollmentUI()
         isSessionActive = true
@@ -158,6 +162,7 @@ final class BLEManager: NSObject, ObservableObject {
         cancelCalibrationUI()
         send("STOP")
         isSessionActive = false
+        shouldRecordVideo = false
         trackingState = .idle
         needsCenterCalibration = false
     }
@@ -167,6 +172,7 @@ final class BLEManager: NSObject, ObservableObject {
         cancelCalibrationUI()
         send("HOME")
         isSessionActive = false
+        shouldRecordVideo = false
         trackingState = .home
         needsCenterCalibration = false
     }
@@ -257,6 +263,7 @@ final class BLEManager: NSObject, ObservableObject {
         targetWidth = 0.08
         targetHeight = 0.08
         lockedTargetName = mode.title
+        shouldRecordVideo = false
         needsCenterCalibration = false
         trackingState = .idle
         cancelEnrollmentUI()
@@ -437,6 +444,7 @@ final class BLEManager: NSObject, ObservableObject {
             case "IDLE", "HOME_DONE":
                 trackingState = .idle
                 isSessionActive = false
+                shouldRecordVideo = false
                 cancelEnrollmentUI()
                 cancelCalibrationUI()
             case "ACQUIRE":
@@ -478,7 +486,11 @@ final class BLEManager: NSObject, ObservableObject {
         } else if head == "RIG", fields.count >= 7 {
             rigVersion = "Bánh răng P \(fields[2]):1 • T \(fields[3]):1"
         } else if head == "CALIBRATE", fields.count >= 2 {
-            switch fields[1].uppercased() {
+            let calibrationEvent = fields[1].uppercased()
+            // SAVED is harmless connection metadata. Every active calibration
+            // event must belong to the current session so STOP stays final.
+            guard calibrationEvent == "SAVED" || isSessionActive else { return }
+            switch calibrationEvent {
             case "PREPARE":
                 isCalibrating = true
                 let prepare = fields.count >= 3 ? (Double(fields[2]) ?? 0) / 100 : 0
@@ -508,10 +520,12 @@ final class BLEManager: NSObject, ObservableObject {
                 calibrationStatus = "Đã căn tâm hai camera"
                 needsCenterCalibration = false
                 trackingState = .lock
+                shouldRecordVideo = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
                     self?.isCalibrating = false
                 }
             case "FAILED":
+                shouldRecordVideo = false
                 isCalibrating = false
                 calibrationProgress = 0
                 calibrationStatus = fields.count >= 3 && fields[2] == "LOCK_FIRST"
@@ -530,6 +544,18 @@ final class BLEManager: NSObject, ObservableObject {
                     savedMaixCenterX = min(0.8, max(0.2, (Double(fields[2]) ?? 500) / 1000))
                     savedMaixCenterY = min(0.8, max(0.2, (Double(fields[3]) ?? 500) / 1000))
                 }
+            default:
+                break
+            }
+        } else if head == "MEDIA", fields.count >= 2 {
+            switch fields[1].uppercased() {
+            case "RECORD_START":
+                // Only this verified controller event is allowed to start a
+                // saved movie; scan, selection and calibration stay preview-only.
+                guard isSessionActive, !needsCenterCalibration else { return }
+                shouldRecordVideo = true
+            case "RECORD_STOP":
+                shouldRecordVideo = false
             default:
                 break
             }
@@ -563,13 +589,18 @@ final class BLEManager: NSObject, ObservableObject {
                 enrollmentStatus = "Đã nhớ màu và hình dạng • hãy căn tâm thủ công"
                 trackingState = .lock
             case "CHOOSE":
+                expectedCandidateCount = fields.count >= 5 ? max(0, Int(fields[4]) ?? 0) : 0
+                // MaixCAM repeats CHOOSE for reliability. Do not let a repeat
+                // erase the user's tap while SELECT acknowledgement is in flight.
+                if isConfirmingCandidate || hasSelectedCandidate || isRefining {
+                    break
+                }
                 cancelSelectionAcknowledgement()
                 isEnrolling = false
                 isRefining = false
                 isChoosingTarget = true
                 selectedCandidateID = nil
                 hasSelectedCandidate = false
-                expectedCandidateCount = fields.count >= 5 ? max(0, Int(fields[4]) ?? 0) : 0
                 trackingState = .choose
                 enrollmentStatus = "Đã quét xong • đang nhận đủ danh sách vật"
             case "SELECTED":
@@ -653,22 +684,13 @@ final class BLEManager: NSObject, ObservableObject {
                 candidates.append(candidate)
                 candidates.sort { $0.id < $1.id }
             }
-            // CHOOSE is intentionally sent once by MaixCAM, while candidate
-            // packets are repeated.  If BLE drops that one state packet, use
-            // any valid candidate as authoritative proof that the 3-second
-            // scan has completed and open the tap-to-select UI immediately.
-            if (isEnrolling || trackingState == .acquire || trackingState == .choose) &&
-                !hasSelectedCandidate && !isRefining {
-                enrollmentWatchdogWorkItem?.cancel()
-                enrollmentWatchdogWorkItem = nil
-                isEnrolling = false
-                isChoosingTarget = true
-                trackingState = .choose
-                enrollmentProgress = 1
+            // Candidate geometry may arrive while packets are being queued,
+            // but it must never end the timed scan. Only the repeated CHOOSE
+            // event from MaixCAM is authoritative after the full three seconds.
+            if isChoosingTarget && trackingState == .choose {
                 enrollmentStatus = isCandidateListReady
                     ? "Đã quét xong • chạm đúng vật cần theo dõi"
                     : "Đang nhận đủ danh sách vật từ MaixCAM"
-                connectionText = "MaixCAM đã gửi danh sách mục tiêu"
             }
         } else if head == "SELECTION", fields.count >= 3,
                   let slot = Int(fields[1]) {
@@ -708,8 +730,14 @@ final class BLEManager: NSObject, ObservableObject {
         } else if head == "LINK", fields.count >= 2 {
             switch fields[1].uppercased() {
             case "MAIX_TX_MISSING":
-                enrollmentStatus = "MaixCAM không phản hồi sau nhiều lần thử • kiểm tra UART và nguồn"
-                connectionText = "Mất phản hồi UART MaixCAM"
+                // Never show a wiring fault after valid Maix data has already
+                // arrived. Older firmware could race a delayed fault packet
+                // against a healthy scan and falsely accuse the TX wire.
+                if maixVersion == "Đang chờ MaixCAM" &&
+                    enrollmentProgress < 0.01 && candidates.isEmpty {
+                    enrollmentStatus = "Đang chờ dữ liệu MaixCAM"
+                    connectionText = "Đang đồng bộ MaixCAM"
+                }
             case "MAIX_OK":
                 connectionText = "MaixCAM và ESP32 đang hoạt động"
             default:
@@ -753,6 +781,7 @@ extension BLEManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         isConnected = false
         isSessionActive = false
+        shouldRecordVideo = false
         trackingState = .disconnected
         connectionText = "Đã nối BLE • đang mở kênh MaixCAM..."
         peripheral.discoverServices([serviceUUID])
@@ -764,6 +793,8 @@ extension BLEManager: CBCentralManagerDelegate {
         error: Error?
     ) {
         isConnected = false
+        isSessionActive = false
+        shouldRecordVideo = false
         trackingState = .disconnected
         connectionText = "Kết nối lỗi, đang thử lại..."
         trackerPeripheral = nil
@@ -776,6 +807,8 @@ extension BLEManager: CBCentralManagerDelegate {
         error: Error?
     ) {
         isConnected = false
+        isSessionActive = false
+        shouldRecordVideo = false
         trackingState = .disconnected
         cancelEnrollmentUI()
         cancelCalibrationUI()

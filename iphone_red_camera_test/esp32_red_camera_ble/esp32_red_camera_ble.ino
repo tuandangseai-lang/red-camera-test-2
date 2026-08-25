@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.6.0 - live multi-select + reliable stop/cancel flow
+// SE Rocket Tracker v3.7.0 - setup-only scan + verified recording handoff
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -48,9 +48,9 @@ constexpr int SERVO_MIN_US = 900;
 constexpr int SERVO_MAX_US = 2100;
 
 constexpr uint32_t UART_BAUD = 115200;
-constexpr uint32_t MAIX_FIRST_REPLY_TIMEOUT_MS = 6500;
+constexpr uint32_t MAIX_FIRST_REPLY_TIMEOUT_MS = 15000;
 constexpr uint32_t MAIX_PING_RETRY_MS = 900;
-constexpr uint8_t MAIX_MIN_PINGS_BEFORE_FAULT = 3;
+constexpr uint8_t MAIX_MIN_PINGS_BEFORE_FAULT = 8;
 constexpr uint32_t CONTROL_PERIOD_US = 20000;  // MG996R: 50 Hz
 constexpr uint32_t TARGET_STALE_MS = 180;
 constexpr uint32_t COAST_LIMIT_MS = 420;
@@ -191,6 +191,7 @@ uint32_t chargeResumeAtMs = 0;
 uint32_t armStartedAtMs = 0;
 uint32_t lastMaixPingAtMs = 0;
 uint32_t lastMaixPacketAtMs = 0;
+uint32_t lastMaixRawByteAtMs = 0;
 bool maixRxSeenThisSession = false;
 bool maixLinkFaultReported = false;
 uint8_t maixPingAttemptsThisSession = 0;
@@ -396,7 +397,10 @@ void armSession() {
   enrollmentProgress = 0;
   armStartedAtMs = millis();
   lastMaixPingAtMs = 0;
-  maixRxSeenThisSession = false;
+  // If UART was alive immediately before ARM, do not invent a broken-TX fault
+  // merely because the first enrollment packet is delayed by model inference.
+  maixRxSeenThisSession = lastMaixRawByteAtMs != 0 &&
+                          armStartedAtMs - lastMaixRawByteAtMs < 5000;
   maixLinkFaultReported = false;
   maixPingAttemptsThisSession = 0;
   homeRequested = false;
@@ -405,6 +409,7 @@ void armSession() {
   sendMaixCommand("MODE", selectedTrackingMode.c_str());
   sendMaixCommand("ARM");
   notifyPhone("CANDIDATES,CLEAR");
+  notifyPhone("MEDIA,RECORD_STOP");
   notifyPhone(String("ENROLL,0,") + selectedTrackingMode + ",START");
   notifyPhone("STATE,ACQUIRE,0");
   Serial.println("[SESSION] ARMED - MaixCAM is vision authority");
@@ -453,6 +458,7 @@ void stopSession() {
   // this, a packet queued before the pause tap could reopen the selection UI.
   clearPhoneNotifications();
   notifyPhone("CANDIDATES,CLEAR");
+  notifyPhone("MEDIA,RECORD_STOP");
   chargeResumePending = true;
   chargeResumeAtMs = millis() + Config::CHARGE_RESUME_DELAY_MS;
   notifyPhone("STATE,IDLE,0");
@@ -473,6 +479,7 @@ void requestHome() {
   homeRequested = true;
   sendMaixCommand("HOME");
   notifyPhone("CANDIDATES,CLEAR");
+  notifyPhone("MEDIA,RECORD_STOP");
   notifyPhone("STATE,HOME,0");
   Serial.println("[SERVO] Smooth HOME requested");
 }
@@ -613,6 +620,8 @@ void processMaixLine(char *line) {
 void readMaixUart() {
   while (maixSerial.available() > 0) {
     const char character = static_cast<char>(maixSerial.read());
+    lastMaixRawByteAtMs = millis();
+    maixRxSeenThisSession = sessionArmed;
     if (character == '\n') {
       uartLine[uartLineLength] = '\0';
       processMaixLine(uartLine);
@@ -631,6 +640,10 @@ void monitorMaixLink() {
   if (!sessionArmed || !enrollmentActive || maixRxSeenThisSession) return;
 
   const uint32_t now = millis();
+  if (lastMaixRawByteAtMs != 0 && now - lastMaixRawByteAtMs < 2500) {
+    maixRxSeenThisSession = true;
+    return;
+  }
   const uint32_t elapsed = now - armStartedAtMs;
   if (elapsed >= Config::MAIX_PING_RETRY_MS &&
       (lastMaixPingAtMs == 0 ||
@@ -847,6 +860,9 @@ void updateCenterCalibration(float dt, const TargetPacket &target,
     lastDynamicsAtMs = 0;
     notifyPhone(String("CALIBRATE,DONE,") + lroundf(targetCenterX) + "," +
                 lroundf(targetCenterY));
+    // This is the only transition that authorizes the iPhone to encode/save a
+    // movie. The preceding scan, tap selection and centre setup remain preview.
+    notifyPhone("MEDIA,RECORD_START");
     Serial.printf("[CALIBRATE] center=%.0f,%.0f samples=%u\n", targetCenterX,
                   targetCenterY, centerCalibrationSamples);
     return;
@@ -1249,7 +1265,7 @@ void handlePhoneCommand(String command) {
       beginCenterCalibration();
     }
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,3.6.0");
+    notifyPhone("ESP32,SE_GIMBAL,3.7.0");
     notifyPhone("RIG,GEARED,3.20,1.60,90,120,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
@@ -1293,7 +1309,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.6.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.7.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -1308,7 +1324,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v3.6.0 (geared 3.20/1.60)");
+  Serial.println("\nSE AI Tracker ESP32 v3.7.0 (geared 3.20/1.60)");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);

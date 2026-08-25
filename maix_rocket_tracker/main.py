@@ -12,7 +12,7 @@ import os
 import gc
 
 
-APP_VERSION = "1.16.0"
+APP_VERSION = "1.17.0"
 MOUNT_PROFILE = "MAIX_TILT_TOP"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
@@ -44,6 +44,7 @@ ENROLL_REPORT_INTERVAL_MS = 80
 ENROLL_MIN_VISIBLE_RATIO = 0.12
 MAX_SELECTION_CANDIDATES = 12
 CANDIDATE_REPORT_INTERVAL_MS = 70
+CHOOSE_REPORT_INTERVAL_MS = 650
 SELECTION_DETECT_INTERVAL = 3
 REFINE_DURATION_MS = 1800
 REFINE_MIN_VISIBLE_RATIO = 0.22
@@ -307,6 +308,7 @@ class RocketTracker:
         self.selection_candidates = {}
         self.selection_order = []
         self.candidate_last_report_ms = 0
+        self.choose_last_report_ms = 0
         self.candidate_report_index = 0
         self.refining = False
         self.refine_started_ms = 0
@@ -549,6 +551,7 @@ class RocketTracker:
         self.selection_candidates = {}
         self.selection_order = []
         self.candidate_last_report_ms = 0
+        self.choose_last_report_ms = 0
         self.candidate_report_index = 0
         self.refining = False
         self.refine_started_ms = 0
@@ -579,6 +582,7 @@ class RocketTracker:
         self.selection_candidates = {}
         self.selection_order = []
         self.candidate_last_report_ms = 0
+        self.choose_last_report_ms = 0
         self.candidate_report_index = 0
         self.refining = False
         self.refine_manual = False
@@ -598,6 +602,7 @@ class RocketTracker:
         self.selection_candidates = {}
         self.selection_order = []
         self.candidate_report_index = 0
+        self.choose_last_report_ms = 0
         self.refining = False
         self.refine_manual = False
         self.selected_candidate_slot = -1
@@ -1012,6 +1017,7 @@ class RocketTracker:
         self.selection_candidates = {}
         self.selection_order = []
         self.candidate_report_index = 0
+        self.choose_last_report_ms = 0
         self.refining = False
         self.refine_manual = False
         self.selected_candidate_slot = -1
@@ -1129,9 +1135,6 @@ class RocketTracker:
                 "signature": signature,
             }
             self.selection_order.append(slot)
-        self._write("E,100,{0},CHOOSE,{1}".format(
-            self.active_mode, len(self.selection_order)
-        ))
         self._emit_candidates(now_ms, True)
         print("Candidate selection ready: mode={0} count={1}".format(
             self.active_mode, len(self.selection_order)
@@ -1156,6 +1159,15 @@ class RocketTracker:
         ))
 
     def _emit_candidates(self, now_ms, force=False):
+        # CHOOSE is a state transition, not a one-shot packet. Repeating it
+        # prevents BLE/UART loss without letting an early candidate packet make
+        # the iPhone leave the full three-second scan prematurely.
+        if (force or
+                ticks_delta(now_ms, self.choose_last_report_ms) >= CHOOSE_REPORT_INTERVAL_MS):
+            self._write("E,100,{0},CHOOSE,{1}".format(
+                self.active_mode, len(self.selection_order)
+            ))
+            self.choose_last_report_ms = now_ms
         if not force and ticks_delta(now_ms, self.candidate_last_report_ms) < CANDIDATE_REPORT_INTERVAL_MS:
             return
         if not self.selection_order:

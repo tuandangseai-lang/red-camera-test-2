@@ -64,6 +64,13 @@ struct ContentView: View {
         .onChange(of: bluetooth.isCalibrating) { _, active in
             if active { calibrationPhaseStartedAt = Date() }
         }
+        .onChange(of: bluetooth.shouldRecordVideo) { _, shouldRecord in
+            if shouldRecord {
+                camera.startRecording()
+            } else if camera.isRecording {
+                camera.stopRecording()
+            }
+        }
     }
 
     private var enrollmentOverlay: some View {
@@ -304,7 +311,7 @@ struct ContentView: View {
     private var bottomControls: some View {
         let sessionActive = camera.isRecording || bluetooth.isSessionActive
         return VStack(spacing: 13) {
-            Text(camera.statusText)
+            Text(bottomStatusText)
                 .font(.custom("Arial", size: 13).weight(.semibold))
                 .foregroundStyle(.white.opacity(0.86))
                 .padding(.horizontal, 14)
@@ -330,7 +337,6 @@ struct ContentView: View {
                         camera.stopRecording()
                     } else {
                         bluetooth.arm()
-                        camera.startRecording()
                     }
                 } label: {
                     ZStack {
@@ -366,6 +372,22 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .stroke(.white.opacity(0.12), lineWidth: 1)
         }
+    }
+
+    private var bottomStatusText: String {
+        guard bluetooth.isSessionActive, !camera.isRecording else {
+            return camera.statusText
+        }
+        if bluetooth.isCalibrating || bluetooth.isRefining {
+            return "Đang căn tâm • chưa lưu video"
+        }
+        if bluetooth.needsCenterCalibration {
+            return "Đưa vật vào dấu + rồi bấm Căn tâm • chưa lưu video"
+        }
+        if bluetooth.isChoosingTarget {
+            return "Chạm chọn vật cần bám • chưa lưu video"
+        }
+        return "Đang quét 3 giây • chưa lưu video"
     }
 
     @ViewBuilder
