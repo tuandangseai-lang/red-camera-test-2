@@ -21,6 +21,9 @@ struct ContentView: View {
                 .allowsHitTesting(false)
 
                 trackingOverlay(in: geometry.size)
+                if bluetooth.isChoosingTarget {
+                    candidateSelectionOverlay(in: geometry.size)
+                }
                 if bluetooth.isEnrolling {
                     enrollmentOverlay
                 }
@@ -51,7 +54,9 @@ struct ContentView: View {
 
     private var enrollmentOverlay: some View {
         let complete = bluetooth.enrollmentProgress >= 0.999
-        let remaining = max(1, Int(ceil((1 - bluetooth.enrollmentProgress) * 3)))
+        let duration = bluetooth.isRefining ? 2.0 : 3.0
+        let remaining = max(1, Int(ceil((1 - bluetooth.enrollmentProgress) * duration)))
+        let activeColor: Color = bluetooth.isRefining ? .cyan : .red
         return ZStack {
             Circle()
                 .fill(.black.opacity(0.58))
@@ -65,16 +70,16 @@ struct ContentView: View {
             Circle()
                 .trim(from: 0, to: max(0.012, bluetooth.enrollmentProgress))
                 .stroke(
-                    complete ? Color.green : Color.red,
+                    complete ? Color.green : activeColor,
                     style: StrokeStyle(lineWidth: 8, lineCap: .round)
                 )
                 .frame(width: 154, height: 154)
                 .rotationEffect(.degrees(-90))
-                .shadow(color: (complete ? Color.green : Color.red).opacity(0.55), radius: 7)
+                .shadow(color: (complete ? Color.green : activeColor).opacity(0.55), radius: 7)
                 .animation(.linear(duration: 0.10), value: bluetooth.enrollmentProgress)
 
             VStack(spacing: 7) {
-                Image(systemName: complete ? "checkmark" : bluetooth.selectedMode.icon)
+                Image(systemName: complete ? "checkmark" : bluetooth.isRefining ? "viewfinder.circle" : bluetooth.selectedMode.icon)
                     .font(.system(size: 29, weight: .bold))
                     .foregroundStyle(complete ? .green : .white)
                 Text(complete ? "XONG" : "\(remaining)")
@@ -362,6 +367,61 @@ struct ContentView: View {
         .allowsHitTesting(false)
     }
 
+    private func candidateSelectionOverlay(in size: CGSize) -> some View {
+        ZStack {
+            ForEach(bluetooth.candidates) { candidate in
+                let point = CGPoint(
+                    x: min(size.width - 30, max(30, size.width * candidate.x)),
+                    y: min(size.height - 40, max(40, size.height * candidate.y))
+                )
+                let visibleWidth = max(38, size.width * candidate.width)
+                let visibleHeight = max(38, size.height * candidate.height)
+                let tapWidth = max(62, visibleWidth)
+                let tapHeight = max(62, visibleHeight)
+
+                Button {
+                    bluetooth.selectCandidate(candidate)
+                } label: {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(
+                                Color.cyan,
+                                style: StrokeStyle(lineWidth: 3, dash: [8, 4])
+                            )
+                            .frame(width: visibleWidth, height: visibleHeight)
+                            .shadow(color: .cyan.opacity(0.72), radius: 7)
+
+                        Text("\(candidate.label) • \(candidate.confidence)%")
+                            .font(.custom("Arial", size: 11).weight(.bold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.cyan, in: Capsule())
+                            .offset(y: -visibleHeight / 2 - 17)
+                    }
+                    .frame(width: tapWidth, height: tapHeight)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .position(point)
+                .accessibilityLabel("Chọn \(candidate.label), độ tin cậy \(candidate.confidence) phần trăm")
+            }
+
+            VStack {
+                Spacer()
+                Label("Chạm vào đúng khung cần theo dõi", systemImage: "hand.tap.fill")
+                    .font(.custom("Arial", size: 13).weight(.bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(.black.opacity(0.72), in: Capsule())
+                    .padding(.bottom, 142)
+                    .allowsHitTesting(false)
+            }
+        }
+        .transition(.opacity)
+    }
+
     private func controlButton(icon: String, title: String, color: Color) -> some View {
         VStack(spacing: 5) {
             ZStack {
@@ -381,6 +441,8 @@ struct ContentView: View {
         switch bluetooth.trackingState {
         case .lock: return .green
         case .search, .acquire: return .yellow
+        case .choose: return .cyan
+        case .refine: return .mint
         case .home: return .blue
         case .calibrate: return .cyan
         case .disconnected: return .orange
@@ -393,6 +455,8 @@ struct ContentView: View {
         case .lock: return "scope"
         case .search: return "location.magnifyingglass"
         case .acquire: return "dot.scope"
+        case .choose: return "hand.tap.fill"
+        case .refine: return "viewfinder.circle"
         case .home: return "house.fill"
         case .calibrate: return "scope"
         case .disconnected: return "antenna.radiowaves.left.and.right.slash"

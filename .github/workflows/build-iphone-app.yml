@@ -1,4 +1,4 @@
-name: Tao IPA SE v6.5 build58 - mot muc tieu va tu can tam
+name: Tao IPA SE v6.6 build59 - cham chon muc tieu MaixCAM
 
 on:
   workflow_dispatch:
@@ -57,6 +57,8 @@ jobs:
           grep -q "calibrateCenter" "RedCameraTest/BLEManager.swift"
           grep -q "calibrationOverlay" "RedCameraTest/ContentView.swift"
           grep -q "lockedTargetName" "RedCameraTest/BLEManager.swift"
+          grep -q "SelectionCandidate" "RedCameraTest/BLEManager.swift"
+          grep -q "candidateSelectionOverlay" "RedCameraTest/ContentView.swift"
           grep -q "MaixCAM" "RedCameraTest/ContentView.swift"
           if grep -q "import Vision" "RedCameraTest/CameraController.swift"; then
             echo "iPhone khong duoc chay AI Vision trong kien truc MaixCAM"
@@ -98,18 +100,18 @@ jobs:
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "6.5"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "58"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "6.6"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "59"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v6.5-build58-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v6.6-build59-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v6.5-build58-unsigned-ipa
-          path: SE-v6.5-build58-unsigned.ipa
+          name: SE-v6.6-build59-unsigned-ipa
+          path: SE-v6.6-build59-unsigned.ipa
           if-no-files-found: error
           retention-days: 7

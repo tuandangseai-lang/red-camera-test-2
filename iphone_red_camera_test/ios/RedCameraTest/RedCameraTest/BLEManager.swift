@@ -28,10 +28,24 @@ enum TrackingMode: String, CaseIterable, Identifiable {
     }
 }
 
+struct SelectionCandidate: Identifiable, Equatable {
+    let id: Int
+    let trackID: Int
+    let classID: Int
+    var label: String
+    var confidence: Int
+    var x: Double
+    var y: Double
+    var width: Double
+    var height: Double
+}
+
 enum GimbalTrackingState: String {
     case disconnected
     case idle
     case acquire
+    case choose
+    case refine
     case lock
     case search
     case home
@@ -42,6 +56,8 @@ enum GimbalTrackingState: String {
         case .disconnected: return "Chưa kết nối"
         case .idle: return "Sẵn sàng"
         case .acquire: return "Đang tìm"
+        case .choose: return "Chạm chọn đúng mục tiêu"
+        case .refine: return "Đang ghi nhớ mục tiêu"
         case .lock: return "Đã khóa mục tiêu"
         case .search: return "Đang bắt lại"
         case .home: return "Đang về Home"
@@ -66,6 +82,10 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var rigVersion = "Bánh răng P 3,20:1 • T 1,60:1"
     @Published private(set) var selectedMode: TrackingMode = .waterRocket
     @Published private(set) var isEnrolling = false
+    @Published private(set) var isChoosingTarget = false
+    @Published private(set) var isRefining = false
+    @Published private(set) var candidates: [SelectionCandidate] = []
+    @Published private(set) var selectedCandidateID: Int?
     @Published private(set) var enrollmentProgress = 0.0
     @Published private(set) var enrollmentStatus = "Giữ chủ thể trước MaixCAM"
     @Published private(set) var isCalibrating = false
@@ -85,6 +105,8 @@ final class BLEManager: NSObject, ObservableObject {
 
     var trackingTitle: String {
         switch trackingState {
+        case .choose: return "Chạm vào khung của vật cần bám"
+        case .refine: return "Đang tinh chỉnh: \(lockedTargetName)"
         case .lock: return "Đã khóa: \(lockedTargetName)"
         case .search: return "Đang bắt lại: \(lockedTargetName)"
         default: return trackingState.title
@@ -130,6 +152,19 @@ final class BLEManager: NSObject, ObservableObject {
         send("CALIBRATE_CENTER")
     }
 
+    func selectCandidate(_ candidate: SelectionCandidate) {
+        guard isConnected, isChoosingTarget else { return }
+        selectedCandidateID = candidate.id
+        lockedTargetName = candidate.label
+        isChoosingTarget = false
+        isRefining = true
+        isEnrolling = true
+        enrollmentProgress = 0
+        enrollmentStatus = "Giữ \(candidate.label.lowercased()) ổn định để MaixCAM ghi nhớ"
+        trackingState = .refine
+        send("SELECT,\(candidate.id)")
+    }
+
     func selectMode(_ mode: TrackingMode) {
         guard selectedMode != mode else { return }
         selectedMode = mode
@@ -147,16 +182,26 @@ final class BLEManager: NSObject, ObservableObject {
 
     private func beginEnrollmentUI() {
         enrollmentCycle += 1
+        clearCandidateSelection()
         isEnrolling = true
+        isRefining = false
         enrollmentProgress = 0
         enrollmentStatus = "Giữ \(selectedMode.title.lowercased()) trước MaixCAM"
     }
 
     private func cancelEnrollmentUI() {
         enrollmentCycle += 1
+        clearCandidateSelection()
         isEnrolling = false
+        isRefining = false
         enrollmentProgress = 0
         enrollmentStatus = "Giữ chủ thể trước MaixCAM"
+    }
+
+    private func clearCandidateSelection() {
+        isChoosingTarget = false
+        selectedCandidateID = nil
+        candidates = []
     }
 
     private func cancelCalibrationUI() {
@@ -239,7 +284,14 @@ final class BLEManager: NSObject, ObservableObject {
         if head == "STATE", fields.count >= 3 {
             switch fields[1].uppercased() {
             case "IDLE", "HOME_DONE": trackingState = .idle
-            case "ACQUIRE": trackingState = .acquire
+            case "ACQUIRE":
+                if isChoosingTarget {
+                    trackingState = .choose
+                } else if isRefining {
+                    trackingState = .refine
+                } else {
+                    trackingState = .acquire
+                }
             case "LOCK": trackingState = .lock
             case "SEARCH": trackingState = .search
             case "HOME": trackingState = .home
@@ -314,10 +366,31 @@ final class BLEManager: NSObject, ObservableObject {
                     lockedTargetName = localizedTargetName(fields[4])
                 }
                 isEnrolling = false
+                isRefining = false
+                clearCandidateSelection()
                 enrollmentProgress = 1
                 enrollmentStatus = "MaixCAM đã khóa \(lockedTargetName.lowercased())"
-            case "RETRY":
+                trackingState = .lock
+            case "CHOOSE":
+                isEnrolling = false
+                isRefining = false
+                isChoosingTarget = true
+                selectedCandidateID = nil
+                trackingState = .choose
+                enrollmentStatus = "Chạm vào khung của đúng \(selectedMode.title.lowercased())"
+            case "REFINE":
+                isChoosingTarget = false
+                isRefining = true
                 isEnrolling = true
+                trackingState = .refine
+                if fields.count >= 5 {
+                    lockedTargetName = localizedTargetName(fields[4])
+                }
+                enrollmentStatus = "MaixCAM đang đối chiếu và ghi nhớ \(lockedTargetName.lowercased())"
+            case "RETRY":
+                clearCandidateSelection()
+                isEnrolling = true
+                isRefining = false
                 enrollmentProgress = 0
                 enrollmentStatus = "Đưa \(selectedMode.title.lowercased()) vào giữa hình"
             case "START", "SCANNING":
@@ -332,6 +405,35 @@ final class BLEManager: NSObject, ObservableObject {
             lockedTargetName = mode.title
         } else if head == "TARGET", fields.count >= 2 {
             lockedTargetName = localizedTargetName(fields[1])
+        } else if head == "CANDIDATES", fields.count >= 2,
+                  fields[1].uppercased() == "CLEAR" {
+            clearCandidateSelection()
+        } else if head == "CANDIDATE", fields.count >= 10,
+                  let slot = Int(fields[1]) {
+            let candidate = SelectionCandidate(
+                id: slot,
+                trackID: Int(fields[2]) ?? -1,
+                classID: Int(fields[3]) ?? -1,
+                label: localizedTargetName(fields[9]),
+                confidence: min(100, max(0, Int(fields[4]) ?? 0)),
+                x: mapMaixPointToIPhone((Double(fields[5]) ?? 500) / 1000, scale: 0.62),
+                y: mapMaixPointToIPhone((Double(fields[6]) ?? 500) / 1000, scale: 0.48),
+                width: min(0.42, max(0.05, ((Double(fields[7]) ?? 80) / 1000) * 0.62)),
+                height: min(0.48, max(0.05, ((Double(fields[8]) ?? 80) / 1000) * 0.48))
+            )
+            if let index = candidates.firstIndex(where: { $0.id == slot }) {
+                candidates[index] = candidate
+            } else {
+                candidates.append(candidate)
+                candidates.sort { $0.id < $1.id }
+            }
+        } else if head == "SELECTION", fields.count >= 3,
+                  fields[2].uppercased() == "REFINE" {
+            isChoosingTarget = false
+            isRefining = true
+            isEnrolling = true
+            enrollmentProgress = 0
+            trackingState = .refine
         } else if head == "ESP32" {
             connectionText = "ESP32 SE đã sẵn sàng"
         }

@@ -12,7 +12,7 @@ import os
 import gc
 
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 MOUNT_PROFILE = "MAIX_TILT_TOP"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
@@ -40,7 +40,11 @@ PREVIEW_EVERY_N_FRAMES = 6
 IDLE_FRAME_INTERVAL_MS = 120
 ENROLL_DURATION_MS = 3000
 ENROLL_REPORT_INTERVAL_MS = 80
-ENROLL_MIN_VISIBLE_RATIO = 0.25
+ENROLL_MIN_VISIBLE_RATIO = 0.12
+MAX_SELECTION_CANDIDATES = 6
+CANDIDATE_REPORT_INTERVAL_MS = 70
+REFINE_DURATION_MS = 1800
+REFINE_MIN_VISIBLE_RATIO = 0.22
 NANO_MIN_SCORE = 0.46
 NANO_STRONG_SCORE = 0.68
 NANO_REINIT_FRAMES = 24
@@ -236,6 +240,19 @@ class RocketTracker:
         self.enroll_signature_counts = {}
         self.enrollment_class_id = -1
         self.appearance_template = None
+        self.awaiting_selection = False
+        self.selection_candidates = {}
+        self.selection_order = []
+        self.candidate_last_report_ms = 0
+        self.candidate_report_index = 0
+        self.refining = False
+        self.refine_started_ms = 0
+        self.refine_last_report_ms = 0
+        self.refine_total_frames = 0
+        self.refine_visible_frames = 0
+        self.refine_signature_sum = None
+        self.refine_signature_count = 0
+        self.selected_candidate_slot = -1
         self.nano_active = False
         self.nano_last_score = 0.0
         self.nano_last_init_frame = -1000
@@ -336,6 +353,15 @@ class RocketTracker:
                     self._write("A,{0},MODE,{1}".format(parts[1], self.active_mode))
                 else:
                     self._write("A,{0},MODE_ERROR".format(parts[1]))
+            elif command == "SELECT" and len(parts) >= 4:
+                try:
+                    slot = int(parts[3])
+                except Exception:
+                    slot = -1
+                if self._begin_refinement(slot, time.ticks_ms()):
+                    self._write("A,{0},SELECTED,{1}".format(parts[1], slot))
+                else:
+                    self._write("A,{0},SELECT_ERROR,{1}".format(parts[1], slot))
             elif command == "PING":
                 print("UART command: PING", flush=True)
                 self._write("A,{0},PONG,{1},{2},{3}".format(
@@ -363,6 +389,19 @@ class RocketTracker:
         self.last_yolo_lock_frame = -1000
         self.tracking_source = "YOLO"
         self.locked_label = target_label(self.active_mode, -1)
+        self.awaiting_selection = False
+        self.selection_candidates = {}
+        self.selection_order = []
+        self.candidate_last_report_ms = 0
+        self.candidate_report_index = 0
+        self.refining = False
+        self.refine_started_ms = 0
+        self.refine_last_report_ms = 0
+        self.refine_total_frames = 0
+        self.refine_visible_frames = 0
+        self.refine_signature_sum = None
+        self.refine_signature_count = 0
+        self.selected_candidate_slot = -1
 
     def _begin_enrollment(self):
         self.enrolling = True
@@ -375,6 +414,13 @@ class RocketTracker:
         self.enroll_signature_counts = {}
         self.enrollment_class_id = -1
         self.appearance_template = None
+        self.awaiting_selection = False
+        self.selection_candidates = {}
+        self.selection_order = []
+        self.candidate_last_report_ms = 0
+        self.candidate_report_index = 0
+        self.refining = False
+        self.selected_candidate_slot = -1
         self.state = STATE_ACQUIRE
         self._write("E,0,{0},START".format(self.active_mode))
 
@@ -384,6 +430,12 @@ class RocketTracker:
         self.enroll_last_seen = {}
         self.enroll_signature_sums = {}
         self.enroll_signature_counts = {}
+        self.awaiting_selection = False
+        self.selection_candidates = {}
+        self.selection_order = []
+        self.candidate_report_index = 0
+        self.refining = False
+        self.selected_candidate_slot = -1
 
     def _appearance_signature(self, frame, box):
         """Tiny colour/shape descriptor for re-identifying the enrolled subject.
@@ -673,6 +725,7 @@ class RocketTracker:
         return best
 
     def _restart_enrollment(self, now_ms):
+        self.enrolling = True
         self.enroll_started_ms = now_ms
         self.enroll_last_report_ms = 0
         self.enroll_total_frames = 0
@@ -680,12 +733,29 @@ class RocketTracker:
         self.enroll_last_seen = {}
         self.enroll_signature_sums = {}
         self.enroll_signature_counts = {}
+        self.awaiting_selection = False
+        self.selection_candidates = {}
+        self.selection_order = []
+        self.candidate_report_index = 0
+        self.refining = False
+        self.selected_candidate_slot = -1
+        self.target_id = -1
+        self.pending_target_id = -1
+        self.pending_target_frames = 0
+        self.enrollment_class_id = -1
+        self.appearance_template = None
+        self.last_box = None
+        self.last_confidence = 0.0
+        self.filter.reset()
+        self.nano_active = False
+        self.state = STATE_ACQUIRE
         self._write("E,0,{0},RETRY".format(self.active_mode))
 
     def _update_enrollment(self, tracks, frame, now_ms):
         self.enroll_total_frames += 1
-        candidate = self._select_enrollment_candidate(tracks)
-        if candidate is not None:
+        for candidate in tracks:
+            if candidate.lost or not candidate.history:
+                continue
             obj = candidate.history[-1]
             box = (obj.x, obj.y, obj.w, obj.h)
             target_id = candidate.id
@@ -716,41 +786,210 @@ class RocketTracker:
         if not self.enroll_votes:
             self._restart_enrollment(now_ms)
             return
-        best_id = max(self.enroll_votes, key=self.enroll_votes.get)
-        visible_ratio = self.enroll_votes[best_id] / float(max(1, self.enroll_total_frames))
-        if visible_ratio < ENROLL_MIN_VISIBLE_RATIO or best_id not in self.enroll_last_seen:
+
+        ranked = []
+        for target_id, votes in self.enroll_votes.items():
+            if target_id not in self.enroll_last_seen:
+                continue
+            box, confidence, class_id = self.enroll_last_seen[target_id]
+            visible_ratio = votes / float(max(1, self.enroll_total_frames))
+            if visible_ratio < ENROLL_MIN_VISIBLE_RATIO:
+                continue
+            area_ratio = box[2] * box[3] / float(
+                max(1, self.camera.width() * self.camera.height())
+            )
+            rank_score = visible_ratio * 0.62 + confidence * 0.30 + min(0.08, area_ratio)
+            ranked.append((rank_score, target_id))
+        ranked.sort(reverse=True)
+        ranked = ranked[:MAX_SELECTION_CANDIDATES]
+        if not ranked:
             self._restart_enrollment(now_ms)
             return
 
-        box, confidence, class_id = self.enroll_last_seen[best_id]
-        self.target_id = best_id
-        self.enrollment_class_id = class_id
-        self.locked_label = target_label(self.active_mode, class_id)
+        self.enrolling = False
+        self.awaiting_selection = True
+        self.state = STATE_ACQUIRE
+        self.selection_candidates = {}
+        self.selection_order = []
+        for slot, ranked_item in enumerate(ranked, 1):
+            target_id = ranked_item[1]
+            box, confidence, class_id = self.enroll_last_seen[target_id]
+            self.selection_candidates[slot] = {
+                "track_id": target_id,
+                "box": box,
+                "confidence": confidence,
+                "class_id": class_id,
+            }
+            self.selection_order.append(slot)
+        self._write("E,100,{0},CHOOSE,{1}".format(
+            self.active_mode, len(self.selection_order)
+        ))
+        self._emit_candidates(now_ms, True)
+        print("Candidate selection ready: mode={0} count={1}".format(
+            self.active_mode, len(self.selection_order)
+        ), flush=True)
+
+    def _emit_candidates(self, now_ms, force=False):
+        if not force and ticks_delta(now_ms, self.candidate_last_report_ms) < CANDIDATE_REPORT_INTERVAL_MS:
+            return
+        if not self.selection_order:
+            return
+        width = max(1.0, float(self.camera.width()))
+        height = max(1.0, float(self.camera.height()))
+        self.candidate_report_index %= len(self.selection_order)
+        slot = self.selection_order[self.candidate_report_index]
+        self.candidate_report_index = (self.candidate_report_index + 1) % len(self.selection_order)
+        candidate = self.selection_candidates.get(slot)
+        if candidate is None:
+            return
+        x, y, w, h = candidate["box"]
+        cx = int(clamp((x + w * 0.5) / width * 1000.0, 0, 1000))
+        cy = int(clamp((y + h * 0.5) / height * 1000.0, 0, 1000))
+        bw = int(clamp(w / width * 1000.0, 0, 1000))
+        bh = int(clamp(h / height * 1000.0, 0, 1000))
+        confidence = int(clamp(candidate["confidence"] * 100.0, 0, 100))
+        label = target_label(self.active_mode, candidate["class_id"])
+        self._write("D,{0},{1},{2},{3},{4},{5},{6},{7},{8}".format(
+            slot, candidate["track_id"], candidate["class_id"], confidence,
+            cx, cy, bw, bh, label
+        ))
+        self.candidate_last_report_ms = now_ms
+
+    def _update_selection_candidates(self, tracks, now_ms):
+        active_tracks = {}
+        for track_item in tracks:
+            if track_item.lost or not track_item.history:
+                continue
+            active_tracks[track_item.id] = track_item
+        for slot in self.selection_order:
+            candidate = self.selection_candidates.get(slot)
+            if candidate is None:
+                continue
+            track_item = active_tracks.get(candidate["track_id"])
+            if track_item is None:
+                # ByteTrack can assign a new identity after a short occlusion.
+                # Reassociate only a same-class box that overlaps the old one.
+                best = None
+                best_overlap = 0.0
+                for possible in active_tracks.values():
+                    obj = possible.history[-1]
+                    if obj.class_id != candidate["class_id"]:
+                        continue
+                    box = (obj.x, obj.y, obj.w, obj.h)
+                    overlap = iou(box, candidate["box"])
+                    if overlap > best_overlap:
+                        best, best_overlap = possible, overlap
+                if best_overlap >= 0.08:
+                    track_item = best
+                    candidate["track_id"] = best.id
+            if track_item is not None:
+                obj = track_item.history[-1]
+                candidate["box"] = (obj.x, obj.y, obj.w, obj.h)
+                candidate["confidence"] = clamp(track_item.score, 0.0, 1.0)
+        self._emit_candidates(now_ms)
+
+    def _begin_refinement(self, slot, now_ms):
+        if not self.enabled or not self.awaiting_selection:
+            return False
+        candidate = self.selection_candidates.get(slot)
+        if candidate is None:
+            self._emit_candidates(now_ms, True)
+            return False
+        self.awaiting_selection = False
+        self.refining = True
+        self.selected_candidate_slot = slot
+        self.refine_started_ms = now_ms
+        self.refine_last_report_ms = 0
+        self.refine_total_frames = 0
+        self.refine_visible_frames = 0
+        self.refine_signature_sum = None
+        self.refine_signature_count = 0
+        self.target_id = candidate["track_id"]
+        self.enrollment_class_id = candidate["class_id"]
+        self.locked_label = target_label(self.active_mode, self.enrollment_class_id)
+        self.last_box = candidate["box"]
+        self.last_confidence = candidate["confidence"]
+        self.filter.reset()
+        self.nano_active = False
+        self.state = STATE_ACQUIRE
+        self._write("E,0,{0},REFINE,{1}".format(
+            self.active_mode, self.locked_label
+        ))
+        print("Refining selected candidate: slot={0} id={1}".format(
+            slot, self.target_id
+        ), flush=True)
+        return True
+
+    def _update_refinement(self, tracks, frame, now_ms):
+        self.refine_total_frames += 1
+        selected = None
+        for track_item in tracks:
+            if track_item.lost or not track_item.history:
+                continue
+            obj = track_item.history[-1]
+            if obj.class_id != self.enrollment_class_id:
+                continue
+            box = (obj.x, obj.y, obj.w, obj.h)
+            if track_item.id == self.target_id:
+                selected = track_item
+                break
+            if self.last_box is not None and self._boxes_compatible(box, self.last_box):
+                selected = track_item
+        if selected is not None:
+            obj = selected.history[-1]
+            box = (obj.x, obj.y, obj.w, obj.h)
+            confidence = clamp(selected.score, 0.0, 1.0)
+            self.target_id = selected.id
+            self.last_box = box
+            self.last_confidence = confidence
+            self.filter.update(box, now_ms, confidence)
+            self.refine_visible_frames += 1
+            signature = self._appearance_signature(frame, box)
+            if signature is not None:
+                if self.refine_signature_sum is None:
+                    self.refine_signature_sum = [0.0] * len(signature)
+                for index, value in enumerate(signature):
+                    self.refine_signature_sum[index] += value
+                self.refine_signature_count += 1
+
+        elapsed = ticks_delta(now_ms, self.refine_started_ms)
+        progress = int(clamp(elapsed * 100.0 / REFINE_DURATION_MS, 0, 100))
+        if (self.refine_last_report_ms == 0 or
+                ticks_delta(now_ms, self.refine_last_report_ms) >= ENROLL_REPORT_INTERVAL_MS):
+            self._write("E,{0},{1},REFINE,{2}".format(
+                progress, self.active_mode, self.locked_label
+            ))
+            self.refine_last_report_ms = now_ms
+        if elapsed < REFINE_DURATION_MS:
+            return
+
+        visible_ratio = self.refine_visible_frames / float(max(1, self.refine_total_frames))
+        if (visible_ratio < REFINE_MIN_VISIBLE_RATIO or self.last_box is None or
+                not self.filter.valid):
+            self._restart_enrollment(now_ms)
+            return
+        if self.refine_signature_count > 0:
+            self.appearance_template = [
+                value / self.refine_signature_count
+                for value in self.refine_signature_sum
+            ]
+        self.refining = False
+        self.selection_candidates = {}
+        self.selection_order = []
         self.pending_target_id = -1
         self.pending_target_frames = 0
         self.has_ever_locked = True
         self.confirm_count = LOCK_CONFIRM_FRAMES
         self.missing_frames = 0
-        self.last_box = box
-        self.last_confidence = confidence
-        self.filter.reset()
-        self.filter.update(box, now_ms, confidence)
         self.last_yolo_frame = self.frame_index
         self.last_yolo_lock_frame = self.frame_index
-        self._start_nano_tracker(frame, box)
-        signature_count = self.enroll_signature_counts.get(best_id, 0)
-        if signature_count > 0:
-            self.appearance_template = [
-                value / signature_count
-                for value in self.enroll_signature_sums[best_id]
-            ]
-        self.enrolling = False
+        self._start_nano_tracker(frame, self.last_box)
         self.state = STATE_LOCKED
         self._write("E,100,{0},READY,{1}".format(
             self.active_mode, self.locked_label
         ))
-        print("Subject enrolled: mode={0} id={1} class={2} visible={3:.0f}%".format(
-            self.active_mode, best_id, class_id, visible_ratio * 100.0
+        print("Selected subject memorised: mode={0} id={1} visible={2:.0f}%".format(
+            self.active_mode, self.target_id, visible_ratio * 100.0
         ), flush=True)
 
     def _update_target(self, selected, now_ms):
@@ -828,7 +1067,8 @@ class RocketTracker:
 
     def _send_target(self, now_ms):
         self.sequence = (self.sequence + 1) & 0xFFFF
-        if not self.enabled or self.enrolling or not self.filter.valid:
+        if (not self.enabled or self.enrolling or self.awaiting_selection or
+                self.refining or not self.filter.valid):
             payload = "T,{0},{1},500,500,0,0,0,0,0,{2}".format(
                 self.sequence, now_ms, self.state
             )
@@ -860,6 +1100,28 @@ class RocketTracker:
             self.last_yolo_frame = self.frame_index
             tracks = self._detections_to_tracks(objects)
             self._update_enrollment(tracks, frame, now_ms)
+            return
+
+        if self.awaiting_selection:
+            objects = self.detector.detect(
+                frame,
+                conf_th=DETECT_CONFIDENCE,
+                iou_th=DETECT_IOU,
+            )
+            self.last_yolo_frame = self.frame_index
+            tracks = self._detections_to_tracks(objects)
+            self._update_selection_candidates(tracks, now_ms)
+            return
+
+        if self.refining:
+            objects = self.detector.detect(
+                frame,
+                conf_th=DETECT_CONFIDENCE,
+                iou_th=DETECT_IOU,
+            )
+            self.last_yolo_frame = self.frame_index
+            tracks = self._detections_to_tracks(objects)
+            self._update_refinement(tracks, frame, now_ms)
             return
 
         nano_result = self._track_with_nano(frame, now_ms)
@@ -913,6 +1175,16 @@ class RocketTracker:
         width, height = frame.width(), frame.height()
         color = image.COLOR_GREEN if self.state == STATE_LOCKED else image.COLOR_YELLOW
         frame.draw_cross(width // 2, height // 2, color=image.COLOR_WHITE, size=8, thickness=1)
+        if self.awaiting_selection:
+            for slot in self.selection_order:
+                candidate = self.selection_candidates.get(slot)
+                if candidate is None:
+                    continue
+                x, y, w, h = candidate["box"]
+                frame.draw_rect(int(x), int(y), int(w), int(h),
+                                color=image.COLOR_CYAN, thickness=2)
+                frame.draw_string(int(x), max(2, int(y) - 14), str(slot),
+                                  color=image.COLOR_CYAN, scale=1.0)
         if self.filter.valid:
             x = int(self.filter.cx - self.filter.w * 0.5)
             y = int(self.filter.cy - self.filter.h * 0.5)
@@ -920,7 +1192,9 @@ class RocketTracker:
             frame.draw_cross(int(self.filter.cx), int(self.filter.cy), color=color, size=5, thickness=2)
         label = "SE {0} {1}/{2} {3}% {4:.1f}fps".format(
             self.locked_label,
-            ("3S" if self.enrolling else "LOCK" if self.state == STATE_LOCKED else "FIND"),
+            ("3S" if self.enrolling else "CHOOSE" if self.awaiting_selection
+             else "REFINE" if self.refining
+             else "LOCK" if self.state == STATE_LOCKED else "FIND"),
             self.tracking_source,
             int(self.last_confidence * 100),
             self.fps,

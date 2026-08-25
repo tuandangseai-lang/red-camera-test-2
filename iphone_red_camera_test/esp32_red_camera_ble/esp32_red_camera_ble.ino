@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v2.8 - geared pan/tilt rig
+// SE Rocket Tracker v2.9 - user-selected MaixCAM candidates + geared rig
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -288,6 +288,7 @@ void armSession() {
   chargeResumePending = false;
   sendMaixCommand("MODE", selectedTrackingMode.c_str());
   sendMaixCommand("ARM");
+  notifyPhone("CANDIDATES,CLEAR");
   notifyPhone(String("ENROLL,0,") + selectedTrackingMode + ",START");
   notifyPhone("STATE,ACQUIRE,0");
   Serial.println("[SESSION] ARMED - MaixCAM is vision authority");
@@ -310,6 +311,7 @@ void selectTrackingMode(String mode) {
   cancelCenterCalibration();
   resetTrackingFilter();
   sendMaixCommand("MODE", selectedTrackingMode.c_str());
+  notifyPhone("CANDIDATES,CLEAR");
   notifyPhone(String("MODE,") + selectedTrackingMode);
   notifyPhone(sessionArmed ? "STATE,ACQUIRE,0" : "STATE,IDLE,0");
   Serial.printf("[MODE] %s\n", selectedTrackingMode.c_str());
@@ -323,6 +325,7 @@ void stopSession() {
   cancelCenterCalibration();
   resetTrackingFilter();
   sendMaixCommand("DISARM");
+  notifyPhone("CANDIDATES,CLEAR");
   chargeResumePending = true;
   chargeResumeAtMs = millis() + Config::CHARGE_RESUME_DELAY_MS;
   notifyPhone("STATE,IDLE,0");
@@ -338,6 +341,7 @@ void requestHome() {
   resetTrackingFilter();
   homeRequested = true;
   sendMaixCommand("HOME");
+  notifyPhone("CANDIDATES,CLEAR");
   notifyPhone("STATE,HOME,0");
   Serial.println("[SERVO] Smooth HOME requested");
 }
@@ -428,6 +432,12 @@ void processMaixLine(char *line) {
       beginCenterCalibration();
     }
     Serial.printf("[MAIX ENROLL] %s\n", enrollment.c_str());
+  } else if (strncmp(bodyText, "D,", 2) == 0) {
+    // Candidate packet: slot, track id, class id, confidence and normalised
+    // box.  ESP32 forwards it untouched; the iPhone is the only selector.
+    const String candidate = String(bodyText + 2);
+    notifyPhone(String("CANDIDATE,") + candidate);
+    Serial.printf("[MAIX CANDIDATE] %s\n", candidate.c_str());
   }
 }
 
@@ -926,6 +936,15 @@ void handlePhoneCommand(String command) {
   command.toUpperCase();
   if (command.startsWith("MODE,")) {
     selectTrackingMode(command.substring(5));
+  } else if (command.startsWith("SELECT,")) {
+    const String slotText = command.substring(7);
+    const int slot = slotText.toInt();
+    if (slot > 0 && slot <= 9 && sessionArmed && enrollmentActive) {
+      sendMaixCommand("SELECT", String(slot).c_str());
+      notifyPhone(String("SELECTION,") + slot + ",REFINE");
+      panRate = tiltRate = 0.0f;
+      panMoving = tiltMoving = false;
+    }
   } else if (command == "ARM" || command == "TRACKING_STARTED" ||
       command == "RECORDING_STARTED") {
     armSession();
@@ -938,7 +957,7 @@ void handlePhoneCommand(String command) {
              command == "ALIGN_CENTER") {
     beginCenterCalibration();
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,2.8.0");
+    notifyPhone("ESP32,SE_GIMBAL,2.9.0");
     notifyPhone("RIG,GEARED,3.20,1.60,90,30,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
