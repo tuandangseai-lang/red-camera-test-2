@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.0 - identity lock + jerk-limited geared gimbal
+// SE Rocket Tracker v3.1 - 5 mm aim point + head/shape tracking
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -51,16 +51,16 @@ constexpr uint32_t COAST_LIMIT_MS = 420;
 constexpr uint32_t SEARCH_LIMIT_MS = 850;
 constexpr uint32_t TELEMETRY_PERIOD_MS = 150;
 
-constexpr float START_DEADBAND = 3.2f;  // 0.32% of the Maix image
-constexpr float STOP_DEADBAND = 1.6f;
+constexpr float START_DEADBAND = 2.6f;  // 0.26% of the Maix image
+constexpr float STOP_DEADBAND = 1.3f;
 constexpr float MAX_PAN_SPEED_DPS = 255.0f;
-constexpr float MAX_TILT_SPEED_DPS = 235.0f;
+constexpr float MAX_TILT_SPEED_DPS = 300.0f;
 constexpr float MAX_PAN_ACCEL_DPS2 = 2250.0f;
-constexpr float MAX_TILT_ACCEL_DPS2 = 2050.0f;
+constexpr float MAX_TILT_ACCEL_DPS2 = 2450.0f;
 constexpr float ROCKET_BOOST_PAN_SPEED_DPS = 320.0f;
-constexpr float ROCKET_BOOST_TILT_SPEED_DPS = 290.0f;
+constexpr float ROCKET_BOOST_TILT_SPEED_DPS = 360.0f;
 constexpr float ROCKET_BOOST_PAN_ACCEL_DPS2 = 3400.0f;
-constexpr float ROCKET_BOOST_TILT_ACCEL_DPS2 = 3050.0f;
+constexpr float ROCKET_BOOST_TILT_ACCEL_DPS2 = 3450.0f;
 constexpr float MAX_DECEL_DPS2 = 2800.0f;
 constexpr float MAX_PAN_JERK_DPS3 = 16500.0f;
 constexpr float MAX_TILT_JERK_DPS3 = 14500.0f;
@@ -541,7 +541,7 @@ float adaptiveGainFromSize(const TargetPacket &target) {
   // it more authority; large nearby targets get softer correction. This is a
   // smooth gain schedule, not a mode switch, so zoom/scale changes cannot kick
   // the mount.
-  return clampFloat(1.40f - largest / 1500.0f, 0.88f, 1.38f);
+  return clampFloat(1.40f - largest / 1500.0f, 1.03f, 1.38f);
 }
 
 float axisDesiredRate(float error, float velocity, float direction,
@@ -779,8 +779,8 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
     const float desiredTilt = axisDesiredRate(
         predictedY - targetCenterY, filteredVY, Config::TILT_DIRECTION,
         Config::TILT_GEAR_RATIO, tiltMax,
-        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.455f : 0.355f,
-        rocketBoost ? 0.082f : 0.056f, rocketBoost ? 12.0f : 6.0f,
+        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.500f : 0.425f,
+        rocketBoost ? 0.092f : 0.066f, rocketBoost ? 14.0f : 7.0f,
         tiltMoving);
     const float panAccel = rocketBoost ? Config::ROCKET_BOOST_PAN_ACCEL_DPS2
                                        : Config::MAX_PAN_ACCEL_DPS2;
@@ -1036,7 +1036,7 @@ void handlePhoneCommand(String command) {
              command == "ALIGN_CENTER") {
     beginCenterCalibration();
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,3.0.0");
+    notifyPhone("ESP32,SE_GIMBAL,3.1.0");
     notifyPhone("RIG,GEARED,3.20,1.60,90,30,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +

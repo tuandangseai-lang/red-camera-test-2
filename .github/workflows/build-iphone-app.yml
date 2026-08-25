@@ -1,4 +1,4 @@
-name: Tao IPA SE v6.6 build59 - cham chon muc tieu MaixCAM
+name: Tao IPA SE v6.7 build60 - tam ngam 5mm va chon muc tieu
 
 on:
   workflow_dispatch:

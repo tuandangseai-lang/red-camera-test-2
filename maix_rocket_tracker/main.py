@@ -12,7 +12,7 @@ import os
 import gc
 
 
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.10.0"
 MOUNT_PROFILE = "MAIX_TILT_TOP"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
@@ -54,6 +54,7 @@ NANO_MAX_CENTRE_JUMP_RATIO = 0.34
 NANO_MIN_BOX_SIDE = 4
 APPEARANCE_TEMPLATE_LIMIT = 4
 APPEARANCE_DIVERSITY_MIN = 0.055
+AIM_BOX_PERMILLE = 55
 
 STATE_IDLE = 0
 STATE_ACQUIRE = 1
@@ -274,6 +275,7 @@ class RocketTracker:
         self.refine_signature_sum = None
         self.refine_signature_count = 0
         self.refine_signatures = []
+        self.refine_manual = False
         self.selected_candidate_slot = -1
         self.nano_active = False
         self.nano_last_score = 0.0
@@ -424,6 +426,7 @@ class RocketTracker:
         self.refine_signature_sum = None
         self.refine_signature_count = 0
         self.refine_signatures = []
+        self.refine_manual = False
         self.selected_candidate_slot = -1
 
     def _begin_enrollment(self):
@@ -444,6 +447,7 @@ class RocketTracker:
         self.candidate_last_report_ms = 0
         self.candidate_report_index = 0
         self.refining = False
+        self.refine_manual = False
         self.selected_candidate_slot = -1
         self.state = STATE_ACQUIRE
         self._write("E,0,{0},START".format(self.active_mode))
@@ -459,6 +463,7 @@ class RocketTracker:
         self.selection_order = []
         self.candidate_report_index = 0
         self.refining = False
+        self.refine_manual = False
         self.selected_candidate_slot = -1
 
     def _appearance_signature(self, frame, box):
@@ -549,6 +554,28 @@ class RocketTracker:
         return sum(abs(first[index] - second[index])
                    for index in range(len(first))) / max(1.0, len(first))
 
+    def _aim_point(self, box):
+        """Return the control point, independent of the detector box size.
+
+        Person mode aims near the eyes/head, animal mode near the head/upper
+        body, while rockets and generic objects use the centre of their learned
+        shape.  The detector still keeps the full box for identity and scale.
+        """
+        x, y, w, h = box
+        vertical = 0.5
+        if self.active_mode == "PERSON":
+            vertical = 0.20
+        elif self.active_mode == "ANIMAL":
+            vertical = 0.31
+        return x + w * 0.5, y + h * vertical
+
+    def _update_motion_filter(self, box, now_ms, confidence):
+        aim_x, aim_y = self._aim_point(box)
+        _, _, width, height = box
+        control_box = (aim_x - width * 0.5, aim_y - height * 0.5,
+                       width, height)
+        self.filter.update(control_box, now_ms, confidence)
+
     def _normalise_box(self, box):
         """Clamp one tracker box to the sensor and reject obvious drift."""
         if box is None or len(box) < 4:
@@ -624,8 +651,7 @@ class RocketTracker:
         if self.filter.valid:
             predicted = self.filter.predict(now_ms)
             if predicted is not None:
-                cx = box[0] + box[2] * 0.5
-                cy = box[1] + box[3] * 0.5
+                cx, cy = self._aim_point(box)
                 distance = math.sqrt((cx - predicted[0]) ** 2 +
                                      (cy - predicted[1]) ** 2)
                 diagonal = math.sqrt(self.camera.width() ** 2 +
@@ -658,7 +684,7 @@ class RocketTracker:
         box, score = nano_result
         confidence = clamp(score * 0.86 + self.last_confidence * 0.14,
                            0.0, 1.0)
-        self.filter.update(box, now_ms, confidence)
+        self._update_motion_filter(box, now_ms, confidence)
         self.last_box = box
         self.last_confidence = confidence
         self.missing_frames = 0
@@ -669,7 +695,10 @@ class RocketTracker:
         # reflection or nearby object.  It may command LOCK only while YOLO has
         # semantically confirmed the same box very recently.
         yolo_recent = self.frame_index - self.last_yolo_lock_frame <= 8
-        self.state = (STATE_LOCKED if yolo_recent and
+        manual_object = (self.active_mode == "OBJECT" and
+                         self.enrollment_class_id < 0 and
+                         bool(self.appearance_templates))
+        self.state = (STATE_LOCKED if (yolo_recent or manual_object) and
                       score >= NANO_STRONG_SCORE else STATE_WEAK)
         return True
 
@@ -693,6 +722,7 @@ class RocketTracker:
         camera_width = max(1.0, float(self.camera.width()))
         camera_height = max(1.0, float(self.camera.height()))
         cx, cy = obj.x + obj.w * 0.5, obj.y + obj.h * 0.5
+        aim_x, aim_y = self._aim_point(box)
 
         # A new session begins with the object deliberately placed near the
         # centre.  Use that fact only while acquiring; once locked, identity,
@@ -747,7 +777,8 @@ class RocketTracker:
         if predicted is not None:
             px, py, _, _ = predicted
             diagonal = math.sqrt(camera_width ** 2 + camera_height ** 2)
-            distance = math.sqrt((cx - px) ** 2 + (cy - py) ** 2) / max(1.0, diagonal)
+            distance = math.sqrt((aim_x - px) ** 2 +
+                                 (aim_y - py) ** 2) / max(1.0, diagonal)
             score += clamp(1.0 - distance * 4.5, 0.0, 1.0) * 0.20
         return score, box
 
@@ -808,6 +839,7 @@ class RocketTracker:
         self.selection_order = []
         self.candidate_report_index = 0
         self.refining = False
+        self.refine_manual = False
         self.selected_candidate_slot = -1
         self.target_id = -1
         self.pending_target_id = -1
@@ -855,8 +887,22 @@ class RocketTracker:
             return
 
         if not self.enroll_votes:
-            self._restart_enrollment(now_ms)
-            return
+            if self.active_mode == "OBJECT" and self.nano_tracker is not None:
+                # COCO cannot name every handmade object. Offer a central
+                # texture region so the user can still select it and let
+                # NanoTrack + the shape descriptor learn that exact object.
+                width = self.camera.width()
+                height = self.camera.height()
+                region_w = max(24, int(width * 0.28))
+                region_h = max(24, int(height * 0.34))
+                region = ((width - region_w) // 2,
+                          (height - region_h) // 2, region_w, region_h)
+                manual_id = -1001
+                self.enroll_votes[manual_id] = self.enroll_total_frames
+                self.enroll_last_seen[manual_id] = (region, 0.50, -1)
+            else:
+                self._restart_enrollment(now_ms)
+                return
 
         ranked = []
         for target_id, votes in self.enroll_votes.items():
@@ -890,6 +936,7 @@ class RocketTracker:
                 "box": box,
                 "confidence": confidence,
                 "class_id": class_id,
+                "manual": target_id < 0,
             }
             self.selection_order.append(slot)
         self._write("E,100,{0},CHOOSE,{1}".format(
@@ -976,6 +1023,7 @@ class RocketTracker:
         self.refine_signature_sum = None
         self.refine_signature_count = 0
         self.refine_signatures = []
+        self.refine_manual = bool(candidate.get("manual", False))
         self.target_id = candidate["track_id"]
         self.enrollment_class_id = candidate["class_id"]
         self.locked_label = target_label(self.active_mode, self.enrollment_class_id)
@@ -994,27 +1042,39 @@ class RocketTracker:
 
     def _update_refinement(self, tracks, frame, now_ms):
         self.refine_total_frames += 1
-        selected = None
-        for track_item in tracks:
-            if track_item.lost or not track_item.history:
-                continue
-            obj = track_item.history[-1]
-            if obj.class_id != self.enrollment_class_id:
-                continue
-            box = (obj.x, obj.y, obj.w, obj.h)
-            if track_item.id == self.target_id:
-                selected = track_item
-                break
-            if self.last_box is not None and self._boxes_compatible(box, self.last_box):
-                selected = track_item
-        if selected is not None:
-            obj = selected.history[-1]
-            box = (obj.x, obj.y, obj.w, obj.h)
-            confidence = clamp(selected.score, 0.0, 1.0)
-            self.target_id = selected.id
+        captured = None
+        if self.refine_manual:
+            if not self.nano_active and self.last_box is not None:
+                self._start_nano_tracker(frame, self.last_box)
+            nano_result = self._track_with_nano(frame, now_ms)
+            if nano_result is not None:
+                captured = nano_result
+        else:
+            selected = None
+            for track_item in tracks:
+                if track_item.lost or not track_item.history:
+                    continue
+                obj = track_item.history[-1]
+                if obj.class_id != self.enrollment_class_id:
+                    continue
+                box = (obj.x, obj.y, obj.w, obj.h)
+                if track_item.id == self.target_id:
+                    selected = track_item
+                    break
+                if (self.last_box is not None and
+                        self._boxes_compatible(box, self.last_box)):
+                    selected = track_item
+            if selected is not None:
+                obj = selected.history[-1]
+                self.target_id = selected.id
+                captured = ((obj.x, obj.y, obj.w, obj.h),
+                            clamp(selected.score, 0.0, 1.0))
+
+        if captured is not None:
+            box, confidence = captured
             self.last_box = box
             self.last_confidence = confidence
-            self.filter.update(box, now_ms, confidence)
+            self._update_motion_filter(box, now_ms, confidence)
             self.refine_visible_frames += 1
             signature = self._appearance_signature(frame, box)
             if signature is not None:
@@ -1106,7 +1166,7 @@ class RocketTracker:
                 self.pending_target_id = track_item.id
                 self.pending_target_frames = 1
                 self.filter.reset()
-            self.filter.update(box, now_ms, confidence)
+            self._update_motion_filter(box, now_ms, confidence)
             self.last_box = box
             self.last_confidence = confidence
             self.missing_frames = 0
@@ -1142,7 +1202,7 @@ class RocketTracker:
             self.filter.reset()
 
         self.confirm_count = LOCK_CONFIRM_FRAMES
-        self.filter.update(box, now_ms, confidence)
+        self._update_motion_filter(box, now_ms, confidence)
         self.last_box = box
         self.last_confidence = confidence
         self.missing_frames = 0
@@ -1165,8 +1225,10 @@ class RocketTracker:
         height = max(1, self.camera.height())
         cx = int(clamp(self.filter.cx / width * 1000.0, 0, 1000))
         cy = int(clamp(self.filter.cy / height * 1000.0, 0, 1000))
-        bw = int(clamp(self.filter.w / width * 1000.0, 0, 1000))
-        bh = int(clamp(self.filter.h / height * 1000.0, 0, 1000))
+        # Servo control and iPhone overlay use a small fixed aim reticle.  Full
+        # detector dimensions stay local for identity/shape matching only.
+        bw = AIM_BOX_PERMILLE
+        bh = AIM_BOX_PERMILLE
         conf = int(clamp(self.last_confidence * 100.0, 0, 100))
         vx = int(clamp(self.filter.vx / width * 1000.0, -2500, 2500))
         vy = int(clamp(self.filter.vy / height * 1000.0, -2500, 2500))
@@ -1272,9 +1334,10 @@ class RocketTracker:
                 frame.draw_string(int(x), max(2, int(y) - 14), str(slot),
                                   color=image.COLOR_CYAN, scale=1.0)
         if self.filter.valid:
-            x = int(self.filter.cx - self.filter.w * 0.5)
-            y = int(self.filter.cy - self.filter.h * 0.5)
-            frame.draw_rect(x, y, int(self.filter.w), int(self.filter.h), color=color, thickness=2)
+            aim_side = max(8, int(min(width, height) * 0.05))
+            x = int(self.filter.cx - aim_side * 0.5)
+            y = int(self.filter.cy - aim_side * 0.5)
+            frame.draw_rect(x, y, aim_side, aim_side, color=color, thickness=2)
             frame.draw_cross(int(self.filter.cx), int(self.filter.cy), color=color, size=5, thickness=2)
         label = "SE {0} {1}/{2} {3}% {4:.1f}fps".format(
             self.locked_label,

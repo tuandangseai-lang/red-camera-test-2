@@ -330,8 +330,10 @@ struct ContentView: View {
         )
         let locked = bluetooth.trackingState == .lock
         let searching = bluetooth.trackingState == .search
-        let boxWidth = max(48, size.width * bluetooth.targetWidth)
-        let boxHeight = max(48, size.height * bluetooth.targetHeight)
+        // iPhone 15 renders roughly 6 logical points per millimetre.  A fixed
+        // 30 pt reticle is therefore about 5 mm and shows the actual aim point;
+        // the larger detector box remains internal to MaixCAM.
+        let aimBoxSide: CGFloat = 30
 
         ZStack {
             Path { path in
@@ -346,7 +348,7 @@ struct ContentView: View {
             if locked || searching {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .stroke(stateColor, style: StrokeStyle(lineWidth: 2.5, dash: searching ? [7, 5] : []))
-                    .frame(width: boxWidth, height: boxHeight)
+                    .frame(width: aimBoxSide, height: aimBoxSide)
                     .position(point)
                     .shadow(color: stateColor.opacity(0.48), radius: 6)
                     .animation(.linear(duration: 0.08), value: bluetooth.targetX)
@@ -360,7 +362,7 @@ struct ContentView: View {
                     .background(stateColor.opacity(0.86), in: Capsule())
                     .position(
                         x: min(size.width - 78, max(78, point.x)),
-                        y: max(32, point.y - boxHeight / 2 - 18)
+                        y: max(32, point.y - aimBoxSide / 2 - 18)
                     )
             }
         }
@@ -374,10 +376,10 @@ struct ContentView: View {
                     x: min(size.width - 30, max(30, size.width * candidate.x)),
                     y: min(size.height - 40, max(40, size.height * candidate.y))
                 )
-                let visibleWidth = max(38, size.width * candidate.width)
-                let visibleHeight = max(38, size.height * candidate.height)
-                let tapWidth = max(62, visibleWidth)
-                let tapHeight = max(62, visibleHeight)
+                let visibleWidth: CGFloat = 30
+                let visibleHeight: CGFloat = 30
+                let tapWidth: CGFloat = 58
+                let tapHeight: CGFloat = 58
 
                 Button {
                     bluetooth.selectCandidate(candidate)
@@ -409,14 +411,50 @@ struct ContentView: View {
 
             VStack {
                 Spacer()
-                Label("Chạm vào đúng khung cần theo dõi", systemImage: "hand.tap.fill")
-                    .font(.custom("Arial", size: 13).weight(.bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(.black.opacity(0.72), in: Capsule())
-                    .padding(.bottom, 142)
-                    .allowsHitTesting(false)
+                VStack(spacing: 9) {
+                    Label("Chọn đúng mục tiêu MaixCAM nhìn thấy", systemImage: "hand.tap.fill")
+                        .font(.custom("Arial", size: 13).weight(.bold))
+                        .foregroundStyle(.white)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 9) {
+                            ForEach(bluetooth.candidates) { candidate in
+                                Button {
+                                    bluetooth.selectCandidate(candidate)
+                                } label: {
+                                    HStack(spacing: 7) {
+                                        Text("\(candidate.id)")
+                                            .font(.custom("Arial", size: 13).weight(.black))
+                                            .frame(width: 25, height: 25)
+                                            .background(.cyan, in: RoundedRectangle(cornerRadius: 7))
+                                            .foregroundStyle(.black)
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(candidate.label)
+                                                .font(.custom("Arial", size: 12).weight(.bold))
+                                            Text("Độ tin cậy \(candidate.confidence)%")
+                                                .font(.custom("Arial", size: 10))
+                                                .foregroundStyle(.white.opacity(0.68))
+                                        }
+                                    }
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 8)
+                                    .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 13))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 13)
+                                            .stroke(.cyan.opacity(0.72), lineWidth: 1)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                    }
+                }
+                .padding(.vertical, 10)
+                .background(.black.opacity(0.70), in: RoundedRectangle(cornerRadius: 18))
+                .padding(.horizontal, 12)
+                .padding(.bottom, 150)
             }
         }
         .transition(.opacity)
