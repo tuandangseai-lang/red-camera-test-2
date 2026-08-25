@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v2.9 - user-selected MaixCAM candidates + geared rig
+// SE Rocket Tracker v3.0 - identity lock + jerk-limited geared gimbal
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -62,6 +62,10 @@ constexpr float ROCKET_BOOST_TILT_SPEED_DPS = 290.0f;
 constexpr float ROCKET_BOOST_PAN_ACCEL_DPS2 = 3400.0f;
 constexpr float ROCKET_BOOST_TILT_ACCEL_DPS2 = 3050.0f;
 constexpr float MAX_DECEL_DPS2 = 2800.0f;
+constexpr float MAX_PAN_JERK_DPS3 = 16500.0f;
+constexpr float MAX_TILT_JERK_DPS3 = 14500.0f;
+constexpr float ROCKET_BOOST_PAN_JERK_DPS3 = 23500.0f;
+constexpr float ROCKET_BOOST_TILT_JERK_DPS3 = 20500.0f;
 constexpr float HOME_SPEED_DPS = 65.0f;
 constexpr float SEARCH_SPEED_LIMIT_DPS = 92.0f;
 
@@ -132,6 +136,8 @@ float panAngle = Config::PAN_HOME_DEG;
 float tiltAngle = Config::TILT_HOME_DEG;
 float panRate = 0.0f;
 float tiltRate = 0.0f;
+float panAcceleration = 0.0f;
+float tiltAcceleration = 0.0f;
 float filteredX = 500.0f;
 float filteredY = 500.0f;
 float filteredVX = 0.0f;
@@ -177,6 +183,38 @@ float moveToward(float value, float target, float maxDelta) {
   if (value < target) return min(value + maxDelta, target);
   if (value > target) return max(value - maxDelta, target);
   return value;
+}
+
+float updateJerkLimitedRate(float rate, float desiredRate, float &acceleration,
+                            float maximumAcceleration, float maximumDeceleration,
+                            float maximumJerk, float dt) {
+  // A position command that changes abruptly makes an MG995/996 kick its gear
+  // train.  Shape the *velocity* command instead: bounded acceleration and
+  // bounded change of acceleration (jerk), like a small camera gimbal.
+  const bool reversing = rate * desiredRate < 0.0f;
+  const bool slowing = reversing || fabsf(desiredRate) < fabsf(rate);
+  const float accelerationLimit =
+      slowing ? maximumDeceleration : maximumAcceleration;
+  const float responseSeconds = slowing ? 0.060f : 0.085f;
+  const float targetAcceleration = clampFloat(
+      (desiredRate - rate) / responseSeconds, -accelerationLimit,
+      accelerationLimit);
+  acceleration = moveToward(acceleration, targetAcceleration,
+                            maximumJerk * dt);
+
+  const float previousError = desiredRate - rate;
+  rate += acceleration * dt;
+  const float nextError = desiredRate - rate;
+  if (previousError * nextError <= 0.0f) {
+    rate = desiredRate;
+    acceleration *= 0.28f;
+  }
+  if (fabsf(desiredRate) < 0.05f && fabsf(rate) < 0.45f &&
+      fabsf(acceleration) < 18.0f) {
+    rate = 0.0f;
+    acceleration = 0.0f;
+  }
+  return rate;
 }
 
 uint8_t crc8Xor(const char *text, size_t length) {
@@ -243,6 +281,7 @@ void resetTrackingFilter() {
   lastAppliedTargetSequence = 0;
   acceptedVisionLock = false;
   panRate = tiltRate = 0.0f;
+  panAcceleration = tiltAcceleration = 0.0f;
   panMoving = tiltMoving = false;
   searchActive = false;
   lostStartedAtMs = 0;
@@ -271,6 +310,7 @@ void beginCenterCalibration() {
   centerCalibrationSumX = centerCalibrationSumY = 0;
   lastCenterCalibrationSequence = 0;
   panRate = tiltRate = 0.0f;
+  panAcceleration = tiltAcceleration = 0.0f;
   panMoving = tiltMoving = false;
   notifyPhone("CALIBRATE,START,0,AUTO");
   Serial.println("[CALIBRATE] Auto 2 s: hold the locked subject at iPhone center");
@@ -498,8 +538,10 @@ bool lockPacketIsConsistent(const TargetPacket &target) {
 float adaptiveGainFromSize(const TargetPacket &target) {
   const float largest = max(target.width, target.height);
   // A small distant target crosses the frame quickly in angular terms. Give
-  // it more authority; large nearby targets get slightly softer correction.
-  return clampFloat(1.18f - largest / 1900.0f, 0.96f, 1.15f);
+  // it more authority; large nearby targets get softer correction. This is a
+  // smooth gain schedule, not a mode switch, so zoom/scale changes cannot kick
+  // the mount.
+  return clampFloat(1.40f - largest / 1500.0f, 0.88f, 1.38f);
 }
 
 float axisDesiredRate(float error, float velocity, float direction,
@@ -516,7 +558,14 @@ float axisDesiredRate(float error, float velocity, float direction,
   if (!moving) return 0.0f;
 
   const float proportional = error * proportionalGain;
-  const float feedForward = velocity * feedForwardGain;
+  float stableVelocity = fabsf(velocity) < 18.0f ? 0.0f : velocity;
+  float feedForward = stableVelocity * feedForwardGain;
+  // Close to centre, a noisy velocity estimate must not reverse the axis away
+  // from the measured error. Farther out, retain the full predictive lead.
+  if (proportional * feedForward < 0.0f &&
+      absoluteError < startDeadband * 2.6f) {
+    feedForward *= 0.28f;
+  }
   // Convert the requested output/camera rate to motor-shaft rate. The final
   // clamp remains a physical MG996 safety limit.
   float desired = direction * (proportional + feedForward) * sizeGain *
@@ -534,8 +583,12 @@ void runHome(float dt) {
                                       Config::HOME_SPEED_DPS);
   const float desiredTilt = clampFloat(tiltError * 3.0f, -Config::HOME_SPEED_DPS,
                                        Config::HOME_SPEED_DPS);
-  panRate = moveToward(panRate, desiredPan, Config::MAX_DECEL_DPS2 * dt);
-  tiltRate = moveToward(tiltRate, desiredTilt, Config::MAX_DECEL_DPS2 * dt);
+  panRate = updateJerkLimitedRate(
+      panRate, desiredPan, panAcceleration, 900.0f, 1200.0f,
+      Config::MAX_PAN_JERK_DPS3 * 0.45f, dt);
+  tiltRate = updateJerkLimitedRate(
+      tiltRate, desiredTilt, tiltAcceleration, 800.0f, 1100.0f,
+      Config::MAX_TILT_JERK_DPS3 * 0.45f, dt);
   panAngle += panRate * dt;
   tiltAngle += tiltRate * dt;
   if (fabsf(panError) < 0.20f && fabsf(tiltError) < 0.20f &&
@@ -543,14 +596,19 @@ void runHome(float dt) {
     panAngle = Config::PAN_HOME_DEG;
     tiltAngle = Config::TILT_HOME_DEG;
     panRate = tiltRate = 0.0f;
+    panAcceleration = tiltAcceleration = 0.0f;
     homeRequested = false;
     notifyPhone("STATE,HOME_DONE,0");
   }
 }
 
 void holdServos(float dt) {
-  panRate = moveToward(panRate, 0.0f, Config::MAX_DECEL_DPS2 * dt);
-  tiltRate = moveToward(tiltRate, 0.0f, Config::MAX_DECEL_DPS2 * dt);
+  panRate = updateJerkLimitedRate(
+      panRate, 0.0f, panAcceleration, Config::MAX_PAN_ACCEL_DPS2,
+      Config::MAX_DECEL_DPS2, Config::MAX_PAN_JERK_DPS3, dt);
+  tiltRate = updateJerkLimitedRate(
+      tiltRate, 0.0f, tiltAcceleration, Config::MAX_TILT_ACCEL_DPS2,
+      Config::MAX_DECEL_DPS2, Config::MAX_TILT_JERK_DPS3, dt);
   panAngle += panRate * dt;
   tiltAngle += tiltRate * dt;
   panMoving = tiltMoving = false;
@@ -649,8 +707,8 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
     if (target.sequence != lastAppliedTargetSequence) {
       const float rawSpeed = hypotf(target.velocityX, target.velocityY);
       const bool rocketFast = selectedTrackingMode == "ROCKET" && rawSpeed > 90.0f;
-      const float alpha = filterReady ? (rocketFast ? 0.86f : 0.70f) : 1.0f;
-      const float velocityAlpha = rocketFast ? 0.74f : 0.54f;
+      const float alpha = filterReady ? (rocketFast ? 0.74f : 0.46f) : 1.0f;
+      const float velocityAlpha = rocketFast ? 0.62f : 0.34f;
       if (lastDynamicsAtMs != 0 && target.receivedAtMs > lastDynamicsAtMs) {
         const float visionDt = clampFloat(
             (target.receivedAtMs - lastDynamicsAtMs) / 1000.0f, 0.015f,
@@ -661,7 +719,7 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
         const float rawAY = clampFloat(
             (target.velocityY - previousVisionVY) / visionDt, -5000.0f,
             5000.0f);
-        const float accelerationAlpha = rocketFast ? 0.36f : 0.22f;
+        const float accelerationAlpha = rocketFast ? 0.28f : 0.15f;
         filteredAX += accelerationAlpha * (rawAX - filteredAX);
         filteredAY += accelerationAlpha * (rawAY - filteredAY);
       }
@@ -716,13 +774,13 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
         predictedX - targetCenterX, filteredVX, Config::PAN_DIRECTION,
         Config::PAN_GEAR_RATIO, panMax,
         sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.440f : 0.340f,
-        rocketBoost ? 0.082f : 0.058f, rocketBoost ? 18.0f : 9.0f,
+        rocketBoost ? 0.078f : 0.052f, rocketBoost ? 12.0f : 6.0f,
         panMoving);
     const float desiredTilt = axisDesiredRate(
         predictedY - targetCenterY, filteredVY, Config::TILT_DIRECTION,
         Config::TILT_GEAR_RATIO, tiltMax,
         sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.455f : 0.355f,
-        rocketBoost ? 0.086f : 0.062f, rocketBoost ? 18.0f : 9.0f,
+        rocketBoost ? 0.082f : 0.056f, rocketBoost ? 12.0f : 6.0f,
         tiltMoving);
     const float panAccel = rocketBoost ? Config::ROCKET_BOOST_PAN_ACCEL_DPS2
                                        : Config::MAX_PAN_ACCEL_DPS2;
@@ -734,8 +792,18 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
     const float tiltLimit = fabsf(desiredTilt) < fabsf(tiltRate)
                                  ? Config::MAX_DECEL_DPS2
                                  : tiltAccel;
-    panRate = moveToward(panRate, desiredPan, panLimit * dt);
-    tiltRate = moveToward(tiltRate, desiredTilt, tiltLimit * dt);
+    panRate = updateJerkLimitedRate(
+        panRate, desiredPan, panAcceleration, panLimit,
+        Config::MAX_DECEL_DPS2,
+        rocketBoost ? Config::ROCKET_BOOST_PAN_JERK_DPS3
+                    : Config::MAX_PAN_JERK_DPS3,
+        dt);
+    tiltRate = updateJerkLimitedRate(
+        tiltRate, desiredTilt, tiltAcceleration, tiltLimit,
+        Config::MAX_DECEL_DPS2,
+        rocketBoost ? Config::ROCKET_BOOST_TILT_JERK_DPS3
+                    : Config::MAX_TILT_JERK_DPS3,
+        dt);
   } else if (targetLooksLocked) {
     // First confirming frame: hold position instead of starting a search.  A
     // second independent frame will promote it to a real lock.
@@ -773,12 +841,22 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
             ((predictedY - targetCenterY) * (rocketSearch ? 0.220f : 0.105f) +
              filteredVY * (rocketSearch ? 0.038f : 0.016f)),
         -tiltSearchSpeed, tiltSearchSpeed);
-    panRate = moveToward(panRate, desiredPan,
-                         (rocketSearch ? Config::ROCKET_BOOST_PAN_ACCEL_DPS2 * 0.65f
-                                       : Config::MAX_PAN_ACCEL_DPS2 * 0.55f) * dt);
-    tiltRate = moveToward(tiltRate, desiredTilt,
-                          (rocketSearch ? Config::ROCKET_BOOST_TILT_ACCEL_DPS2 * 0.65f
-                                        : Config::MAX_TILT_ACCEL_DPS2 * 0.55f) * dt);
+    panRate = updateJerkLimitedRate(
+        panRate, desiredPan, panAcceleration,
+        rocketSearch ? Config::ROCKET_BOOST_PAN_ACCEL_DPS2 * 0.65f
+                     : Config::MAX_PAN_ACCEL_DPS2 * 0.55f,
+        Config::MAX_DECEL_DPS2,
+        rocketSearch ? Config::ROCKET_BOOST_PAN_JERK_DPS3
+                     : Config::MAX_PAN_JERK_DPS3,
+        dt);
+    tiltRate = updateJerkLimitedRate(
+        tiltRate, desiredTilt, tiltAcceleration,
+        rocketSearch ? Config::ROCKET_BOOST_TILT_ACCEL_DPS2 * 0.65f
+                     : Config::MAX_TILT_ACCEL_DPS2 * 0.55f,
+        Config::MAX_DECEL_DPS2,
+        rocketSearch ? Config::ROCKET_BOOST_TILT_JERK_DPS3
+                     : Config::MAX_TILT_JERK_DPS3,
+        dt);
   } else {
     if (lostStartedAtMs == 0) lostStartedAtMs = nowMs;
     if (nowMs - lostStartedAtMs > Config::SEARCH_LIMIT_MS) {
@@ -794,18 +872,19 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
       const float tiltSearchSpeed = min(
           Config::SEARCH_SPEED_LIMIT_DPS * Config::TILT_GEAR_RATIO,
           Config::MAX_TILT_SPEED_DPS);
-      panRate = moveToward(
-          panRate,
-          clampFloat(Config::PAN_DIRECTION * Config::PAN_GEAR_RATIO *
-                          filteredVX * 0.018f,
-                     -panSearchSpeed, panSearchSpeed),
-          Config::MAX_PAN_ACCEL_DPS2 * 0.4f * dt);
-      tiltRate = moveToward(
-          tiltRate,
-          clampFloat(Config::TILT_DIRECTION * Config::TILT_GEAR_RATIO *
-                          filteredVY * 0.016f,
-                     -tiltSearchSpeed, tiltSearchSpeed),
-          Config::MAX_TILT_ACCEL_DPS2 * 0.4f * dt);
+      const float coastPan = clampFloat(
+          Config::PAN_DIRECTION * Config::PAN_GEAR_RATIO * filteredVX * 0.018f,
+          -panSearchSpeed, panSearchSpeed);
+      const float coastTilt = clampFloat(
+          Config::TILT_DIRECTION * Config::TILT_GEAR_RATIO * filteredVY * 0.016f,
+          -tiltSearchSpeed, tiltSearchSpeed);
+      panRate = updateJerkLimitedRate(
+          panRate, coastPan, panAcceleration, Config::MAX_PAN_ACCEL_DPS2 * 0.4f,
+          Config::MAX_DECEL_DPS2, Config::MAX_PAN_JERK_DPS3, dt);
+      tiltRate = updateJerkLimitedRate(
+          tiltRate, coastTilt, tiltAcceleration,
+          Config::MAX_TILT_ACCEL_DPS2 * 0.4f, Config::MAX_DECEL_DPS2,
+          Config::MAX_TILT_JERK_DPS3, dt);
     } else {
       holdServos(dt);
       return;
@@ -957,7 +1036,7 @@ void handlePhoneCommand(String command) {
              command == "ALIGN_CENTER") {
     beginCenterCalibration();
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,2.9.0");
+    notifyPhone("ESP32,SE_GIMBAL,3.0.0");
     notifyPhone("RIG,GEARED,3.20,1.60,90,30,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +

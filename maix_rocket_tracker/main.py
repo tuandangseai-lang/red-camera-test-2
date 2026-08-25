@@ -12,7 +12,7 @@ import os
 import gc
 
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.9.0"
 MOUNT_PROFILE = "MAIX_TILT_TOP"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
@@ -52,6 +52,8 @@ YOLO_ROCKET_INTERVAL = 2
 YOLO_GENERAL_INTERVAL = 4
 NANO_MAX_CENTRE_JUMP_RATIO = 0.34
 NANO_MIN_BOX_SIDE = 4
+APPEARANCE_TEMPLATE_LIMIT = 4
+APPEARANCE_DIVERSITY_MIN = 0.055
 
 STATE_IDLE = 0
 STATE_ACQUIRE = 1
@@ -139,18 +141,22 @@ class AlphaBetaBox:
         self.valid = False
         self.cx = self.cy = self.w = self.h = 0.0
         self.vx = self.vy = 0.0
+        self.ax = self.ay = 0.0
         self.last_ms = 0
 
     def reset(self):
         self.valid = False
         self.vx = self.vy = 0.0
+        self.ax = self.ay = 0.0
         self.last_ms = 0
 
     def predict(self, now_ms):
         if not self.valid:
             return None
         dt = clamp(ticks_delta(now_ms, self.last_ms) / 1000.0, 0.0, MAX_PREDICT_SECONDS)
-        return self.cx + self.vx * dt, self.cy + self.vy * dt, self.w, self.h
+        return (self.cx + self.vx * dt + 0.5 * self.ax * dt * dt,
+                self.cy + self.vy * dt + 0.5 * self.ay * dt * dt,
+                self.w, self.h)
 
     def update(self, box, now_ms, confidence):
         x, y, w, h = box
@@ -161,25 +167,37 @@ class AlphaBetaBox:
             self.cx, self.cy = measured_x, measured_y
             self.w, self.h = float(w), float(h)
             self.vx = self.vy = 0.0
+            self.ax = self.ay = 0.0
             self.last_ms = now_ms
             return
 
         dt = clamp(ticks_delta(now_ms, self.last_ms) / 1000.0, 0.01, 0.20)
-        predicted_x = self.cx + self.vx * dt
-        predicted_y = self.cy + self.vy * dt
+        predicted_x = self.cx + self.vx * dt + 0.5 * self.ax * dt * dt
+        predicted_y = self.cy + self.vy * dt + 0.5 * self.ay * dt * dt
         residual_x = measured_x - predicted_x
         residual_y = measured_y - predicted_y
         alpha = clamp(0.36 + confidence * 0.34, 0.40, 0.74)
         beta = clamp(0.05 + confidence * 0.08, 0.06, 0.14)
+        gamma = clamp(0.010 + confidence * 0.022, 0.012, 0.032)
         self.cx = predicted_x + alpha * residual_x
         self.cy = predicted_y + alpha * residual_y
         # Damp residual velocity before adding the new measurement.  Without
         # this, one noisy box can leave a non-zero feed-forward command for
         # several frames and make an MG995 twitch around a stationary target.
-        self.vx = clamp(self.vx * 0.88 + beta * residual_x / dt,
+        self.vx = clamp(self.vx * 0.88 + self.ax * dt +
+                        beta * residual_x / dt,
                         -1500.0, 1500.0)
-        self.vy = clamp(self.vy * 0.88 + beta * residual_y / dt,
+        self.vy = clamp(self.vy * 0.88 + self.ay * dt +
+                        beta * residual_y / dt,
                         -1500.0, 1500.0)
+        # A conservative acceleration term anticipates the first high-speed
+        # launch frames.  Strong damping prevents a single bad box from making
+        # the gimbal run away after the subject stops.
+        dt2 = max(0.0004, dt * dt)
+        self.ax = clamp(self.ax * 0.76 + gamma * residual_x / dt2,
+                        -4200.0, 4200.0)
+        self.ay = clamp(self.ay * 0.76 + gamma * residual_y / dt2,
+                        -4200.0, 4200.0)
         size_alpha = 0.24 + confidence * 0.14
         self.w += size_alpha * (w - self.w)
         self.h += size_alpha * (h - self.h)
@@ -192,6 +210,8 @@ class AlphaBetaBox:
         self.cx, self.cy, self.w, self.h = predicted
         self.vx *= 0.90
         self.vy *= 0.90
+        self.ax *= 0.72
+        self.ay *= 0.72
         self.last_ms = now_ms
 
 
@@ -240,6 +260,7 @@ class RocketTracker:
         self.enroll_signature_counts = {}
         self.enrollment_class_id = -1
         self.appearance_template = None
+        self.appearance_templates = []
         self.awaiting_selection = False
         self.selection_candidates = {}
         self.selection_order = []
@@ -252,6 +273,7 @@ class RocketTracker:
         self.refine_visible_frames = 0
         self.refine_signature_sum = None
         self.refine_signature_count = 0
+        self.refine_signatures = []
         self.selected_candidate_slot = -1
         self.nano_active = False
         self.nano_last_score = 0.0
@@ -401,6 +423,7 @@ class RocketTracker:
         self.refine_visible_frames = 0
         self.refine_signature_sum = None
         self.refine_signature_count = 0
+        self.refine_signatures = []
         self.selected_candidate_slot = -1
 
     def _begin_enrollment(self):
@@ -414,6 +437,7 @@ class RocketTracker:
         self.enroll_signature_counts = {}
         self.enrollment_class_id = -1
         self.appearance_template = None
+        self.appearance_templates = []
         self.awaiting_selection = False
         self.selection_candidates = {}
         self.selection_order = []
@@ -438,7 +462,7 @@ class RocketTracker:
         self.selected_candidate_slot = -1
 
     def _appearance_signature(self, frame, box):
-        """Tiny colour/shape descriptor for re-identifying the enrolled subject.
+        """Spatial colour/edge descriptor for re-identifying one selected subject.
 
         YOLO supplies the semantic class and ByteTrack supplies motion identity.
         This descriptor is deliberately small so MaixCAM can compare a specific
@@ -460,28 +484,70 @@ class RocketTracker:
                     return None
                 if not isinstance(pixel, (tuple, list)) or len(pixel) < 3:
                     return None
-                samples.append((float(pixel[0]), float(pixel[1]), float(pixel[2])))
+                red = float(pixel[0])
+                green = float(pixel[1])
+                blue = float(pixel[2])
+                total = max(18.0, red + green + blue)
+                # Chromaticity survives exposure changes better than raw RGB;
+                # luminance and the later gradients retain markings/edges.
+                samples.append((red / total, green / total,
+                                (red * 0.299 + green * 0.587 +
+                                 blue * 0.114) / 255.0))
         if not samples:
             return None
-        count = float(len(samples))
-        means = [sum(pixel[channel] for pixel in samples) / (255.0 * count)
-                 for channel in range(3)]
-        spreads = []
-        for channel in range(3):
-            mean_raw = means[channel] * 255.0
-            variance = sum((pixel[channel] - mean_raw) ** 2 for pixel in samples) / count
-            spreads.append(math.sqrt(variance) / 128.0)
+        spatial = []
+        for sample in samples:
+            spatial.extend(sample)
+        gradients = []
+        for row in range(4):
+            for column in range(3):
+                gradients.append(samples[row * 4 + column + 1][2] -
+                                 samples[row * 4 + column][2])
+        for row in range(3):
+            for column in range(4):
+                gradients.append(samples[(row + 1) * 4 + column][2] -
+                                 samples[row * 4 + column][2])
         aspect = clamp(math.log(max(0.12, w / float(max(1, h)))) / 2.5,
                        -1.0, 1.0)
-        return means + spreads + [aspect]
+        return spatial + gradients + [aspect]
 
     def _appearance_similarity(self, signature):
-        if signature is None or self.appearance_template is None:
+        if signature is None:
             return None
-        colour_error = sum(abs(signature[i] - self.appearance_template[i])
-                           for i in range(6)) / 6.0
-        shape_error = abs(signature[6] - self.appearance_template[6])
-        return clamp(1.0 - colour_error * 1.45 - shape_error * 0.18, 0.0, 1.0)
+        templates = self.appearance_templates
+        if not templates and self.appearance_template is not None:
+            templates = [self.appearance_template]
+        if not templates:
+            return None
+        similarities = []
+        for template in templates:
+            if len(signature) != len(template) or len(signature) < 73:
+                continue
+            # 16 cells x (R chroma, G chroma, luminance), 24 gradients, aspect.
+            spatial_error = sum(abs(signature[i] - template[i])
+                                for i in range(48)) / 48.0
+            gradient_error = sum(abs(signature[i] - template[i])
+                                 for i in range(48, 72)) / 24.0
+            shape_error = abs(signature[72] - template[72])
+            similarities.append(clamp(
+                1.0 - spatial_error * 1.20 - gradient_error * 0.80 -
+                shape_error * 0.20, 0.0, 1.0
+            ))
+        if not similarities:
+            return None
+        # Keep several selected-subject views instead of averaging every view
+        # into one blurry identity. The runner-up adds consensus and prevents a
+        # single accidental hand/reflection template from winning by itself.
+        similarities.sort(reverse=True)
+        if len(similarities) == 1:
+            return similarities[0]
+        return similarities[0] * 0.76 + similarities[1] * 0.24
+
+    def _signature_distance(self, first, second):
+        if first is None or second is None or len(first) != len(second):
+            return 1.0
+        return sum(abs(first[index] - second[index])
+                   for index in range(len(first))) / max(1.0, len(first))
 
     def _normalise_box(self, box):
         """Clamp one tracker box to the sensor and reject obvious drift."""
@@ -651,6 +717,8 @@ class RocketTracker:
                     self._appearance_signature(frame, box)
                 )
                 if appearance is not None:
+                    if appearance < 0.32 and raw_confidence < 0.58:
+                        return 0.0, box
                     return (raw_confidence * 0.58 + appearance * 0.32 +
                             centre_prior * 0.03 + size_prior * 0.07), box
                 return (raw_confidence * 0.82 + centre_prior * 0.08 +
@@ -661,12 +729,14 @@ class RocketTracker:
         score = raw_confidence * 0.34
         if track_item.id == self.target_id:
             score += 0.30
-        elif self.appearance_template is not None:
+        elif self.appearance_template is not None or self.appearance_templates:
             appearance = self._appearance_similarity(
                 self._appearance_signature(frame, box)
             )
             if appearance is not None:
-                score += appearance * 0.24
+                if appearance < 0.30 and raw_confidence < 0.62:
+                    return 0.0, box
+                score += appearance * 0.30
         if self.last_box is not None:
             overlap = iou(box, self.last_box)
             score += overlap * 0.10
@@ -744,6 +814,7 @@ class RocketTracker:
         self.pending_target_frames = 0
         self.enrollment_class_id = -1
         self.appearance_template = None
+        self.appearance_templates = []
         self.last_box = None
         self.last_confidence = 0.0
         self.filter.reset()
@@ -904,6 +975,7 @@ class RocketTracker:
         self.refine_visible_frames = 0
         self.refine_signature_sum = None
         self.refine_signature_count = 0
+        self.refine_signatures = []
         self.target_id = candidate["track_id"]
         self.enrollment_class_id = candidate["class_id"]
         self.locked_label = target_label(self.active_mode, self.enrollment_class_id)
@@ -951,6 +1023,12 @@ class RocketTracker:
                 for index, value in enumerate(signature):
                     self.refine_signature_sum[index] += value
                 self.refine_signature_count += 1
+                if (not self.refine_signatures or
+                        min(self._signature_distance(signature, saved)
+                            for saved in self.refine_signatures) >=
+                        APPEARANCE_DIVERSITY_MIN):
+                    if len(self.refine_signatures) < APPEARANCE_TEMPLATE_LIMIT:
+                        self.refine_signatures.append(list(signature))
 
         elapsed = ticks_delta(now_ms, self.refine_started_ms)
         progress = int(clamp(elapsed * 100.0 / REFINE_DURATION_MS, 0, 100))
@@ -973,6 +1051,14 @@ class RocketTracker:
                 value / self.refine_signature_count
                 for value in self.refine_signature_sum
             ]
+            self.appearance_templates = [self.appearance_template]
+            for signature in self.refine_signatures:
+                if len(self.appearance_templates) >= APPEARANCE_TEMPLATE_LIMIT:
+                    break
+                if (self._signature_distance(
+                        signature, self.appearance_template) >=
+                        APPEARANCE_DIVERSITY_MIN * 0.55):
+                    self.appearance_templates.append(signature)
         self.refining = False
         self.selection_candidates = {}
         self.selection_order = []
