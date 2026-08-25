@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.1.2 - MaixCAM RX moved to GPIO21
+// SE Rocket Tracker v3.2.1 - tap-select + dual-camera alignment + stable predictive gimbal
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -40,7 +40,7 @@ constexpr float TILT_MAX_DEG = 175.0f;
 // defaults. If one physical axis moves away from the target, change only that
 // axis sign; do not swap GPIO 18/19 or the Maix X/Y coordinates.
 constexpr float PAN_DIRECTION = 1.0f;
-constexpr float TILT_DIRECTION = -1.0f;
+constexpr float TILT_DIRECTION = 1.0f;
 constexpr int SERVO_MIN_US = 900;
 constexpr int SERVO_MAX_US = 2100;
 
@@ -51,10 +51,18 @@ constexpr uint32_t CONTROL_PERIOD_US = 20000;  // MG996R: 50 Hz
 constexpr uint32_t TARGET_STALE_MS = 180;
 constexpr uint32_t COAST_LIMIT_MS = 420;
 constexpr uint32_t SEARCH_LIMIT_MS = 850;
-constexpr uint32_t TELEMETRY_PERIOD_MS = 150;
+constexpr uint32_t TELEMETRY_PERIOD_MS = 80;
+constexpr uint32_t BLE_NOTIFY_PERIOD_MS = 18;
+constexpr uint8_t BLE_EVENT_QUEUE_SIZE = 20;
+constexpr size_t BLE_EVENT_MAX_LENGTH = 144;
 
-constexpr float START_DEADBAND = 2.6f;  // 0.26% of the Maix image
-constexpr float STOP_DEADBAND = 1.3f;
+// Maix detector coordinates are 0...1000. On a 320-pixel model one pixel is
+// already 3.1 units, so the previous 2.6-unit deadband reacted to sub-pixel
+// detector noise and continually reversed the geared MG995/996.
+constexpr float START_DEADBAND = 10.0f;
+constexpr float STOP_DEADBAND = 5.0f;
+constexpr float FAST_START_DEADBAND = 4.0f;
+constexpr float FAST_STOP_DEADBAND = 2.0f;
 constexpr float MAX_PAN_SPEED_DPS = 255.0f;
 constexpr float MAX_TILT_SPEED_DPS = 300.0f;
 constexpr float MAX_PAN_ACCEL_DPS2 = 2250.0f;
@@ -71,10 +79,13 @@ constexpr float ROCKET_BOOST_TILT_JERK_DPS3 = 20500.0f;
 constexpr float HOME_SPEED_DPS = 65.0f;
 constexpr float SEARCH_SPEED_LIMIT_DPS = 92.0f;
 
-constexpr uint32_t CENTER_CALIBRATION_MS = 2000;
-constexpr uint32_t CENTER_CALIBRATION_TIMEOUT_MS = 7000;
-constexpr uint8_t CENTER_CALIBRATION_MIN_SAMPLES = 12;
-constexpr int CENTER_CALIBRATION_MAX_DEVIATION = 150;
+constexpr uint32_t CENTER_CALIBRATION_SETTLE_MS = 1800;
+constexpr uint32_t CENTER_CALIBRATION_MS = 2200;
+constexpr uint32_t CENTER_CALIBRATION_TIMEOUT_MS = 10000;
+constexpr uint8_t CENTER_CALIBRATION_MIN_SAMPLES = 14;
+constexpr int CENTER_CALIBRATION_MAX_DEVIATION = 80;
+constexpr int CENTER_CALIBRATION_MIN_CONFIDENCE = 55;
+constexpr float CENTER_CALIBRATION_MAX_SPEED = 80.0f;
 
 constexpr int MIN_LOCK_CONFIDENCE = 38;
 constexpr int MIN_WEAK_CONFIDENCE = 12;
@@ -117,7 +128,12 @@ BLECharacteristic *eventCharacteristic = nullptr;
 HardwareSerial maixSerial(2);
 
 portMUX_TYPE targetMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE phoneEventMux = portMUX_INITIALIZER_UNLOCKED;
 TargetPacket latestTarget;
+char phoneEventQueue[Config::BLE_EVENT_QUEUE_SIZE][Config::BLE_EVENT_MAX_LENGTH];
+uint8_t phoneEventHead = 0;
+uint8_t phoneEventTail = 0;
+uint32_t lastPhoneNotifyAtMs = 0;
 
 volatile bool phoneConnected = false;
 bool sessionArmed = false;
@@ -251,8 +267,37 @@ void writeServos(bool force = false) {
 
 void notifyPhone(const String &message) {
   if (!phoneConnected || eventCharacteristic == nullptr) return;
-  eventCharacteristic->setValue(message.c_str());
+  portENTER_CRITICAL(&phoneEventMux);
+  uint8_t next = (phoneEventHead + 1) % Config::BLE_EVENT_QUEUE_SIZE;
+  if (next == phoneEventTail) {
+    // Drop the oldest UI packet, never block UART parsing or servo timing.
+    phoneEventTail = (phoneEventTail + 1) % Config::BLE_EVENT_QUEUE_SIZE;
+  }
+  strlcpy(phoneEventQueue[phoneEventHead], message.c_str(),
+          Config::BLE_EVENT_MAX_LENGTH);
+  phoneEventHead = next;
+  portEXIT_CRITICAL(&phoneEventMux);
+}
+
+void flushPhoneNotifications() {
+  if (!phoneConnected || eventCharacteristic == nullptr) return;
+  const uint32_t now = millis();
+  if (now - lastPhoneNotifyAtMs < Config::BLE_NOTIFY_PERIOD_MS) return;
+
+  char message[Config::BLE_EVENT_MAX_LENGTH];
+  bool available = false;
+  portENTER_CRITICAL(&phoneEventMux);
+  if (phoneEventTail != phoneEventHead) {
+    strlcpy(message, phoneEventQueue[phoneEventTail], sizeof(message));
+    phoneEventTail = (phoneEventTail + 1) % Config::BLE_EVENT_QUEUE_SIZE;
+    available = true;
+  }
+  portEXIT_CRITICAL(&phoneEventMux);
+  if (!available) return;
+
+  eventCharacteristic->setValue(message);
   eventCharacteristic->notify();
+  lastPhoneNotifyAtMs = now;
 }
 
 void sendMaixCommand(const char *command, const char *argument = "0") {
@@ -319,8 +364,8 @@ void beginCenterCalibration() {
   panRate = tiltRate = 0.0f;
   panAcceleration = tiltAcceleration = 0.0f;
   panMoving = tiltMoving = false;
-  notifyPhone("CALIBRATE,START,0,AUTO");
-  Serial.println("[CALIBRATE] Auto 2 s: hold the locked subject at iPhone center");
+  notifyPhone("CALIBRATE,PREPARE,0,20CM");
+  Serial.println("[CALIBRATE] Put target on iPhone +, >=20 cm away; settling");
 }
 
 void armSession() {
@@ -658,10 +703,26 @@ void holdServos(float dt) {
 void updateCenterCalibration(float dt, const TargetPacket &target,
                              uint32_t nowMs) {
   holdServos(dt);
+  const uint32_t settleElapsed = nowMs - centerCalibrationStartedAtMs;
+  if (settleElapsed < Config::CENTER_CALIBRATION_SETTLE_MS) {
+    if (nowMs - lastCenterCalibrationNotifyAtMs >= 80) {
+      lastCenterCalibrationNotifyAtMs = nowMs;
+      const int prepareProgress = constrain(
+          static_cast<int>(settleElapsed * 100 /
+                           Config::CENTER_CALIBRATION_SETTLE_MS),
+          0, 99);
+      notifyPhone(String("CALIBRATE,PREPARE,") + prepareProgress + ",20CM");
+    }
+    return;
+  }
+
   const bool freshLock = target.valid &&
                          nowMs - target.receivedAtMs <= Config::TARGET_STALE_MS &&
                          target.state == VISION_LOCKED &&
-                         target.confidence >= Config::MIN_LOCK_CONFIDENCE;
+                         target.confidence >=
+                             Config::CENTER_CALIBRATION_MIN_CONFIDENCE &&
+                         hypotf(target.velocityX, target.velocityY) <=
+                             Config::CENTER_CALIBRATION_MAX_SPEED;
 
   if (freshLock && target.sequence != lastCenterCalibrationSequence) {
     lastCenterCalibrationSequence = target.sequence;
@@ -747,9 +808,17 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
   if (strongLock) {
     if (target.sequence != lastAppliedTargetSequence) {
       const float rawSpeed = hypotf(target.velocityX, target.velocityY);
-      const bool rocketFast = selectedTrackingMode == "ROCKET" && rawSpeed > 90.0f;
-      const float alpha = filterReady ? (rocketFast ? 0.74f : 0.46f) : 1.0f;
-      const float velocityAlpha = rocketFast ? 0.62f : 0.34f;
+      const float rawError = hypotf(target.x - targetCenterX,
+                                    target.y - targetCenterY);
+      const bool rocketFast = selectedTrackingMode == "ROCKET" &&
+                              (rawSpeed > 65.0f || rawError > 45.0f);
+      const bool quietMeasurement = rawSpeed < 34.0f && rawError < 24.0f;
+      const float alpha = filterReady
+                              ? (rocketFast ? 0.70f
+                                            : quietMeasurement ? 0.24f : 0.42f)
+                              : 1.0f;
+      const float velocityAlpha = rocketFast ? 0.58f
+                                              : quietMeasurement ? 0.16f : 0.30f;
       if (lastDynamicsAtMs != 0 && target.receivedAtMs > lastDynamicsAtMs) {
         const float visionDt = clampFloat(
             (target.receivedAtMs - lastDynamicsAtMs) / 1000.0f, 0.015f,
@@ -771,13 +840,13 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
       previousVisionVX = target.velocityX;
       previousVisionVY = target.velocityY;
       lastDynamicsAtMs = target.receivedAtMs;
-      if (rawSpeed < 24.0f &&
-          fabsf(filteredX - targetCenterX) < Config::START_DEADBAND &&
-          fabsf(filteredY - targetCenterY) < Config::START_DEADBAND) {
-        filteredVX *= 0.48f;
-        filteredVY *= 0.48f;
-        filteredAX *= 0.35f;
-        filteredAY *= 0.35f;
+      if (quietMeasurement &&
+          fabsf(filteredX - targetCenterX) < Config::START_DEADBAND * 1.35f &&
+          fabsf(filteredY - targetCenterY) < Config::START_DEADBAND * 1.35f) {
+        filteredVX *= 0.35f;
+        filteredVY *= 0.35f;
+        filteredAX *= 0.22f;
+        filteredAY *= 0.22f;
       }
       filterReady = true;
       lastAppliedTargetSequence = target.sequence;
@@ -805,8 +874,10 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
         filteredY + filteredVY * leadSeconds +
             0.5f * filteredAY * leadSeconds * leadSeconds,
         0.0f, 1000.0f);
-    const float startDeadband = rocketBoost ? 2.2f : Config::START_DEADBAND;
-    const float stopDeadband = rocketBoost ? 1.1f : Config::STOP_DEADBAND;
+    const float startDeadband = rocketBoost ? Config::FAST_START_DEADBAND
+                                            : Config::START_DEADBAND;
+    const float stopDeadband = rocketBoost ? Config::FAST_STOP_DEADBAND
+                                           : Config::STOP_DEADBAND;
     const float panMax = rocketBoost ? Config::ROCKET_BOOST_PAN_SPEED_DPS
                                      : Config::MAX_PAN_SPEED_DPS;
     const float tiltMax = rocketBoost ? Config::ROCKET_BOOST_TILT_SPEED_DPS
@@ -814,14 +885,14 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
     const float desiredPan = axisDesiredRate(
         predictedX - targetCenterX, filteredVX, Config::PAN_DIRECTION,
         Config::PAN_GEAR_RATIO, panMax,
-        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.440f : 0.340f,
-        rocketBoost ? 0.078f : 0.052f, rocketBoost ? 12.0f : 6.0f,
+        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.390f : 0.235f,
+        rocketBoost ? 0.068f : 0.034f, rocketBoost ? 9.0f : 0.0f,
         panMoving);
     const float desiredTilt = axisDesiredRate(
         predictedY - targetCenterY, filteredVY, Config::TILT_DIRECTION,
         Config::TILT_GEAR_RATIO, tiltMax,
-        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.500f : 0.425f,
-        rocketBoost ? 0.092f : 0.066f, rocketBoost ? 14.0f : 7.0f,
+        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.430f : 0.275f,
+        rocketBoost ? 0.074f : 0.041f, rocketBoost ? 10.0f : 0.0f,
         tiltMoving);
     const float panAccel = rocketBoost ? Config::ROCKET_BOOST_PAN_ACCEL_DPS2
                                        : Config::MAX_PAN_ACCEL_DPS2;
@@ -856,6 +927,11 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
     searchActive = true;
     const float elapsed = (nowMs - lostStartedAtMs) / 1000.0f;
     const bool rocketSearch = selectedTrackingMode == "ROCKET";
+    if (hypotf(filteredVX, filteredVY) < 28.0f) {
+      searchActive = false;
+      holdServos(dt);
+      return;
+    }
     const float predictionLimit = rocketSearch ? 0.62f : 0.42f;
     const float outputSearchSpeed =
         rocketSearch ? 125.0f : Config::SEARCH_SPEED_LIMIT_DPS;
@@ -906,7 +982,7 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
       return;
     }
     searchActive = filterReady;
-    if (filterReady) {
+    if (filterReady && hypotf(filteredVX, filteredVY) >= 30.0f) {
       const float panSearchSpeed = min(
           Config::SEARCH_SPEED_LIMIT_DPS * Config::PAN_GEAR_RATIO,
           Config::MAX_PAN_SPEED_DPS);
@@ -995,6 +1071,10 @@ void updateStatusLed() {
 }
 
 void publishTelemetry() {
+  // Enrollment/refinement/camera-alignment packets already drive their own UI.
+  // Suppressing STATE packets here prevents BLE notification collisions from
+  // hiding the candidate boxes that the user must tap on the iPhone.
+  if (enrollmentActive || centerCalibrationActive) return;
   const uint32_t now = millis();
   if (now - lastTelemetryAtMs < Config::TELEMETRY_PERIOD_MS) return;
   lastTelemetryAtMs = now;
@@ -1077,7 +1157,7 @@ void handlePhoneCommand(String command) {
              command == "ALIGN_CENTER") {
     beginCenterCalibration();
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,3.1.0");
+    notifyPhone("ESP32,SE_GIMBAL,3.2.1");
     notifyPhone("RIG,GEARED,3.20,1.60,90,30,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
@@ -1096,6 +1176,9 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
   void onDisconnect(BLEServer *server) override {
     phoneConnected = false;
+    portENTER_CRITICAL(&phoneEventMux);
+    phoneEventHead = phoneEventTail = 0;
+    portEXIT_CRITICAL(&phoneEventMux);
     Serial.println("[BLE] iPhone disconnected");
     server->startAdvertising();
   }
@@ -1118,7 +1201,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.1.2");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.2.1");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -1133,7 +1216,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v3.1.2 (geared 3.20/1.60)");
+  Serial.println("\nSE AI Tracker ESP32 v3.2.1 (geared 3.20/1.60)");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);
@@ -1170,5 +1253,6 @@ void loop() {
   updateStatusLed();
   updateCharging();
   publishTelemetry();
+  flushPhoneNotifications();
   delay(1);
 }

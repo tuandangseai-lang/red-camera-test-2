@@ -12,14 +12,15 @@ import os
 import gc
 
 
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.12.0"
 MOUNT_PROFILE = "MAIX_TILT_TOP"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
 NANOTRACK_MODEL_PATH = "/root/models/nanotrack.mud"
 
 # The four-pin Type-C adapter exposes MaixCAM UART0, not UART1.
-# Adapter TX/RX are the SoC A16/A17 signals.  ESP32 still uses GPIO16/17.
+# Adapter TX/RX are the SoC A16/A17 signals. ESP32 receives on GPIO21 and
+# transmits on GPIO17; the UART wires must therefore be crossed.
 UART_DEVICE = "/dev/ttyS0"
 UART_BAUD = 115200
 UART_TX_PIN = "A16"
@@ -54,7 +55,6 @@ NANO_MAX_CENTRE_JUMP_RATIO = 0.34
 NANO_MIN_BOX_SIDE = 4
 APPEARANCE_TEMPLATE_LIMIT = 4
 APPEARANCE_DIVERSITY_MIN = 0.055
-AIM_BOX_PERMILLE = 55
 
 STATE_IDLE = 0
 STATE_ACQUIRE = 1
@@ -177,27 +177,44 @@ class AlphaBetaBox:
         predicted_y = self.cy + self.vy * dt + 0.5 * self.ay * dt * dt
         residual_x = measured_x - predicted_x
         residual_y = measured_y - predicted_y
-        alpha = clamp(0.36 + confidence * 0.34, 0.40, 0.74)
-        beta = clamp(0.05 + confidence * 0.08, 0.06, 0.14)
-        gamma = clamp(0.010 + confidence * 0.022, 0.012, 0.032)
+        residual_distance = math.sqrt(residual_x * residual_x +
+                                      residual_y * residual_y)
+        current_speed = math.sqrt(self.vx * self.vx + self.vy * self.vy)
+        # Detector boxes breathe by a few pixels even while the object is
+        # motionless. Treat that as measurement noise; a genuine launch makes
+        # a much larger residual and immediately selects the faster response.
+        quiet_radius = max(2.4, min(w, h) * 0.045)
+        quiet = residual_distance <= quiet_radius and current_speed < 38.0
+        if quiet:
+            alpha = clamp(0.18 + confidence * 0.18, 0.20, 0.36)
+            beta = clamp(0.025 + confidence * 0.035, 0.025, 0.060)
+            gamma = clamp(0.004 + confidence * 0.008, 0.004, 0.012)
+            velocity_memory = 0.68
+            acceleration_memory = 0.55
+        else:
+            alpha = clamp(0.40 + confidence * 0.34, 0.44, 0.78)
+            beta = clamp(0.07 + confidence * 0.09, 0.08, 0.17)
+            gamma = clamp(0.012 + confidence * 0.022, 0.014, 0.036)
+            velocity_memory = 0.89
+            acceleration_memory = 0.74
         self.cx = predicted_x + alpha * residual_x
         self.cy = predicted_y + alpha * residual_y
         # Damp residual velocity before adding the new measurement.  Without
         # this, one noisy box can leave a non-zero feed-forward command for
         # several frames and make an MG995 twitch around a stationary target.
-        self.vx = clamp(self.vx * 0.88 + self.ax * dt +
+        self.vx = clamp(self.vx * velocity_memory + self.ax * dt +
                         beta * residual_x / dt,
                         -1500.0, 1500.0)
-        self.vy = clamp(self.vy * 0.88 + self.ay * dt +
+        self.vy = clamp(self.vy * velocity_memory + self.ay * dt +
                         beta * residual_y / dt,
                         -1500.0, 1500.0)
         # A conservative acceleration term anticipates the first high-speed
         # launch frames.  Strong damping prevents a single bad box from making
         # the gimbal run away after the subject stops.
         dt2 = max(0.0004, dt * dt)
-        self.ax = clamp(self.ax * 0.76 + gamma * residual_x / dt2,
+        self.ax = clamp(self.ax * acceleration_memory + gamma * residual_x / dt2,
                         -4200.0, 4200.0)
-        self.ay = clamp(self.ay * 0.76 + gamma * residual_y / dt2,
+        self.ay = clamp(self.ay * acceleration_memory + gamma * residual_y / dt2,
                         -4200.0, 4200.0)
         size_alpha = 0.24 + confidence * 0.14
         self.w += size_alpha * (w - self.w)
@@ -1225,10 +1242,11 @@ class RocketTracker:
         height = max(1, self.camera.height())
         cx = int(clamp(self.filter.cx / width * 1000.0, 0, 1000))
         cy = int(clamp(self.filter.cy / height * 1000.0, 0, 1000))
-        # Servo control and iPhone overlay use a small fixed aim reticle.  Full
-        # detector dimensions stay local for identity/shape matching only.
-        bw = AIM_BOX_PERMILLE
-        bh = AIM_BOX_PERMILLE
+        # Send the real filtered target size. ESP32 uses it to schedule servo
+        # gain: a tiny distant rocket needs a faster response than a large
+        # nearby object. The iPhone still draws a fixed 5 mm aim reticle.
+        bw = int(clamp(self.filter.w / width * 1000.0, 4, 1000))
+        bh = int(clamp(self.filter.h / height * 1000.0, 4, 1000))
         conf = int(clamp(self.last_confidence * 100.0, 0, 100))
         vx = int(clamp(self.filter.vx / width * 1000.0, -2500, 2500))
         vy = int(clamp(self.filter.vy / height * 1000.0, -2500, 2500))

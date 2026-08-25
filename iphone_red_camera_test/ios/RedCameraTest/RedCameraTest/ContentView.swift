@@ -21,16 +21,19 @@ struct ContentView: View {
                 .allowsHitTesting(false)
 
                 trackingOverlay(in: geometry.size)
-                if bluetooth.isChoosingTarget {
-                    candidateSelectionOverlay(in: geometry.size)
-                }
+                controls
                 if bluetooth.isEnrolling {
                     enrollmentOverlay
                 }
                 if bluetooth.isCalibrating {
                     calibrationOverlay
                 }
-                controls
+                // Selection must be the topmost interactive layer.  The old
+                // ordering placed it under the recording controls, so candidate
+                // boxes could be visible but taps were swallowed by the UI.
+                if bluetooth.isChoosingTarget {
+                    candidateSelectionOverlay(in: geometry.size)
+                }
             }
         }
         .preferredColorScheme(.dark)
@@ -297,8 +300,8 @@ struct ContentView: View {
                             .animation(.spring(response: 0.28, dampingFraction: 0.78), value: camera.isRecording)
                     }
                 }
-                .disabled(!camera.isReady)
-                .opacity(camera.isReady ? 1 : 0.42)
+                .disabled(!camera.isReady || (!camera.isRecording && !bluetooth.isConnected))
+                .opacity(camera.isReady && (camera.isRecording || bluetooth.isConnected) ? 1 : 0.42)
 
                 Spacer()
 
@@ -351,8 +354,8 @@ struct ContentView: View {
                     .frame(width: aimBoxSide, height: aimBoxSide)
                     .position(point)
                     .shadow(color: stateColor.opacity(0.48), radius: 6)
-                    .animation(.linear(duration: 0.08), value: bluetooth.targetX)
-                    .animation(.linear(duration: 0.08), value: bluetooth.targetY)
+                    .animation(.linear(duration: 0.045), value: bluetooth.targetX)
+                    .animation(.linear(duration: 0.045), value: bluetooth.targetY)
 
                 Text("MaixCAM • \(bluetooth.lockedTargetName)")
                     .font(.custom("Arial", size: 12).weight(.bold))
@@ -371,15 +374,27 @@ struct ContentView: View {
 
     private func candidateSelectionOverlay(in size: CGSize) -> some View {
         ZStack {
+            Color.black.opacity(0.10)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .gesture(
+                    SpatialTapGesture().onEnded { value in
+                        bluetooth.selectCandidate(
+                            atX: Double(min(1, max(0, value.location.x / max(1, size.width)))),
+                            y: Double(min(1, max(0, value.location.y / max(1, size.height))))
+                        )
+                    }
+                )
+
             ForEach(bluetooth.candidates) { candidate in
                 let point = CGPoint(
                     x: min(size.width - 30, max(30, size.width * candidate.x)),
                     y: min(size.height - 40, max(40, size.height * candidate.y))
                 )
-                let visibleWidth: CGFloat = 30
-                let visibleHeight: CGFloat = 30
-                let tapWidth: CGFloat = 58
-                let tapHeight: CGFloat = 58
+                let visibleWidth = min(180, max(38, size.width * candidate.width))
+                let visibleHeight = min(220, max(38, size.height * candidate.height))
+                let tapWidth = max(58, visibleWidth)
+                let tapHeight = max(58, visibleHeight)
 
                 Button {
                     bluetooth.selectCandidate(candidate)
@@ -412,7 +427,12 @@ struct ContentView: View {
             VStack {
                 Spacer()
                 VStack(spacing: 9) {
-                    Label("Chọn đúng mục tiêu MaixCAM nhìn thấy", systemImage: "hand.tap.fill")
+                    Label(
+                        bluetooth.candidates.isEmpty
+                            ? "Đã quét xong • đang nhận danh sách từ MaixCAM"
+                            : "Chạm trực tiếp vào vật cần theo dõi",
+                        systemImage: bluetooth.candidates.isEmpty ? "ellipsis" : "hand.tap.fill"
+                    )
                         .font(.custom("Arial", size: 13).weight(.bold))
                         .foregroundStyle(.white)
 

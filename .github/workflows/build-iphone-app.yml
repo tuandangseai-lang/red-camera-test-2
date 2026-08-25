@@ -1,4 +1,4 @@
-name: Tao IPA SE v6.8 build61 - canh bao duong Maix TX
+name: Tao IPA SE v7.0 build63 - cham chon muc tieu
 
 on:
   workflow_dispatch:
@@ -59,6 +59,7 @@ jobs:
           grep -q "lockedTargetName" "RedCameraTest/BLEManager.swift"
           grep -q "SelectionCandidate" "RedCameraTest/BLEManager.swift"
           grep -q "candidateSelectionOverlay" "RedCameraTest/ContentView.swift"
+          grep -q "SpatialTapGesture" "RedCameraTest/ContentView.swift"
           grep -q "MaixCAM" "RedCameraTest/ContentView.swift"
           if grep -q "import Vision" "RedCameraTest/CameraController.swift"; then
             echo "iPhone khong duoc chay AI Vision trong kien truc MaixCAM"
@@ -100,18 +101,18 @@ jobs:
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "6.8"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "61"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "7.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "63"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v6.8-build61-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v7.0-build63-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v6.8-build61-unsigned-ipa
-          path: SE-v6.8-build61-unsigned.ipa
+          name: SE-v7.0-build63-unsigned-ipa
+          path: SE-v7.0-build63-unsigned.ipa
           if-no-files-found: error
           retention-days: 7

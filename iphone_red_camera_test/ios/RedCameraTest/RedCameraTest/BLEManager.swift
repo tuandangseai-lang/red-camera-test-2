@@ -90,7 +90,7 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var enrollmentStatus = "Giữ chủ thể trước MaixCAM"
     @Published private(set) var isCalibrating = false
     @Published private(set) var calibrationProgress = 0.0
-    @Published private(set) var calibrationStatus = "Đặt cùng chủ thể vào tâm iPhone"
+    @Published private(set) var calibrationStatus = "Đặt mục tiêu vào dấu + giữa iPhone"
 
     private let serviceUUID = CBUUID(string: "7E57A000-8E3A-4D6A-9B2B-13B10A000001")
     private let eventUUID = CBUUID(string: "7E57A001-8E3A-4D6A-9B2B-13B10A000001")
@@ -98,11 +98,14 @@ final class BLEManager: NSObject, ObservableObject {
 
     private var central: CBCentralManager!
     private var trackerPeripheral: CBPeripheral?
+    private var eventCharacteristic: CBCharacteristic?
     private var commandCharacteristic: CBCharacteristic?
     private var lifecycleActive = true
     private var reconnectWorkItem: DispatchWorkItem?
     private var enrollmentWatchdogWorkItem: DispatchWorkItem?
     private var enrollmentCycle = 0
+    private var savedMaixCenterX = 0.5
+    private var savedMaixCenterY = 0.5
 
     var trackingTitle: String {
         switch trackingState {
@@ -148,7 +151,7 @@ final class BLEManager: NSObject, ObservableObject {
         }
         isCalibrating = true
         calibrationProgress = 0
-        calibrationStatus = "Giữ chủ thể đúng giữa màn hình iPhone"
+        calibrationStatus = "Đặt mục tiêu vào dấu +, cách ít nhất 20 cm"
         trackingState = .calibrate
         send("CALIBRATE_CENTER")
     }
@@ -164,6 +167,25 @@ final class BLEManager: NSObject, ObservableObject {
         enrollmentStatus = "Giữ \(candidate.label.lowercased()) ổn định để MaixCAM ghi nhớ"
         trackingState = .refine
         send("SELECT,\(candidate.id)")
+    }
+
+    func selectCandidate(atX x: Double, y: Double) {
+        guard isConnected, isChoosingTarget, !candidates.isEmpty else { return }
+        // The displayed boxes are projected from MaixCAM into the iPhone view.
+        // Prefer a box containing the finger, otherwise choose the nearest one.
+        let selected = candidates.min { first, second in
+            candidateTapScore(first, x: x, y: y) < candidateTapScore(second, x: x, y: y)
+        }
+        if let selected { selectCandidate(selected) }
+    }
+
+    private func candidateTapScore(_ candidate: SelectionCandidate, x: Double, y: Double) -> Double {
+        let halfWidth = max(0.035, candidate.width * 0.55)
+        let halfHeight = max(0.035, candidate.height * 0.55)
+        let dx = abs(candidate.x - x)
+        let dy = abs(candidate.y - y)
+        let insidePenalty = (dx <= halfWidth && dy <= halfHeight) ? 0.0 : 2.0
+        return insidePenalty + hypot(dx / halfWidth, dy / halfHeight)
     }
 
     func selectMode(_ mode: TrackingMode) {
@@ -223,7 +245,7 @@ final class BLEManager: NSObject, ObservableObject {
     private func cancelCalibrationUI() {
         isCalibrating = false
         calibrationProgress = 0
-        calibrationStatus = "Đặt cùng chủ thể vào tâm iPhone"
+        calibrationStatus = "Đặt mục tiêu vào dấu + giữa iPhone"
     }
 
     private func localizedTargetName(_ token: String) -> String {
@@ -241,11 +263,25 @@ final class BLEManager: NSObject, ObservableObject {
         return key.replacingOccurrences(of: "_", with: " ").lowercased().capitalized
     }
 
-    private func mapMaixPointToIPhone(_ raw: Double, scale: Double) -> Double {
+    private func mapMaixPointToIPhone(_ raw: Double, scale: Double, center: Double = 0.5) -> Double {
         // Two fixed cameras have different fields of view. Calibration removes
         // the centre offset; this scale prevents raw Maix coordinates from
         // being drawn as if both sensors had identical optics.
-        min(1, max(0, 0.5 + (raw - 0.5) * scale))
+        min(1, max(0, 0.5 + (raw - center) * scale))
+    }
+
+    private func activateTransportIfReady(_ peripheral: CBPeripheral) {
+        guard peripheral.state == .connected,
+              commandCharacteristic != nil,
+              eventCharacteristic?.isNotifying == true else { return }
+        let firstActivation = !isConnected
+        isConnected = true
+        trackingState = .idle
+        connectionText = "Đã kết nối ESP32 SE • MaixCAM sẵn sàng"
+        if firstActivation {
+            send("APP_READY")
+            send("MODE,\(selectedMode.rawValue)")
+        }
     }
 
     func suspendForBackground() {
@@ -337,20 +373,31 @@ final class BLEManager: NSObject, ObservableObject {
             rigVersion = "Bánh răng P \(fields[2]):1 • T \(fields[3]):1"
         } else if head == "CALIBRATE", fields.count >= 2 {
             switch fields[1].uppercased() {
+            case "PREPARE":
+                isCalibrating = true
+                let prepare = fields.count >= 3 ? (Double(fields[2]) ?? 0) / 100 : 0
+                calibrationProgress = min(0.30, max(0, prepare * 0.30))
+                calibrationStatus = "Đặt \(lockedTargetName.lowercased()) vào dấu + • cách ≥20 cm"
+                trackingState = .calibrate
             case "START":
                 isCalibrating = true
                 calibrationProgress = 0
-                calibrationStatus = "Giữ \(lockedTargetName.lowercased()) đúng tâm iPhone trong 2 giây"
+                calibrationStatus = "Giữ \(lockedTargetName.lowercased()) đúng dấu +"
                 trackingState = .calibrate
             case "PROGRESS":
                 isCalibrating = true
                 if fields.count >= 3 {
-                    calibrationProgress = min(1, max(0, (Double(fields[2]) ?? 0) / 100))
+                    let measured = (Double(fields[2]) ?? 0) / 100
+                    calibrationProgress = min(0.99, max(0.30, 0.30 + measured * 0.70))
                 }
                 calibrationStatus = calibrationProgress > 0
-                    ? "Đang đo độ lệch hai camera"
+                    ? "Đang đo và lọc độ lệch hai camera"
                     : "Đang chờ MaixCAM khóa đúng chủ thể"
             case "DONE":
+                if fields.count >= 4 {
+                    savedMaixCenterX = min(0.8, max(0.2, (Double(fields[2]) ?? 500) / 1000))
+                    savedMaixCenterY = min(0.8, max(0.2, (Double(fields[3]) ?? 500) / 1000))
+                }
                 calibrationProgress = 1
                 calibrationStatus = "Đã căn tâm hai camera"
                 trackingState = .lock
@@ -365,7 +412,10 @@ final class BLEManager: NSObject, ObservableObject {
                     : "Không thấy chủ thể ổn định, hãy thử lại"
                 trackingState = .acquire
             case "SAVED":
-                break
+                if fields.count >= 4 {
+                    savedMaixCenterX = min(0.8, max(0.2, (Double(fields[2]) ?? 500) / 1000))
+                    savedMaixCenterY = min(0.8, max(0.2, (Double(fields[3]) ?? 500) / 1000))
+                }
             default:
                 break
             }
@@ -398,7 +448,7 @@ final class BLEManager: NSObject, ObservableObject {
                 isChoosingTarget = true
                 selectedCandidateID = nil
                 trackingState = .choose
-                enrollmentStatus = "Chạm vào khung của đúng \(selectedMode.title.lowercased())"
+                enrollmentStatus = "Đã quét xong • chạm đúng vật cần theo dõi"
             case "REFINE":
                 isChoosingTarget = false
                 isRefining = true
@@ -437,8 +487,10 @@ final class BLEManager: NSObject, ObservableObject {
                 classID: Int(fields[3]) ?? -1,
                 label: localizedTargetName(fields[9]),
                 confidence: min(100, max(0, Int(fields[4]) ?? 0)),
-                x: mapMaixPointToIPhone((Double(fields[5]) ?? 500) / 1000, scale: 0.62),
-                y: mapMaixPointToIPhone((Double(fields[6]) ?? 500) / 1000, scale: 0.48),
+                x: mapMaixPointToIPhone((Double(fields[5]) ?? 500) / 1000,
+                                        scale: 0.62, center: savedMaixCenterX),
+                y: mapMaixPointToIPhone((Double(fields[6]) ?? 500) / 1000,
+                                        scale: 0.48, center: savedMaixCenterY),
                 width: min(0.42, max(0.05, ((Double(fields[7]) ?? 80) / 1000) * 0.62)),
                 height: min(0.48, max(0.05, ((Double(fields[8]) ?? 80) / 1000) * 0.48))
             )
@@ -501,9 +553,9 @@ extension BLEManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        isConnected = true
-        trackingState = .idle
-        connectionText = "Đã kết nối ESP32 SE"
+        isConnected = false
+        trackingState = .disconnected
+        connectionText = "Đã nối BLE • đang mở kênh MaixCAM..."
         peripheral.discoverServices([serviceUUID])
     }
 
@@ -528,6 +580,7 @@ extension BLEManager: CBCentralManagerDelegate {
         trackingState = .disconnected
         cancelEnrollmentUI()
         cancelCalibrationUI()
+        eventCharacteristic = nil
         commandCharacteristic = nil
         trackerPeripheral = nil
         confidence = 0
@@ -558,14 +611,26 @@ extension BLEManager: CBPeripheralDelegate {
         }
         for characteristic in service.characteristics ?? [] {
             if characteristic.uuid == eventUUID {
+                eventCharacteristic = characteristic
                 peripheral.setNotifyValue(true, for: characteristic)
                 peripheral.readValue(for: characteristic)
             } else if characteristic.uuid == commandUUID {
                 commandCharacteristic = characteristic
-                send("PING")
-                send("MODE,\(selectedMode.rawValue)")
             }
         }
+        activateTransportIfReady(peripheral)
+    }
+
+    func peripheral(
+        _ peripheral: CBPeripheral,
+        didUpdateNotificationStateFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        guard error == nil, characteristic.uuid == eventUUID else {
+            connectionText = "Không mở được kênh dữ liệu MaixCAM"
+            return
+        }
+        activateTransportIfReady(peripheral)
     }
 
     func peripheral(
