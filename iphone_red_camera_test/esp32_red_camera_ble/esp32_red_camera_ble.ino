@@ -1215,7 +1215,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.2.1");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.3.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -1230,7 +1230,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v3.2.1 (geared 3.20/1.60)");
+  Serial.println("\nSE AI Tracker ESP32 v3.3.0 (geared 3.20/1.60)");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);
