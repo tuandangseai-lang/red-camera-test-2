@@ -430,6 +430,7 @@ struct ContentView: View {
                 )
 
             ForEach(bluetooth.candidates) { candidate in
+                let isPending = bluetooth.selectedCandidateID == candidate.id
                 let point = CGPoint(
                     x: min(size.width - 30, max(30, size.width * candidate.x)),
                     y: min(size.height - 40, max(40, size.height * candidate.y))
@@ -445,24 +446,33 @@ struct ContentView: View {
                     ZStack {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .stroke(
-                                Color.cyan,
-                                style: StrokeStyle(lineWidth: 3, dash: [8, 4])
+                                isPending ? Color.green : Color.cyan,
+                                style: StrokeStyle(
+                                    lineWidth: isPending ? 4 : 3,
+                                    dash: isPending ? [] : [8, 4]
+                                )
                             )
                             .frame(width: visibleWidth, height: visibleHeight)
-                            .shadow(color: .cyan.opacity(0.72), radius: 7)
+                            .shadow(
+                                color: (isPending ? Color.green : Color.cyan).opacity(0.72),
+                                radius: 7
+                            )
 
-                        Text("\(candidate.label) • \(candidate.confidence)%")
+                        Text(isPending
+                             ? "ĐANG XÁC NHẬN Ô \(candidate.id)"
+                             : "\(candidate.label) • \(candidate.confidence)%")
                             .font(.custom("Arial", size: 11).weight(.bold))
                             .foregroundStyle(.black)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
-                            .background(.cyan, in: Capsule())
+                            .background(isPending ? Color.green : Color.cyan, in: Capsule())
                             .offset(y: -visibleHeight / 2 - 17)
                     }
                     .frame(width: tapWidth, height: tapHeight)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .disabled(bluetooth.isConfirmingCandidate)
                 .position(point)
                 .accessibilityLabel("Chọn \(candidate.label), độ tin cậy \(candidate.confidence) phần trăm")
             }
@@ -470,18 +480,28 @@ struct ContentView: View {
             VStack {
                 Spacer()
                 VStack(spacing: 9) {
-                    Label(
-                        bluetooth.candidates.isEmpty
-                            ? "Đã quét xong • đang nhận danh sách từ MaixCAM"
-                            : "Chạm trực tiếp vào vật cần theo dõi",
-                        systemImage: bluetooth.candidates.isEmpty ? "ellipsis" : "hand.tap.fill"
-                    )
+                    Label {
+                        Text(
+                            bluetooth.candidates.isEmpty
+                                ? "Đã quét xong • đang nhận danh sách từ MaixCAM"
+                                : bluetooth.isConfirmingCandidate
+                                    ? "Đang xác nhận đúng ô với MaixCAM"
+                                    : "Chạm trực tiếp vào vật cần theo dõi"
+                        )
+                    } icon: {
+                        Image(systemName: bluetooth.candidates.isEmpty
+                              ? "ellipsis"
+                              : bluetooth.isConfirmingCandidate
+                                  ? "checkmark.circle"
+                                  : "hand.tap.fill")
+                    }
                         .font(.custom("Arial", size: 13).weight(.bold))
                         .foregroundStyle(.white)
 
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 9) {
                             ForEach(bluetooth.candidates) { candidate in
+                                let isPending = bluetooth.selectedCandidateID == candidate.id
                                 Button {
                                     bluetooth.selectCandidate(candidate)
                                 } label: {
@@ -489,7 +509,10 @@ struct ContentView: View {
                                         Text("\(candidate.id)")
                                             .font(.custom("Arial", size: 13).weight(.black))
                                             .frame(width: 25, height: 25)
-                                            .background(.cyan, in: RoundedRectangle(cornerRadius: 7))
+                                            .background(
+                                                isPending ? Color.green : Color.cyan,
+                                                in: RoundedRectangle(cornerRadius: 7)
+                                            )
                                             .foregroundStyle(.black)
                                         VStack(alignment: .leading, spacing: 1) {
                                             Text(candidate.label)
@@ -509,6 +532,7 @@ struct ContentView: View {
                                     }
                                 }
                                 .buttonStyle(.plain)
+                                .disabled(bluetooth.isConfirmingCandidate)
                             }
                         }
                         .padding(.horizontal, 14)

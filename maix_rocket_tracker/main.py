@@ -12,7 +12,7 @@ import os
 import gc
 
 
-APP_VERSION = "1.13.0"
+APP_VERSION = "1.14.0"
 MOUNT_PROFILE = "MAIX_TILT_TOP"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
@@ -240,6 +240,7 @@ class RocketTracker:
         selected_model, self.valid_class_ids = self._mode_configuration(self.active_mode)
         self.detector_path = selected_model
         self.detector = nn.YOLO11(model=selected_model, dual_buff=True)
+        self.bottle_detector = None
         self.nano_tracker = (nn.NanoTrack(NANOTRACK_MODEL_PATH)
                              if os.path.exists(NANOTRACK_MODEL_PATH) else None)
         self.camera = camera.Camera(
@@ -247,6 +248,7 @@ class RocketTracker:
             self.detector.input_height(),
             self.detector.input_format(),
         )
+        self._ensure_bottle_detector()
         self.display = display.Display()
         self.byte_tracker = self._new_byte_tracker()
         self.serial = self._open_uart()
@@ -304,7 +306,9 @@ class RocketTracker:
 
     def _mode_configuration(self, mode):
         if mode == "ROCKET":
-            return (MODEL_PATH, [0]) if self.custom_model else (FALLBACK_MODEL_PATH, [39])
+            # Class 0 is the custom water-rocket model; class 39 is COCO's
+            # bottle class used to offer an empty PET bottle during selection.
+            return (MODEL_PATH, [0, 39]) if self.custom_model else (FALLBACK_MODEL_PATH, [39])
         if mode == "PERSON":
             return FALLBACK_MODEL_PATH, [0]
         if mode == "ANIMAL":
@@ -316,6 +320,8 @@ class RocketTracker:
         if mode not in SUPPORTED_MODES:
             return False
         model_path, class_ids = self._mode_configuration(mode)
+        if mode != "ROCKET":
+            self._release_bottle_detector()
         if model_path != self.detector_path:
             next_detector = nn.YOLO11(model=model_path, dual_buff=True)
             if (next_detector.input_width() != self.camera.width() or
@@ -328,12 +334,60 @@ class RocketTracker:
             gc.collect()
         self.active_mode = mode
         self.valid_class_ids = class_ids
+        if mode == "ROCKET":
+            self._ensure_bottle_detector()
         self.state = STATE_ACQUIRE if self.enabled else STATE_IDLE
         self._clear_target()
         if self.enabled:
             self._begin_enrollment()
         print("Tracking mode: {0}".format(mode), flush=True)
         return True
+
+    def _ensure_bottle_detector(self):
+        if (not self.custom_model or self.active_mode != "ROCKET" or
+                self.detector_path == FALLBACK_MODEL_PATH or
+                self.bottle_detector is not None):
+            return
+        try:
+            detector = nn.YOLO11(model=FALLBACK_MODEL_PATH, dual_buff=False)
+            if (detector.input_width() != self.camera.width() or
+                    detector.input_height() != self.camera.height()):
+                del detector
+                gc.collect()
+                print("PET proposal model has incompatible input size", flush=True)
+                return
+            self.bottle_detector = detector
+            print("PET proposal detector ready", flush=True)
+        except Exception as exception:
+            self.bottle_detector = None
+            print("PET proposal detector unavailable: {0}".format(exception), flush=True)
+
+    def _release_bottle_detector(self):
+        if self.bottle_detector is None:
+            return
+        detector = self.bottle_detector
+        self.bottle_detector = None
+        del detector
+        gc.collect()
+
+    def _detect_objects(self, frame, include_bottle=False, bottle_only=False):
+        objects = []
+        if not bottle_only:
+            objects = list(self.detector.detect(
+                frame,
+                conf_th=DETECT_CONFIDENCE,
+                iou_th=DETECT_IOU,
+            ))
+        if include_bottle and self.bottle_detector is not None:
+            bottle_objects = self.bottle_detector.detect(
+                frame,
+                conf_th=0.12,
+                iou_th=DETECT_IOU,
+            )
+            for detected in bottle_objects:
+                if detected.class_id == 39:
+                    objects.append(detected)
+        return objects
 
     def _new_byte_tracker(self):
         return tracker.ByteTracker(
@@ -940,23 +994,32 @@ class RocketTracker:
         if elapsed < ENROLL_DURATION_MS:
             return
 
-        if not self.enroll_votes:
-            if self.active_mode == "OBJECT" and self.nano_tracker is not None:
-                # COCO cannot name every handmade object. Offer a central
-                # texture region so the user can still select it and let
-                # NanoTrack + the shape descriptor learn that exact object.
-                width = self.camera.width()
-                height = self.camera.height()
-                region_w = max(24, int(width * 0.28))
-                region_h = max(24, int(height * 0.34))
-                region = ((width - region_w) // 2,
-                          (height - region_h) // 2, region_w, region_h)
+        if self.active_mode in ("OBJECT", "ROCKET") and self.nano_tracker is not None:
+            # COCO cannot name every handmade object, while the custom rocket
+            # model may reject a plain empty PET bottle. Always offer one
+            # frozen central proposal in these two tabs. NanoTrack and the
+            # appearance signature learn the exact selected pixels afterward.
+            width = self.camera.width()
+            height = self.camera.height()
+            region_w = max(24, int(width * 0.30))
+            region_h = max(24, int(height * (0.48 if self.active_mode == "ROCKET" else 0.36)))
+            region = ((width - region_w) // 2,
+                      (height - region_h) // 2, region_w, region_h)
+            already_covered = any(
+                iou(region, value[0]) >= 0.42
+                for value in self.enroll_last_seen.values()
+            )
+            if not already_covered:
                 manual_id = -1001
                 self.enroll_votes[manual_id] = self.enroll_total_frames
-                self.enroll_last_seen[manual_id] = (region, 0.50, -1)
-            else:
-                self._restart_enrollment(now_ms)
-                return
+                self.enroll_last_seen[manual_id] = (region, 0.62, -1)
+                signature = self._appearance_signature(frame, region)
+                if signature is not None:
+                    self.enroll_signature_sums[manual_id] = list(signature)
+                    self.enroll_signature_counts[manual_id] = 1
+        if not self.enroll_votes:
+            self._restart_enrollment(now_ms)
+            return
 
         ranked = []
         for target_id, votes in self.enroll_votes.items():
@@ -997,7 +1060,9 @@ class RocketTracker:
                 "box": box,
                 "confidence": confidence,
                 "class_id": class_id,
-                "manual": target_id < 0,
+                "manual": (target_id < 0 or
+                           (self.active_mode == "ROCKET" and
+                            self.custom_model and class_id == 39)),
                 "signature": signature,
             }
             self.selection_order.append(slot)
@@ -1036,39 +1101,18 @@ class RocketTracker:
         self.candidate_last_report_ms = now_ms
 
     def _update_selection_candidates(self, tracks, now_ms):
-        active_tracks = {}
-        for track_item in tracks:
-            if track_item.lost or not track_item.history:
-                continue
-            active_tracks[track_item.id] = track_item
-        for slot in self.selection_order:
-            candidate = self.selection_candidates.get(slot)
-            if candidate is None:
-                continue
-            track_item = active_tracks.get(candidate["track_id"])
-            if track_item is None:
-                # ByteTrack can assign a new identity after a short occlusion.
-                # Reassociate only a same-class box that overlaps the old one.
-                best = None
-                best_overlap = 0.0
-                for possible in active_tracks.values():
-                    obj = possible.history[-1]
-                    if obj.class_id != candidate["class_id"]:
-                        continue
-                    box = (obj.x, obj.y, obj.w, obj.h)
-                    overlap = iou(box, candidate["box"])
-                    if overlap > best_overlap:
-                        best, best_overlap = possible, overlap
-                if best_overlap >= 0.08:
-                    track_item = best
-                    candidate["track_id"] = best.id
-            if track_item is not None:
-                obj = track_item.history[-1]
-                candidate["box"] = (obj.x, obj.y, obj.w, obj.h)
-                candidate["confidence"] = clamp(track_item.score, 0.0, 1.0)
+        # Deliberately freeze the 3-second snapshot. Moving rectangles forced
+        # the iPhone to redraw continuously and made a real finger tap land on
+        # a different slot. Candidate packets still repeat for BLE reliability.
         self._emit_candidates(now_ms)
 
     def _begin_refinement(self, slot, now_ms):
+        # SELECT is retried by the iPhone until its BLE acknowledgement arrives.
+        # Treat a duplicate for the already selected frozen slot as success;
+        # replying SELECT_ERROR here could incorrectly reopen the chooser after
+        # MaixCAM had already started refinement.
+        if self.enabled and self.refining and self.selected_candidate_slot == slot:
+            return True
         if not self.enabled or not self.awaiting_selection:
             return False
         candidate = self.selection_candidates.get(slot)
@@ -1118,6 +1162,13 @@ class RocketTracker:
             nano_result = self._track_with_nano(frame, now_ms)
             if nano_result is not None:
                 captured = nano_result
+            elif self.last_box is not None:
+                # Transparent PET can have too little texture for NanoTrack in
+                # the first frames. During the short refinement step the user
+                # holds it still, so retain the chosen frozen box long enough
+                # to learn its colour/edge signature instead of restarting the
+                # full 3-second scan.
+                captured = (self.last_box, max(0.45, self.last_confidence))
         else:
             selected = None
             for track_item in tracks:
@@ -1310,10 +1361,9 @@ class RocketTracker:
     def _run_enabled_frame(self, frame, now_ms):
         """Fuse semantic YOLO detections with low-latency single-object tracking."""
         if self.enrolling:
-            objects = self.detector.detect(
+            objects = self._detect_objects(
                 frame,
-                conf_th=DETECT_CONFIDENCE,
-                iou_th=DETECT_IOU,
+                include_bottle=(self.active_mode == "ROCKET"),
             )
             self.last_yolo_frame = self.frame_index
             tracks = self._detections_to_tracks(objects)
@@ -1321,24 +1371,16 @@ class RocketTracker:
             return
 
         if self.awaiting_selection:
-            objects = self.detector.detect(
-                frame,
-                conf_th=DETECT_CONFIDENCE,
-                iou_th=DETECT_IOU,
-            )
-            self.last_yolo_frame = self.frame_index
-            tracks = self._detections_to_tracks(objects)
-            self._update_selection_candidates(tracks, now_ms)
+            self._update_selection_candidates([], now_ms)
             return
 
         if self.refining:
-            objects = self.detector.detect(
-                frame,
-                conf_th=DETECT_CONFIDENCE,
-                iou_th=DETECT_IOU,
-            )
-            self.last_yolo_frame = self.frame_index
-            tracks = self._detections_to_tracks(objects)
+            if self.refine_manual:
+                tracks = []
+            else:
+                objects = self._detect_objects(frame)
+                self.last_yolo_frame = self.frame_index
+                tracks = self._detections_to_tracks(objects)
             self._update_refinement(tracks, frame, now_ms)
             return
 
@@ -1349,10 +1391,12 @@ class RocketTracker:
                     self.frame_index - self.last_yolo_frame >= yolo_interval)
         selected = None
         if yolo_due:
-            objects = self.detector.detect(
+            bottle_identity = (self.active_mode == "ROCKET" and
+                               self.enrollment_class_id == 39)
+            objects = self._detect_objects(
                 frame,
-                conf_th=DETECT_CONFIDENCE,
-                iou_th=DETECT_IOU,
+                include_bottle=bottle_identity,
+                bottle_only=bottle_identity,
             )
             self.last_yolo_frame = self.frame_index
             tracks = self._detections_to_tracks(objects)

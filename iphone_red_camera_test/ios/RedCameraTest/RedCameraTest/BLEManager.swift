@@ -87,6 +87,7 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var candidates: [SelectionCandidate] = []
     @Published private(set) var selectedCandidateID: Int?
     @Published private(set) var hasSelectedCandidate = false
+    @Published private(set) var isConfirmingCandidate = false
     @Published private(set) var enrollmentProgress = 0.0
     @Published private(set) var enrollmentStatus = "Giữ chủ thể trước MaixCAM"
     @Published private(set) var isCalibrating = false
@@ -105,7 +106,11 @@ final class BLEManager: NSObject, ObservableObject {
     private var lifecycleActive = true
     private var reconnectWorkItem: DispatchWorkItem?
     private var enrollmentWatchdogWorkItem: DispatchWorkItem?
+    private var selectionRetryWorkItem: DispatchWorkItem?
+    private var selectionTimeoutWorkItem: DispatchWorkItem?
     private var enrollmentCycle = 0
+    private var selectionCycle = 0
+    private var awaitingSelectionAcknowledgement = false
     private var savedMaixCenterX = 0.5
     private var savedMaixCenterY = 0.5
 
@@ -172,17 +177,44 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     func selectCandidate(_ candidate: SelectionCandidate) {
-        guard isConnected, isChoosingTarget else { return }
+        guard isConnected, isChoosingTarget, !isConfirmingCandidate else { return }
+        selectionCycle += 1
+        let cycle = selectionCycle
         selectedCandidateID = candidate.id
-        hasSelectedCandidate = true
+        hasSelectedCandidate = false
         lockedTargetName = candidate.label
-        isChoosingTarget = false
-        isRefining = true
-        isEnrolling = true
+        isChoosingTarget = true
+        isRefining = false
+        isEnrolling = false
         enrollmentProgress = 0
-        enrollmentStatus = "Đã chọn \(candidate.label.lowercased()) • MaixCAM đang ghi nhớ màu và hình dạng"
-        trackingState = .refine
+        enrollmentStatus = "Đã chạm ô số \(candidate.id) • đang chờ MaixCAM xác nhận"
+        trackingState = .choose
+        isConfirmingCandidate = true
+        awaitingSelectionAcknowledgement = true
         send("SELECT,\(candidate.id)")
+
+        selectionRetryWorkItem?.cancel()
+        let retry = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.selectionCycle == cycle,
+                  self.awaitingSelectionAcknowledgement else { return }
+            self.send("SELECT,\(candidate.id)")
+            self.enrollmentStatus = "Đang xác nhận ô số \(candidate.id) với MaixCAM"
+        }
+        selectionRetryWorkItem = retry
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: retry)
+
+        selectionTimeoutWorkItem?.cancel()
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.selectionCycle == cycle,
+                  self.awaitingSelectionAcknowledgement else { return }
+            self.reopenCandidateSelection(
+                status: "Chưa nhận được lựa chọn • chạm lại đúng ô cần bám"
+            )
+        }
+        selectionTimeoutWorkItem = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6, execute: timeout)
     }
 
     func selectCandidate(atX x: Double, y: Double) {
@@ -221,6 +253,7 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     private func beginEnrollmentUI() {
+        cancelSelectionAcknowledgement()
         enrollmentCycle += 1
         let cycle = enrollmentCycle
         enrollmentWatchdogWorkItem?.cancel()
@@ -244,6 +277,7 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     private func cancelEnrollmentUI() {
+        cancelSelectionAcknowledgement()
         enrollmentCycle += 1
         enrollmentWatchdogWorkItem?.cancel()
         enrollmentWatchdogWorkItem = nil
@@ -264,6 +298,33 @@ final class BLEManager: NSObject, ObservableObject {
     private func finishCandidateSelection() {
         isChoosingTarget = false
         candidates = []
+    }
+
+    private func confirmCandidateSelection() {
+        awaitingSelectionAcknowledgement = false
+        isConfirmingCandidate = false
+        selectionRetryWorkItem?.cancel()
+        selectionRetryWorkItem = nil
+        selectionTimeoutWorkItem?.cancel()
+        selectionTimeoutWorkItem = nil
+    }
+
+    private func cancelSelectionAcknowledgement() {
+        selectionCycle += 1
+        confirmCandidateSelection()
+    }
+
+    private func reopenCandidateSelection(status: String) {
+        cancelSelectionAcknowledgement()
+        isConfirmingCandidate = false
+        selectedCandidateID = nil
+        hasSelectedCandidate = false
+        isRefining = false
+        isEnrolling = false
+        isChoosingTarget = !candidates.isEmpty
+        enrollmentProgress = 1
+        enrollmentStatus = status
+        trackingState = candidates.isEmpty ? .acquire : .choose
     }
 
     private func cancelCalibrationUI() {
@@ -465,6 +526,7 @@ final class BLEManager: NSObject, ObservableObject {
             }
             switch status {
             case "READY":
+                confirmCandidateSelection()
                 if fields.count >= 5 {
                     lockedTargetName = localizedTargetName(fields[4])
                 }
@@ -477,6 +539,7 @@ final class BLEManager: NSObject, ObservableObject {
                 enrollmentStatus = "Đã nhớ màu và hình dạng • hãy căn tâm thủ công"
                 trackingState = .lock
             case "CHOOSE":
+                cancelSelectionAcknowledgement()
                 isEnrolling = false
                 isRefining = false
                 isChoosingTarget = true
@@ -485,6 +548,7 @@ final class BLEManager: NSObject, ObservableObject {
                 trackingState = .choose
                 enrollmentStatus = "Đã quét xong • chạm đúng vật cần theo dõi"
             case "REFINE":
+                confirmCandidateSelection()
                 isChoosingTarget = false
                 isRefining = true
                 isEnrolling = true
@@ -494,6 +558,7 @@ final class BLEManager: NSObject, ObservableObject {
                 }
                 enrollmentStatus = "MaixCAM đang đối chiếu và ghi nhớ \(lockedTargetName.lowercased())"
             case "RETRY":
+                cancelSelectionAcknowledgement()
                 clearCandidateSelection()
                 isEnrolling = true
                 isRefining = false
@@ -529,9 +594,10 @@ final class BLEManager: NSObject, ObservableObject {
                 width: min(0.42, max(0.05, ((Double(fields[7]) ?? 80) / 1000) * 0.62)),
                 height: min(0.48, max(0.05, ((Double(fields[8]) ?? 80) / 1000) * 0.48))
             )
-            if let index = candidates.firstIndex(where: { $0.id == slot }) {
-                candidates[index] = candidate
-            } else {
+            // Candidate geometry is a 3-second snapshot. Keep each first box
+            // fixed while the user taps; continuously replacing the same item
+            // made the box drift, caused SwiftUI redraws and missed touches.
+            if !candidates.contains(where: { $0.id == slot }) {
                 candidates.append(candidate)
                 candidates.sort { $0.id < $1.id }
             }
@@ -551,12 +617,28 @@ final class BLEManager: NSObject, ObservableObject {
                 connectionText = "MaixCAM đã gửi danh sách mục tiêu"
             }
         } else if head == "SELECTION", fields.count >= 3,
-                  fields[2].uppercased() == "REFINE" {
-            isChoosingTarget = false
-            isRefining = true
-            isEnrolling = true
-            enrollmentProgress = 0
-            trackingState = .refine
+                  let slot = Int(fields[1]) {
+            switch fields[2].uppercased() {
+            case "PENDING":
+                selectedCandidateID = slot
+                isConfirmingCandidate = true
+                enrollmentStatus = "Đã gửi ô số \(slot) • đang chờ MaixCAM xác nhận"
+            case "REFINE", "ACK":
+                confirmCandidateSelection()
+                selectedCandidateID = slot
+                hasSelectedCandidate = true
+                isChoosingTarget = false
+                isRefining = true
+                isEnrolling = true
+                enrollmentProgress = 0
+                trackingState = .refine
+            case "RETRY", "ERROR":
+                reopenCandidateSelection(
+                    status: "MaixCAM chưa nhận ô số \(slot) • hãy chạm lại"
+                )
+            default:
+                break
+            }
         } else if head == "LINK", fields.count >= 2 {
             switch fields[1].uppercased() {
             case "MAIX_TX_MISSING":

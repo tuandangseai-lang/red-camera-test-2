@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.3.0 - colour identity + manual alignment + fast predictive gimbal
+// SE Rocket Tracker v3.4.0 - frozen selection + acknowledged tap + predictive gimbal
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -524,6 +524,17 @@ void processMaixLine(char *line) {
     notifyPhone(String("MAIX,") + bodyText + 2);
   } else if (strncmp(bodyText, "A,", 2) == 0) {
     Serial.printf("[MAIX ACK] %s\n", bodyText);
+    const String acknowledgment = String(bodyText + 2);
+    const int selectedMarker = acknowledgment.indexOf(",SELECTED,");
+    const int errorMarker = acknowledgment.indexOf(",SELECT_ERROR,");
+    if (selectedMarker >= 0) {
+      const int slot = acknowledgment.substring(selectedMarker + 10).toInt();
+      enrollmentActive = true;
+      notifyPhone(String("SELECTION,") + slot + ",REFINE");
+    } else if (errorMarker >= 0) {
+      const int slot = acknowledgment.substring(errorMarker + 14).toInt();
+      notifyPhone(String("SELECTION,") + slot + ",RETRY");
+    }
   } else if (strncmp(bodyText, "E,", 2) == 0) {
     const String enrollment = String(bodyText + 2);
     const int firstComma = enrollment.indexOf(',');
@@ -1153,11 +1164,19 @@ void handlePhoneCommand(String command) {
   } else if (command.startsWith("SELECT,")) {
     const String slotText = command.substring(7);
     const int slot = slotText.toInt();
-    if (slot > 0 && slot <= 9 && sessionArmed && enrollmentActive) {
+    if (slot > 0 && slot <= 9 && sessionArmed) {
+      // Do not discard a real screen tap because an ENROLL notification and
+      // the BLE write crossed in flight. MaixCAM remains the authority and
+      // will answer SELECTED or SELECT_ERROR for this frozen candidate slot.
+      enrollmentActive = true;
+      targetIdentityReady = false;
+      alignmentReady = false;
       sendMaixCommand("SELECT", String(slot).c_str());
-      notifyPhone(String("SELECTION,") + slot + ",REFINE");
+      notifyPhone(String("SELECTION,") + slot + ",PENDING");
       panRate = tiltRate = 0.0f;
       panMoving = tiltMoving = false;
+    } else {
+      notifyPhone(String("SELECTION,") + slot + ",RETRY");
     }
   } else if (command == "ARM" || command == "TRACKING_STARTED" ||
       command == "RECORDING_STARTED") {
@@ -1171,7 +1190,7 @@ void handlePhoneCommand(String command) {
              command == "ALIGN_CENTER") {
     beginCenterCalibration();
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,3.3.0");
+    notifyPhone("ESP32,SE_GIMBAL,3.4.0");
     notifyPhone("RIG,GEARED,3.20,1.60,90,120,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
@@ -1215,7 +1234,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.3.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.4.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -1230,7 +1249,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v3.3.0 (geared 3.20/1.60)");
+  Serial.println("\nSE AI Tracker ESP32 v3.4.0 (geared 3.20/1.60)");
   Serial.println("USB bench: a=ARM, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   pinMode(Config::PHONE_CHARGE_RELAY_PIN, OUTPUT);
