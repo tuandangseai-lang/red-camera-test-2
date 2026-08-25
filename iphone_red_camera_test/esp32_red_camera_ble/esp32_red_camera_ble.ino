@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.10.0 - reliable scan/refine + higher-rate Maix tracking
+// SE Rocket Tracker v3.11.0 - predictive reacquisition + repeatable alignment
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -51,11 +51,14 @@ constexpr uint32_t UART_BAUD = 115200;
 constexpr uint32_t MAIX_FIRST_REPLY_TIMEOUT_MS = 15000;
 constexpr uint32_t MAIX_PING_RETRY_MS = 900;
 constexpr uint8_t MAIX_MIN_PINGS_BEFORE_FAULT = 8;
-constexpr uint32_t REFINE_REPLY_TIMEOUT_MS = 2600;
+constexpr uint32_t REFINE_REPLY_TIMEOUT_MS = 3800;
+constexpr uint32_t MULTIVIEW_REPLY_TIMEOUT_MS = 4300;
 constexpr uint32_t CONTROL_PERIOD_US = 20000;  // MG996R: 50 Hz
 constexpr uint32_t TARGET_STALE_MS = 180;
-constexpr uint32_t COAST_LIMIT_MS = 420;
-constexpr uint32_t SEARCH_LIMIT_MS = 850;
+constexpr uint32_t SEARCH_PREDICT_MS = 2000;
+constexpr uint32_t SEARCH_RETURN_MS = 1000;
+constexpr float SEARCH_MAX_PAN_EXCURSION_DEG = 28.0f;
+constexpr float SEARCH_MAX_TILT_EXCURSION_DEG = 18.0f;
 constexpr uint32_t TELEMETRY_PERIOD_MS = 50;
 constexpr uint32_t BLE_NOTIFY_PERIOD_MS = 18;
 constexpr uint8_t BLE_EVENT_QUEUE_SIZE = 20;
@@ -68,18 +71,18 @@ constexpr float START_DEADBAND = 6.0f;
 constexpr float STOP_DEADBAND = 3.0f;
 constexpr float FAST_START_DEADBAND = 2.2f;
 constexpr float FAST_STOP_DEADBAND = 1.2f;
-constexpr float MAX_PAN_SPEED_DPS = 285.0f;
+constexpr float MAX_PAN_SPEED_DPS = 330.0f;
 constexpr float MAX_TILT_SPEED_DPS = 330.0f;
-constexpr float MAX_PAN_ACCEL_DPS2 = 3000.0f;
+constexpr float MAX_PAN_ACCEL_DPS2 = 3700.0f;
 constexpr float MAX_TILT_ACCEL_DPS2 = 3250.0f;
-constexpr float ROCKET_BOOST_PAN_SPEED_DPS = 360.0f;
+constexpr float ROCKET_BOOST_PAN_SPEED_DPS = 410.0f;
 constexpr float ROCKET_BOOST_TILT_SPEED_DPS = 390.0f;
-constexpr float ROCKET_BOOST_PAN_ACCEL_DPS2 = 4300.0f;
+constexpr float ROCKET_BOOST_PAN_ACCEL_DPS2 = 4850.0f;
 constexpr float ROCKET_BOOST_TILT_ACCEL_DPS2 = 4400.0f;
 constexpr float MAX_DECEL_DPS2 = 3600.0f;
-constexpr float MAX_PAN_JERK_DPS3 = 22500.0f;
+constexpr float MAX_PAN_JERK_DPS3 = 27000.0f;
 constexpr float MAX_TILT_JERK_DPS3 = 20500.0f;
-constexpr float ROCKET_BOOST_PAN_JERK_DPS3 = 31000.0f;
+constexpr float ROCKET_BOOST_PAN_JERK_DPS3 = 35000.0f;
 constexpr float ROCKET_BOOST_TILT_JERK_DPS3 = 28500.0f;
 constexpr float HOME_SPEED_DPS = 65.0f;
 constexpr float SEARCH_SPEED_LIMIT_DPS = 92.0f;
@@ -93,7 +96,6 @@ constexpr int CENTER_CALIBRATION_MIN_CONFIDENCE = 30;
 constexpr float CENTER_CALIBRATION_MAX_SPEED = 250.0f;
 
 constexpr int MIN_LOCK_CONFIDENCE = 38;
-constexpr int MIN_WEAK_CONFIDENCE = 12;
 constexpr uint8_t CONSISTENT_LOCK_PACKETS = 2;
 constexpr int MAX_LOCK_JUMP = 260;
 
@@ -157,6 +159,9 @@ bool targetIdentityReady = false;
 bool candidateSelected = false;
 bool pendingCenterAfterRefine = false;
 uint32_t refineRequestedAtMs = 0;
+bool multiViewActive = false;
+bool multiViewCompleted = false;
+uint32_t multiViewStartedAtMs = 0;
 int selectedCandidateSlot = -1;
 String lockedTargetToken = "WATER_ROCKET";
 
@@ -186,6 +191,11 @@ int lastPanPulse = -1;
 int lastTiltPulse = -1;
 uint16_t commandSequence = 0;
 uint32_t lostStartedAtMs = 0;
+float lostOriginPanAngle = Config::PAN_HOME_DEG;
+float lostOriginTiltAngle = Config::TILT_HOME_DEG;
+float lostPanVelocity = 0.0f;
+float lostTiltVelocity = 0.0f;
+bool lostRecoveryCaptured = false;
 uint32_t lastControlAtUs = 0;
 uint32_t lastTelemetryAtMs = 0;
 uint32_t lastSerialLogAtMs = 0;
@@ -208,6 +218,7 @@ uint16_t centerCalibrationSamples = 0;
 uint16_t lastCenterCalibrationSequence = 0;
 
 char uartLine[192];
+void completeMultiViewCapture(const char *reason);
 size_t uartLineLength = 0;
 
 float clampFloat(float value, float low, float high) {
@@ -361,6 +372,10 @@ void resetTrackingFilter() {
   panMoving = tiltMoving = false;
   searchActive = false;
   lostStartedAtMs = 0;
+  lostOriginPanAngle = panAngle;
+  lostOriginTiltAngle = tiltAngle;
+  lostPanVelocity = lostTiltVelocity = 0.0f;
+  lostRecoveryCaptured = false;
 }
 
 void cancelCenterCalibration() {
@@ -402,6 +417,9 @@ void armSession() {
   candidateSelected = false;
   pendingCenterAfterRefine = false;
   refineRequestedAtMs = 0;
+  multiViewActive = false;
+  multiViewCompleted = false;
+  multiViewStartedAtMs = 0;
   selectedCandidateSlot = -1;
   enrollmentProgress = 0;
   armStartedAtMs = millis();
@@ -441,6 +459,9 @@ void selectTrackingMode(String mode) {
   candidateSelected = false;
   pendingCenterAfterRefine = false;
   refineRequestedAtMs = 0;
+  multiViewActive = false;
+  multiViewCompleted = false;
+  multiViewStartedAtMs = 0;
   selectedCandidateSlot = -1;
   enrollmentProgress = 0;
   cancelCenterCalibration();
@@ -460,6 +481,9 @@ void stopSession() {
   candidateSelected = false;
   pendingCenterAfterRefine = false;
   refineRequestedAtMs = 0;
+  multiViewActive = false;
+  multiViewCompleted = false;
+  multiViewStartedAtMs = 0;
   selectedCandidateSlot = -1;
   enrollmentProgress = 0;
   cancelCenterCalibration();
@@ -484,6 +508,9 @@ void requestHome() {
   candidateSelected = false;
   pendingCenterAfterRefine = false;
   refineRequestedAtMs = 0;
+  multiViewActive = false;
+  multiViewCompleted = false;
+  multiViewStartedAtMs = 0;
   selectedCandidateSlot = -1;
   enrollmentProgress = 0;
   cancelCenterCalibration();
@@ -621,6 +648,15 @@ void processMaixLine(char *line) {
       }
     }
     Serial.printf("[MAIX ENROLL] %s\n", enrollment.c_str());
+  } else if (strncmp(bodyText, "V,", 2) == 0) {
+    const String multiView = String(bodyText + 2);
+    notifyPhone(String("MULTIVIEW,") + multiView);
+    const bool ready = multiView.indexOf(",READY,") >= 0 ||
+                       multiView.endsWith(",READY");
+    if (ready && multiViewActive) {
+      completeMultiViewCapture("MaixCAM ready");
+    }
+    Serial.printf("[MAIX MULTIVIEW] %s\n", multiView.c_str());
   } else if (strncmp(bodyText, "D,", 2) == 0) {
     // Candidate packet: slot, track id, class id, confidence and normalised
     // box.  ESP32 forwards it untouched; the iPhone is the only selector.
@@ -697,6 +733,15 @@ void monitorRefineTimeout() {
   beginCenterCalibration();
 }
 
+void monitorMultiViewTimeout() {
+  if (!sessionArmed || !multiViewActive || multiViewStartedAtMs == 0) return;
+  if (millis() - multiViewStartedAtMs < Config::MULTIVIEW_REPLY_TIMEOUT_MS)
+    return;
+  // Learning extra views improves identity but must never trap the user in
+  // setup if one UART completion packet is lost.
+  completeMultiViewCapture("bounded UART fallback");
+}
+
 bool lockPacketIsConsistent(const TargetPacket &target) {
   // The servo loop runs at 50 Hz and can see one Maix packet several times.
   // Count consistency only once per real vision frame; otherwise one false
@@ -726,8 +771,11 @@ bool lockPacketIsConsistent(const TargetPacket &target) {
   previousLockY = target.y;
   // A high-confidence rocket is allowed to steer on the first independent
   // frame.  Waiting for a second 30-fps frame costs most of its launch travel.
+  const bool confidentReacquisition =
+      lostRecoveryCaptured && target.confidence >= 55;
   const uint8_t packetsRequired =
-      (selectedTrackingMode == "ROCKET" && target.confidence >= 60)
+      ((selectedTrackingMode == "ROCKET" && target.confidence >= 60) ||
+       confidentReacquisition)
           ? 1
           : Config::CONSISTENT_LOCK_PACKETS;
   acceptedVisionLock = consistentLockCount >= packetsRequired;
@@ -813,6 +861,148 @@ void holdServos(float dt) {
   panMoving = tiltMoving = false;
 }
 
+void beginLostRecovery(uint32_t nowMs) {
+  if (lostRecoveryCaptured) return;
+  lostRecoveryCaptured = true;
+  lostStartedAtMs = nowMs;
+  lostOriginPanAngle = panAngle;
+  lostOriginTiltAngle = tiltAngle;
+  // Freeze the last trustworthy direction. It must not be replaced by the
+  // zero/decayed velocity packets emitted while MaixCAM is searching.
+  lostPanVelocity = filteredVX;
+  lostTiltVelocity = filteredVY;
+  if (fabsf(lostPanVelocity) < 18.0f && fabsf(panRate) > 2.0f)
+    lostPanVelocity = panRate / max(0.1f, Config::PAN_GEAR_RATIO);
+  if (fabsf(lostTiltVelocity) < 18.0f && fabsf(tiltRate) > 2.0f)
+    lostTiltVelocity = tiltRate / max(0.1f, Config::TILT_GEAR_RATIO);
+}
+
+void clearLostRecovery() {
+  lostStartedAtMs = 0;
+  lostRecoveryCaptured = false;
+  lostPanVelocity = lostTiltVelocity = 0.0f;
+  searchActive = false;
+}
+
+void runLostRecovery(float dt, uint32_t nowMs) {
+  beginLostRecovery(nowMs);
+  const uint32_t elapsedMs = nowMs - lostStartedAtMs;
+
+  if (elapsedMs < Config::SEARCH_PREDICT_MS) {
+    // Search only along the last measured flight vector. The envelope limits
+    // the motion to a small, safe sweep instead of an unrelated scan pattern.
+    searchActive = true;
+    const float progress = elapsedMs /
+                           static_cast<float>(Config::SEARCH_PREDICT_MS);
+    const float decay = 1.0f - progress * 0.72f;
+    const float panLimit = min(Config::SEARCH_SPEED_LIMIT_DPS *
+                                   Config::PAN_GEAR_RATIO,
+                               Config::MAX_PAN_SPEED_DPS * 0.72f);
+    const float tiltLimit = min(Config::SEARCH_SPEED_LIMIT_DPS *
+                                    Config::TILT_GEAR_RATIO,
+                                Config::MAX_TILT_SPEED_DPS * 0.62f);
+    float desiredPan = clampFloat(
+        Config::PAN_DIRECTION * Config::PAN_GEAR_RATIO *
+            lostPanVelocity * 0.030f * decay,
+        -panLimit, panLimit);
+    float desiredTilt = clampFloat(
+        Config::TILT_DIRECTION * Config::TILT_GEAR_RATIO *
+            lostTiltVelocity * 0.026f * decay,
+        -tiltLimit, tiltLimit);
+
+    if ((panAngle - lostOriginPanAngle >=
+             Config::SEARCH_MAX_PAN_EXCURSION_DEG &&
+         desiredPan > 0.0f) ||
+        (lostOriginPanAngle - panAngle >=
+             Config::SEARCH_MAX_PAN_EXCURSION_DEG &&
+         desiredPan < 0.0f))
+      desiredPan = 0.0f;
+    if ((tiltAngle - lostOriginTiltAngle >=
+             Config::SEARCH_MAX_TILT_EXCURSION_DEG &&
+         desiredTilt > 0.0f) ||
+        (lostOriginTiltAngle - tiltAngle >=
+             Config::SEARCH_MAX_TILT_EXCURSION_DEG &&
+         desiredTilt < 0.0f))
+      desiredTilt = 0.0f;
+
+    panRate = updateJerkLimitedRate(
+        panRate, desiredPan, panAcceleration,
+        Config::MAX_PAN_ACCEL_DPS2 * 0.46f, Config::MAX_DECEL_DPS2,
+        Config::MAX_PAN_JERK_DPS3 * 0.72f, dt);
+    tiltRate = updateJerkLimitedRate(
+        tiltRate, desiredTilt, tiltAcceleration,
+        Config::MAX_TILT_ACCEL_DPS2 * 0.42f, Config::MAX_DECEL_DPS2,
+        Config::MAX_TILT_JERK_DPS3 * 0.66f, dt);
+    panAngle += panRate * dt;
+    tiltAngle += tiltRate * dt;
+    return;
+  }
+
+  const uint32_t returnElapsedMs = elapsedMs - Config::SEARCH_PREDICT_MS;
+  if (returnElapsedMs < Config::SEARCH_RETURN_MS) {
+    // Return to the exact pose where lock was lost. Dividing by the remaining
+    // time gives a bounded one-second return, while the jerk limiter keeps the
+    // geared MG996 motion smooth.
+    searchActive = true;
+    const float remaining = max(
+        0.08f, (Config::SEARCH_RETURN_MS - returnElapsedMs) / 1000.0f);
+    const float desiredPan = clampFloat(
+        (lostOriginPanAngle - panAngle) / remaining,
+        -Config::HOME_SPEED_DPS * 1.8f, Config::HOME_SPEED_DPS * 1.8f);
+    const float desiredTilt = clampFloat(
+        (lostOriginTiltAngle - tiltAngle) / remaining,
+        -Config::HOME_SPEED_DPS * 1.55f, Config::HOME_SPEED_DPS * 1.55f);
+    panRate = updateJerkLimitedRate(
+        panRate, desiredPan, panAcceleration,
+        Config::MAX_PAN_ACCEL_DPS2 * 0.58f, Config::MAX_DECEL_DPS2,
+        Config::MAX_PAN_JERK_DPS3 * 0.72f, dt);
+    tiltRate = updateJerkLimitedRate(
+        tiltRate, desiredTilt, tiltAcceleration,
+        Config::MAX_TILT_ACCEL_DPS2 * 0.52f, Config::MAX_DECEL_DPS2,
+        Config::MAX_TILT_JERK_DPS3 * 0.68f, dt);
+    panAngle += panRate * dt;
+    tiltAngle += tiltRate * dt;
+    return;
+  }
+
+  // One recovery attempt per disappearance. Hold the original pose until a
+  // real target packet returns; do not start a repetitive left/right sweep.
+  panAngle = lostOriginPanAngle;
+  tiltAngle = lostOriginTiltAngle;
+  panRate = tiltRate = 0.0f;
+  panAcceleration = tiltAcceleration = 0.0f;
+  panMoving = tiltMoving = false;
+  searchActive = false;
+}
+
+void completeMultiViewCapture(const char *reason) {
+  if (multiViewCompleted) return;
+  multiViewActive = false;
+  multiViewCompleted = true;
+  multiViewStartedAtMs = 0;
+  enrollmentActive = false;
+  alignmentReady = true;
+  targetIdentityReady = true;
+  notifyPhone(String("MULTIVIEW,100,") + selectedTrackingMode + ",READY," +
+              lockedTargetToken);
+  notifyPhone("MEDIA,RECORD_START");
+  Serial.printf("[MULTIVIEW] complete (%s)\n", reason);
+}
+
+void beginMultiViewCapture() {
+  multiViewActive = true;
+  multiViewStartedAtMs = millis();
+  enrollmentActive = true;
+  alignmentReady = false;
+  panRate = tiltRate = 0.0f;
+  panAcceleration = tiltAcceleration = 0.0f;
+  panMoving = tiltMoving = false;
+  sendMaixCommand("MULTIVIEW");
+  notifyPhone(String("MULTIVIEW,0,") + selectedTrackingMode + ",START," +
+              lockedTargetToken);
+  Serial.println("[MULTIVIEW] Rotate/tilt target for three seconds");
+}
+
 void completeCenterCalibration(float measuredX, float measuredY,
                                const char *reason) {
   targetCenterX = clampFloat(measuredX, 200.0f, 800.0f);
@@ -820,8 +1010,6 @@ void completeCenterCalibration(float measuredX, float measuredY,
   calibrationPreferences.putUShort("centerX", lroundf(targetCenterX));
   calibrationPreferences.putUShort("centerY", lroundf(targetCenterY));
   centerCalibrationActive = false;
-  alignmentReady = true;
-  enrollmentActive = false;
   targetIdentityReady = true;
   filteredX = targetCenterX;
   filteredY = targetCenterY;
@@ -831,9 +1019,17 @@ void completeCenterCalibration(float measuredX, float measuredY,
   lastDynamicsAtMs = 0;
   notifyPhone(String("CALIBRATE,DONE,") + lroundf(targetCenterX) + "," +
               lroundf(targetCenterY));
-  notifyPhone("MEDIA,RECORD_START");
   Serial.printf("[CALIBRATE] center=%.0f,%.0f samples=%u (%s)\n",
                 targetCenterX, targetCenterY, centerCalibrationSamples, reason);
+  if (!multiViewCompleted) {
+    beginMultiViewCapture();
+  } else {
+    // Re-alignment while recording only updates the optical offset. It does
+    // not force the user to repeat multi-view enrollment or restart the movie.
+    enrollmentActive = false;
+    alignmentReady = true;
+    notifyPhone("MEDIA,RECORD_START");
+  }
 }
 
 void updateCenterCalibration(float dt, const TargetPacket &target,
@@ -928,11 +1124,6 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
       freshTarget && target.state == VISION_LOCKED &&
       target.confidence >= Config::MIN_LOCK_CONFIDENCE;
   const bool strongLock = freshTarget && lockPacketIsConsistent(target);
-  const bool weakTrack = age <= Config::COAST_LIMIT_MS &&
-                         target.state == VISION_WEAK &&
-                         target.confidence >= Config::MIN_WEAK_CONFIDENCE &&
-                         filterReady;
-
   if (strongLock) {
     if (target.sequence != lastAppliedTargetSequence) {
       const float rawSpeed = hypotf(target.velocityX, target.velocityY);
@@ -979,8 +1170,7 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
       filterReady = true;
       lastAppliedTargetSequence = target.sequence;
     }
-    lostStartedAtMs = 0;
-    searchActive = false;
+    clearLostRecovery();
     const float sizeGain = adaptiveGainFromSize(target);
     const float screenSpeed = hypotf(filteredVX, filteredVY);
     const bool rocketBoost = selectedTrackingMode == "ROCKET" &&
@@ -1013,8 +1203,9 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
     const float desiredPan = axisDesiredRate(
         predictedX - targetCenterX, filteredVX, Config::PAN_DIRECTION,
         Config::PAN_GEAR_RATIO, panMax,
-        sizeGain, startDeadband, stopDeadband, rocketBoost ? 0.390f : 0.235f,
-        rocketBoost ? 0.068f : 0.034f, rocketBoost ? 9.0f : 0.0f,
+        sizeGain, startDeadband * 0.72f, stopDeadband * 0.78f,
+        rocketBoost ? 0.485f : 0.305f,
+        rocketBoost ? 0.084f : 0.046f, rocketBoost ? 10.0f : 4.0f,
         panMoving);
     const float desiredTilt = axisDesiredRate(
         predictedY - targetCenterY, filteredVY, Config::TILT_DIRECTION,
@@ -1047,93 +1238,16 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
   } else if (targetLooksLocked) {
     // First confirming frame: hold position instead of starting a search.  A
     // second independent frame will promote it to a real lock.
-    searchActive = false;
+    searchActive = lostRecoveryCaptured;
     holdServos(dt);
     return;
-  } else if (weakTrack) {
-    if (lostStartedAtMs == 0) lostStartedAtMs = nowMs;
-    searchActive = true;
-    const float elapsed = (nowMs - lostStartedAtMs) / 1000.0f;
-    const bool rocketSearch = selectedTrackingMode == "ROCKET";
-    if (hypotf(filteredVX, filteredVY) < 28.0f) {
-      searchActive = false;
-      holdServos(dt);
-      return;
-    }
-    const float predictionLimit = rocketSearch ? 0.62f : 0.42f;
-    const float outputSearchSpeed =
-        rocketSearch ? 125.0f : Config::SEARCH_SPEED_LIMIT_DPS;
-    const float panSearchSpeed = min(
-        outputSearchSpeed * Config::PAN_GEAR_RATIO,
-        rocketSearch ? Config::ROCKET_BOOST_PAN_SPEED_DPS
-                     : Config::MAX_PAN_SPEED_DPS);
-    const float tiltSearchSpeed = min(
-        outputSearchSpeed * Config::TILT_GEAR_RATIO,
-        rocketSearch ? Config::ROCKET_BOOST_TILT_SPEED_DPS
-                     : Config::MAX_TILT_SPEED_DPS);
-    const float coastTime = min(elapsed, predictionLimit);
-    const float predictedX = filteredX + filteredVX * coastTime +
-                             0.5f * filteredAX * coastTime * coastTime;
-    const float predictedY = filteredY + filteredVY * coastTime +
-                             0.5f * filteredAY * coastTime * coastTime;
-    const float desiredPan = clampFloat(
-        Config::PAN_DIRECTION * Config::PAN_GEAR_RATIO *
-            ((predictedX - targetCenterX) * (rocketSearch ? 0.205f : 0.115f) +
-             filteredVX * (rocketSearch ? 0.034f : 0.018f)),
-        -panSearchSpeed, panSearchSpeed);
-    const float desiredTilt = clampFloat(
-        Config::TILT_DIRECTION * Config::TILT_GEAR_RATIO *
-            ((predictedY - targetCenterY) * (rocketSearch ? 0.220f : 0.105f) +
-             filteredVY * (rocketSearch ? 0.038f : 0.016f)),
-        -tiltSearchSpeed, tiltSearchSpeed);
-    panRate = updateJerkLimitedRate(
-        panRate, desiredPan, panAcceleration,
-        rocketSearch ? Config::ROCKET_BOOST_PAN_ACCEL_DPS2 * 0.65f
-                     : Config::MAX_PAN_ACCEL_DPS2 * 0.55f,
-        Config::MAX_DECEL_DPS2,
-        rocketSearch ? Config::ROCKET_BOOST_PAN_JERK_DPS3
-                     : Config::MAX_PAN_JERK_DPS3,
-        dt);
-    tiltRate = updateJerkLimitedRate(
-        tiltRate, desiredTilt, tiltAcceleration,
-        rocketSearch ? Config::ROCKET_BOOST_TILT_ACCEL_DPS2 * 0.65f
-                     : Config::MAX_TILT_ACCEL_DPS2 * 0.55f,
-        Config::MAX_DECEL_DPS2,
-        rocketSearch ? Config::ROCKET_BOOST_TILT_JERK_DPS3
-                     : Config::MAX_TILT_JERK_DPS3,
-        dt);
   } else {
-    if (lostStartedAtMs == 0) lostStartedAtMs = nowMs;
-    if (nowMs - lostStartedAtMs > Config::SEARCH_LIMIT_MS) {
-      searchActive = false;
+    if (!filterReady) {
       holdServos(dt);
       return;
     }
-    searchActive = filterReady;
-    if (filterReady && hypotf(filteredVX, filteredVY) >= 30.0f) {
-      const float panSearchSpeed = min(
-          Config::SEARCH_SPEED_LIMIT_DPS * Config::PAN_GEAR_RATIO,
-          Config::MAX_PAN_SPEED_DPS);
-      const float tiltSearchSpeed = min(
-          Config::SEARCH_SPEED_LIMIT_DPS * Config::TILT_GEAR_RATIO,
-          Config::MAX_TILT_SPEED_DPS);
-      const float coastPan = clampFloat(
-          Config::PAN_DIRECTION * Config::PAN_GEAR_RATIO * filteredVX * 0.018f,
-          -panSearchSpeed, panSearchSpeed);
-      const float coastTilt = clampFloat(
-          Config::TILT_DIRECTION * Config::TILT_GEAR_RATIO * filteredVY * 0.016f,
-          -tiltSearchSpeed, tiltSearchSpeed);
-      panRate = updateJerkLimitedRate(
-          panRate, coastPan, panAcceleration, Config::MAX_PAN_ACCEL_DPS2 * 0.4f,
-          Config::MAX_DECEL_DPS2, Config::MAX_PAN_JERK_DPS3, dt);
-      tiltRate = updateJerkLimitedRate(
-          tiltRate, coastTilt, tiltAcceleration,
-          Config::MAX_TILT_ACCEL_DPS2 * 0.4f, Config::MAX_DECEL_DPS2,
-          Config::MAX_TILT_JERK_DPS3, dt);
-    } else {
-      holdServos(dt);
-      return;
-    }
+    runLostRecovery(dt, nowMs);
+    return;
   }
 
   panAngle += panRate * dt;
@@ -1341,7 +1455,7 @@ void handlePhoneCommand(String command) {
       beginCenterCalibration();
     }
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,3.10.0");
+    notifyPhone("ESP32,SE_GIMBAL,3.11.0");
     notifyPhone("RIG,GEARED,3.20,1.60,90,120,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
@@ -1385,7 +1499,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.10.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.11.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -1400,7 +1514,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v3.10.0 (geared 3.20/1.60)");
+  Serial.println("\nSE AI Tracker ESP32 v3.11.0 (geared 3.20/1.60)");
   Serial.println(
       "USB bench: a=ARM, 1..9=SELECT, c=REFINE/CENTER, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
@@ -1435,6 +1549,7 @@ void loop() {
   readMaixUart();
   monitorMaixLink();
   monitorRefineTimeout();
+  monitorMultiViewTimeout();
   runServoController();
   updateStatusLed();
   updateCharging();

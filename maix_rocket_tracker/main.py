@@ -12,7 +12,7 @@ import os
 import gc
 
 
-APP_VERSION = "1.20.2"
+APP_VERSION = "1.21.0"
 MOUNT_PROFILE = "MAIX_TILT_TOP"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
@@ -31,11 +31,12 @@ UART_RX_FUNCTION = "UART0_RX"
 DETECT_CONFIDENCE = 0.16
 DETECT_IOU = 0.42
 ACQUIRE_SCORE_MIN = 0.29
-REACQUIRE_SCORE_MIN = 0.22
+REACQUIRE_SCORE_MIN = 0.20
 ASSOCIATE_SCORE_MIN = 0.27
+FAST_REACQUIRE_SCORE = 0.56
 LOCK_CONFIRM_FRAMES = 2
 LOST_AFTER_FRAMES = 4
-DROP_AFTER_FRAMES = 22
+REACQUIRE_MEMORY_MS = 3400
 MAX_PREDICT_SECONDS = 0.50
 PREVIEW_INTERVAL_MS = 40
 TARGET_REPORT_INTERVAL_MS = 25
@@ -49,8 +50,11 @@ MAX_SELECTION_CANDIDATES = 12
 # this MaixCAM firmware, so reliability is handled by ESP32 command retries.
 CANDIDATE_REPORT_INTERVAL_MS = 650
 CHOOSE_REPORT_INTERVAL_MS = 650
-REFINE_DURATION_MS = 1100
+REFINE_DURATION_MS = 3000
 REFINE_MIN_VISIBLE_RATIO = 0.0
+MULTIVIEW_DURATION_MS = 3000
+MULTIVIEW_REPORT_INTERVAL_MS = 80
+MULTIVIEW_DIVERSITY_MIN = 0.030
 NANO_MIN_SCORE = 0.46
 NANO_STRONG_SCORE = 0.68
 NANO_REINIT_FRAMES = 24
@@ -58,7 +62,7 @@ YOLO_ROCKET_INTERVAL = 6
 YOLO_GENERAL_INTERVAL = 8
 NANO_MAX_CENTRE_JUMP_RATIO = 0.34
 NANO_MIN_BOX_SIDE = 4
-APPEARANCE_TEMPLATE_LIMIT = 4
+APPEARANCE_TEMPLATE_LIMIT = 8
 APPEARANCE_DIVERSITY_MIN = 0.055
 CUSTOM_ROCKET_CLASS_ID = 1000
 
@@ -252,8 +256,11 @@ class AlphaBetaBox:
         if predicted is None:
             return
         self.cx, self.cy, self.w, self.h = predicted
-        self.vx *= 0.90
-        self.vy *= 0.90
+        # Keep the last flight vector alive for ESP32's two-second predictive
+        # search. The previous 0.90/frame decay erased the direction in only a
+        # few hundred milliseconds and made the gimbal stop too early.
+        self.vx *= 0.975
+        self.vy *= 0.975
         self.ax *= 0.72
         self.ay *= 0.72
         self.last_ms = now_ms
@@ -289,6 +296,7 @@ class RocketTracker:
         self.has_ever_locked = False
         self.confirm_count = 0
         self.missing_frames = 0
+        self.lost_started_ms = 0
         self.last_box = None
         self.last_confidence = 0.0
         self.rx_buffer = ""
@@ -330,6 +338,10 @@ class RocketTracker:
         self.refine_signature_count = 0
         self.refine_signatures = []
         self.refine_manual = False
+        self.multiview_active = False
+        self.multiview_started_ms = 0
+        self.multiview_last_report_ms = 0
+        self.multiview_signatures = []
         self.selected_candidate_slot = -1
         self.selected_waiting_center = False
         self.identity_is_manual = False
@@ -555,6 +567,11 @@ class RocketTracker:
                     ))
                 else:
                     self._write("A,{0},REFINE_ERROR".format(parts[1]))
+            elif command == "MULTIVIEW":
+                if self._begin_multiview(time.ticks_ms()):
+                    self._write("A,{0},MULTIVIEW".format(parts[1]))
+                else:
+                    self._write("A,{0},MULTIVIEW_ERROR".format(parts[1]))
             elif command == "PING":
                 print("UART command: PING", flush=True)
                 self._write("A,{0},PONG,{1},{2},{3}".format(
@@ -572,6 +589,7 @@ class RocketTracker:
         self.has_ever_locked = False
         self.confirm_count = 0
         self.missing_frames = 0
+        self.lost_started_ms = 0
         self.last_box = None
         self.last_confidence = 0.0
         self.filter.reset()
@@ -597,6 +615,10 @@ class RocketTracker:
         self.refine_signature_count = 0
         self.refine_signatures = []
         self.refine_manual = False
+        self.multiview_active = False
+        self.multiview_started_ms = 0
+        self.multiview_last_report_ms = 0
+        self.multiview_signatures = []
         self.selected_candidate_slot = -1
         self.selected_waiting_center = False
         self.identity_is_manual = False
@@ -622,6 +644,10 @@ class RocketTracker:
         self.candidate_report_index = 0
         self.refining = False
         self.refine_manual = False
+        self.multiview_active = False
+        self.multiview_started_ms = 0
+        self.multiview_last_report_ms = 0
+        self.multiview_signatures = []
         self.selected_candidate_slot = -1
         self.selected_waiting_center = False
         self.identity_is_manual = False
@@ -642,6 +668,10 @@ class RocketTracker:
         self.choose_last_report_ms = 0
         self.refining = False
         self.refine_manual = False
+        self.multiview_active = False
+        self.multiview_started_ms = 0
+        self.multiview_last_report_ms = 0
+        self.multiview_signatures = []
         self.selected_candidate_slot = -1
         self.selected_waiting_center = False
         self.identity_is_manual = False
@@ -902,6 +932,7 @@ class RocketTracker:
         self.last_box = box
         self.last_confidence = confidence
         self.missing_frames = 0
+        self.lost_started_ms = 0
         self.confirm_count = LOCK_CONFIRM_FRAMES
         self.has_ever_locked = True
         self.tracking_source = "NANO"
@@ -1553,20 +1584,109 @@ class RocketTracker:
             self.active_mode, self.target_id, visible_ratio * 100.0
         ), flush=True)
 
+    def _begin_multiview(self, now_ms):
+        if self.enabled and self.multiview_active:
+            return True
+        if not self.enabled or self.last_box is None:
+            return False
+        self.multiview_active = True
+        self.multiview_started_ms = now_ms
+        self.multiview_last_report_ms = 0
+        self.multiview_signatures = []
+        self._write("V,0,{0},CAPTURE,{1}".format(
+            self.active_mode, self.locked_label
+        ))
+        print("Multi-view learning started: rotate/tilt selected subject",
+              flush=True)
+        return True
+
+    def _update_multiview(self, frame, now_ms):
+        """Learn several views for three seconds without recording a movie."""
+        nano_result = self._track_with_nano(frame, now_ms)
+        selected = None
+        yolo_due = (nano_result is None or self.state != STATE_LOCKED or
+                    self.frame_index - self.last_yolo_frame >= 5)
+        if yolo_due:
+            bottle_identity = (self.active_mode == "ROCKET" and
+                               self.enrollment_class_id == 39)
+            objects = self._detect_objects(
+                frame,
+                include_bottle=bottle_identity,
+                bottle_only=bottle_identity,
+            )
+            self.last_yolo_frame = self.frame_index
+            tracks = self._detections_to_tracks(objects)
+            selected = self._select_target(tracks, now_ms, frame)
+
+        if selected is not None:
+            self._update_target(selected, now_ms)
+            self.tracking_source = "YOLO"
+            if self.state == STATE_LOCKED:
+                self.last_yolo_lock_frame = self.frame_index
+                if nano_result is None or not self.nano_active:
+                    self._start_nano_tracker(frame, selected[1])
+        elif not self._update_from_nano(nano_result, now_ms):
+            self._update_target(None, now_ms)
+
+        if (self.last_box is not None and
+                self.state in (STATE_LOCKED, STATE_WEAK) and
+                self.frame_index % 2 == 0):
+            signature = self._appearance_signature(frame, self.last_box)
+            if signature is not None:
+                all_templates = self.appearance_templates + self.multiview_signatures
+                if (not all_templates or
+                        min(self._signature_distance(signature, saved)
+                            for saved in all_templates) >=
+                        MULTIVIEW_DIVERSITY_MIN):
+                    self.multiview_signatures.append(list(signature))
+
+        elapsed = ticks_delta(now_ms, self.multiview_started_ms)
+        progress = int(clamp(
+            elapsed * 100.0 / MULTIVIEW_DURATION_MS, 0, 100
+        ))
+        if (self.multiview_last_report_ms == 0 or
+                ticks_delta(now_ms, self.multiview_last_report_ms) >=
+                MULTIVIEW_REPORT_INTERVAL_MS):
+            self._write("V,{0},{1},CAPTURE,{2}".format(
+                progress, self.active_mode, self.locked_label
+            ))
+            self.multiview_last_report_ms = now_ms
+        if elapsed < MULTIVIEW_DURATION_MS:
+            return
+
+        if not self.appearance_templates and self.appearance_template is not None:
+            self.appearance_templates = [list(self.appearance_template)]
+        for signature in self.multiview_signatures:
+            if len(self.appearance_templates) >= APPEARANCE_TEMPLATE_LIMIT:
+                break
+            self.appearance_templates.append(signature)
+        if self.appearance_templates:
+            self.appearance_template = list(self.appearance_templates[0])
+        self.multiview_active = False
+        self._write("V,100,{0},READY,{1}".format(
+            self.active_mode, self.locked_label
+        ))
+        print("Multi-view learning complete: {0} identity views".format(
+            len(self.appearance_templates)
+        ), flush=True)
+
     def _update_target(self, selected, now_ms):
         if selected is None:
             self.missing_frames += 1
             self.confirm_count = 0
             self.pending_target_id = -1
             self.pending_target_frames = 0
-            if self.filter.valid and self.missing_frames <= DROP_AFTER_FRAMES:
+            if self.lost_started_ms == 0:
+                self.lost_started_ms = now_ms
+            memory_elapsed = ticks_delta(now_ms, self.lost_started_ms)
+            if self.filter.valid and memory_elapsed <= REACQUIRE_MEMORY_MS:
                 self.filter.coast(now_ms)
                 self.state = STATE_WEAK if self.missing_frames < LOST_AFTER_FRAMES else STATE_LOST
             else:
                 self.state = STATE_ACQUIRE
                 self.target_id = -1
-                self.last_box = None
                 self.filter.reset()
+                self.nano_active = False
             self.last_confidence *= 0.83
             return
 
@@ -1585,7 +1705,11 @@ class RocketTracker:
             self.last_box = box
             self.last_confidence = confidence
             self.missing_frames = 0
-            if self.pending_target_frames >= LOCK_CONFIRM_FRAMES:
+            self.lost_started_ms = 0
+            required_frames = (1 if self.has_ever_locked and
+                               association_score >= FAST_REACQUIRE_SCORE
+                               else LOCK_CONFIRM_FRAMES)
+            if self.pending_target_frames >= required_frames:
                 self.target_id = track_item.id
                 self.pending_target_id = -1
                 self.pending_target_frames = 0
@@ -1605,7 +1729,10 @@ class RocketTracker:
             else:
                 self.pending_target_id = track_item.id
                 self.pending_target_frames = 1
-            if self.pending_target_frames < LOCK_CONFIRM_FRAMES:
+            required_frames = (1 if self.has_ever_locked and
+                               association_score >= FAST_REACQUIRE_SCORE
+                               else LOCK_CONFIRM_FRAMES)
+            if self.pending_target_frames < required_frames:
                 self.missing_frames += 1
                 self.filter.coast(now_ms)
                 self.last_confidence *= 0.90
@@ -1621,6 +1748,7 @@ class RocketTracker:
         self.last_box = box
         self.last_confidence = confidence
         self.missing_frames = 0
+        self.lost_started_ms = 0
         self.pending_target_id = -1
         self.pending_target_frames = 0
         self.has_ever_locked = True
@@ -1638,7 +1766,8 @@ class RocketTracker:
         # selection or refinement; on MaixCAM's UART driver those writes can
         # starve the receive side that carries SELECT/REFINE/STOP.
         if (self.enabled and (self.enrolling or self.awaiting_selection or
-                             self.selected_waiting_center or self.refining)):
+                             self.selected_waiting_center or self.refining or
+                             self.multiview_active)):
             return
         self.sequence = (self.sequence + 1) & 0xFFFF
         if not self.enabled or not self.filter.valid:
@@ -1693,6 +1822,10 @@ class RocketTracker:
             self._update_refinement(tracks, frame, now_ms)
             return
 
+        if self.multiview_active:
+            self._update_multiview(frame, now_ms)
+            return
+
         nano_result = self._track_with_nano(frame, now_ms)
         yolo_interval = (YOLO_ROCKET_INTERVAL if self.active_mode == "ROCKET"
                          else YOLO_GENERAL_INTERVAL)
@@ -1712,10 +1845,13 @@ class RocketTracker:
             selected = self._select_target(tracks, now_ms, frame)
 
         if (selected is not None and nano_result is not None and
+                self.state == STATE_LOCKED and
+                nano_result[1] >= NANO_STRONG_SCORE and
                 not self._boxes_compatible(nano_result[0], selected[1])):
             # Never jump from a healthy single-object track to an unrelated
-            # YOLO detection in one frame.  Let the old trajectory coast while
-            # semantic confirmation catches up.
+            # YOLO detection in one frame. Once lock is weak/lost, however,
+            # appearance-verified YOLO must be allowed to take over immediately
+            # or a stale NanoTrack box can block reacquisition indefinitely.
             selected = None
 
         if selected is not None:
@@ -1766,6 +1902,7 @@ class RocketTracker:
             self.locked_label,
             ("3S" if self.enrolling else "CHOOSE" if self.awaiting_selection
              else "REFINE" if self.refining
+             else "VIEWS" if self.multiview_active
              else "LOCK" if self.state == STATE_LOCKED else "FIND"),
             self.tracking_source,
             int(self.last_confidence * 100),

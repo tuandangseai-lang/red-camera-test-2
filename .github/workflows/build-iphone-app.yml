@@ -1,4 +1,4 @@
-name: Tao IPA SE v7.9 build72 - quet va tinh chinh khong treo
+name: Tao IPA SE v8.0 build73 - bat lai nhanh va can tam nhieu lan
 
 on:
   workflow_dispatch:
@@ -103,18 +103,18 @@ jobs:
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "7.9"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "72"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "8.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "73"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v7.9-build72-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v8.0-build73-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v7.9-build72-unsigned-ipa
-          path: SE-v7.9-build72-unsigned.ipa
+          name: SE-v8.0-build73-unsigned-ipa
+          path: SE-v8.0-build73-unsigned.ipa
           if-no-files-found: error
           retention-days: 7

@@ -46,6 +46,7 @@ enum GimbalTrackingState: String {
     case acquire
     case choose
     case refine
+    case multiView
     case lock
     case search
     case home
@@ -58,6 +59,7 @@ enum GimbalTrackingState: String {
         case .acquire: return "Đang tìm"
         case .choose: return "Chạm chọn đúng mục tiêu"
         case .refine: return "Đang ghi nhớ mục tiêu"
+        case .multiView: return "Đang học vật đa góc"
         case .lock: return "Đã khóa mục tiêu"
         case .search: return "Đang bắt lại"
         case .home: return "Đang về Home"
@@ -88,6 +90,9 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var isEnrolling = false
     @Published private(set) var isChoosingTarget = false
     @Published private(set) var isRefining = false
+    @Published private(set) var isMultiViewCapturing = false
+    @Published private(set) var multiViewProgress = 0.0
+    @Published private(set) var multiViewStatus = "Xoay và nghiêng vật chậm trong 3 giây"
     @Published private(set) var candidates: [SelectionCandidate] = []
     @Published private(set) var expectedCandidateCount = 0
     @Published private(set) var selectedCandidateID: Int?
@@ -119,11 +124,13 @@ final class BLEManager: NSObject, ObservableObject {
     private var awaitingSelectionAcknowledgement = false
     private var savedMaixCenterX = 0.5
     private var savedMaixCenterY = 0.5
+    private var calibrationWasRecording = false
 
     var trackingTitle: String {
         switch trackingState {
         case .choose: return "Chạm chọn một vật MaixCAM đã phát hiện"
         case .refine: return "Đang tinh chỉnh: \(lockedTargetName)"
+        case .multiView: return "Đang học đa góc: \(lockedTargetName)"
         case .lock:
             return needsCenterCalibration
                 ? "Đã chọn \(lockedTargetName) • tự đặt tại dấu + rồi bấm Căn tâm"
@@ -134,8 +141,12 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     var canCalibrateCenter: Bool {
-        isConnected && hasSelectedCandidate && needsCenterCalibration &&
-            !isConfirmingCandidate && !isRefining && !isCalibrating
+        // Centre alignment is intentionally repeatable. The physical relation
+        // between the iPhone and MaixCAM may be adjusted after recording has
+        // started, so the button must remain available for the whole session.
+        isConnected && isSessionActive && hasSelectedCandidate &&
+            !isConfirmingCandidate && !isRefining && !isCalibrating &&
+            !isMultiViewCapturing
     }
 
     var isCandidateListReady: Bool {
@@ -153,6 +164,7 @@ final class BLEManager: NSObject, ObservableObject {
         cancelCalibrationUI()
         shouldRecordVideo = false
         needsCenterCalibration = false
+        calibrationWasRecording = false
         beginEnrollmentUI()
         isSessionActive = true
         send("ARM")
@@ -167,6 +179,7 @@ final class BLEManager: NSObject, ObservableObject {
         shouldRecordVideo = false
         trackingState = .idle
         needsCenterCalibration = false
+        calibrationWasRecording = false
     }
 
     func home() {
@@ -177,6 +190,7 @@ final class BLEManager: NSObject, ObservableObject {
         shouldRecordVideo = false
         trackingState = .home
         needsCenterCalibration = false
+        calibrationWasRecording = false
     }
 
     func calibrateCenter() {
@@ -187,11 +201,13 @@ final class BLEManager: NSObject, ObservableObject {
                 : "Hãy quét 3 giây và chạm chọn chủ thể trước"
             return
         }
-        isRefining = true
-        isEnrolling = true
-        enrollmentProgress = 0
-        enrollmentStatus = "Đang tinh chỉnh đúng vật tại dấu +"
-        trackingState = .refine
+        calibrationWasRecording = shouldRecordVideo
+        isRefining = false
+        isEnrolling = false
+        isCalibrating = true
+        calibrationProgress = 0
+        calibrationStatus = "Đang chuẩn bị căn lại tâm iPhone và MaixCAM"
+        trackingState = .calibrate
         send("CALIBRATE_CENTER")
     }
 
@@ -288,6 +304,8 @@ final class BLEManager: NSObject, ObservableObject {
         hasSelectedCandidate = false
         isEnrolling = true
         isRefining = false
+        isMultiViewCapturing = false
+        multiViewProgress = 0
         enrollmentProgress = 0
         enrollmentStatus = "Giữ \(selectedMode.title.lowercased()) trước MaixCAM"
 
@@ -332,6 +350,8 @@ final class BLEManager: NSObject, ObservableObject {
         hasSelectedCandidate = false
         isEnrolling = false
         isRefining = false
+        isMultiViewCapturing = false
+        multiViewProgress = 0
         enrollmentProgress = 0
         enrollmentStatus = "Giữ chủ thể trước MaixCAM"
     }
@@ -520,12 +540,16 @@ final class BLEManager: NSObject, ObservableObject {
             guard calibrationEvent == "SAVED" || isSessionActive else { return }
             switch calibrationEvent {
             case "PREPARE":
+                isRefining = false
+                isEnrolling = false
                 isCalibrating = true
                 let prepare = fields.count >= 3 ? (Double(fields[2]) ?? 0) / 100 : 0
                 calibrationProgress = min(0.30, max(0, prepare * 0.30))
                 calibrationStatus = "Đặt \(lockedTargetName.lowercased()) vào dấu + • cách ≥20 cm"
                 trackingState = .calibrate
             case "START":
+                isRefining = false
+                isEnrolling = false
                 isCalibrating = true
                 calibrationProgress = 0
                 calibrationStatus = "Giữ \(lockedTargetName.lowercased()) đúng dấu +"
@@ -547,20 +571,29 @@ final class BLEManager: NSObject, ObservableObject {
                 calibrationProgress = 1
                 calibrationStatus = "Đã căn tâm hai camera"
                 needsCenterCalibration = false
+                isRefining = false
+                isEnrolling = false
                 trackingState = .lock
-                shouldRecordVideo = true
+                // The first alignment is followed by a separate three-second
+                // multi-view learning phase. Only a repeated alignment during
+                // an existing movie resumes recording immediately.
+                shouldRecordVideo = calibrationWasRecording
+                calibrationWasRecording = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
                     self?.isCalibrating = false
                 }
             case "FAILED":
-                shouldRecordVideo = false
+                shouldRecordVideo = calibrationWasRecording
                 isCalibrating = false
+                isRefining = false
+                isEnrolling = false
                 calibrationProgress = 0
                 calibrationStatus = fields.count >= 3 && fields[2] == "LOCK_FIRST"
                     ? "Hãy khóa chủ thể rồi căn tâm lại"
                     : "Không thấy chủ thể ổn định, hãy thử lại"
-                trackingState = .acquire
-                needsCenterCalibration = true
+                trackingState = calibrationWasRecording ? .search : .acquire
+                needsCenterCalibration = !calibrationWasRecording
+                calibrationWasRecording = false
             case "REQUIRED":
                 isCalibrating = false
                 calibrationProgress = 0
@@ -572,6 +605,29 @@ final class BLEManager: NSObject, ObservableObject {
                     savedMaixCenterX = min(0.8, max(0.2, (Double(fields[2]) ?? 500) / 1000))
                     savedMaixCenterY = min(0.8, max(0.2, (Double(fields[3]) ?? 500) / 1000))
                 }
+            default:
+                break
+            }
+        } else if head == "MULTIVIEW", fields.count >= 4 {
+            guard isSessionActive else { return }
+            let progress = min(100, max(0, Double(fields[1]) ?? 0)) / 100
+            let status = fields[3].uppercased()
+            multiViewProgress = progress
+            switch status {
+            case "START", "CAPTURE":
+                isCalibrating = false
+                isRefining = false
+                isEnrolling = false
+                isMultiViewCapturing = true
+                shouldRecordVideo = false
+                trackingState = .multiView
+                multiViewStatus = "Xoay, nghiêng \(lockedTargetName.lowercased()) để học nhiều góc"
+            case "READY":
+                isMultiViewCapturing = false
+                multiViewProgress = 1
+                multiViewStatus = "Đã học thêm nhiều góc của \(lockedTargetName.lowercased())"
+                trackingState = .lock
+                shouldRecordVideo = true
             default:
                 break
             }

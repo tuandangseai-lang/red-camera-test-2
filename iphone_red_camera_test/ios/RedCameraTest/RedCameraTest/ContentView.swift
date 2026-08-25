@@ -6,6 +6,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var enrollmentPhaseStartedAt = Date()
     @State private var calibrationPhaseStartedAt = Date()
+    @State private var multiViewPhaseStartedAt = Date()
 
     var body: some View {
         GeometryReader { geometry in
@@ -28,6 +29,9 @@ struct ContentView: View {
                 }
                 if bluetooth.isCalibrating {
                     calibrationOverlay
+                }
+                if bluetooth.isMultiViewCapturing {
+                    multiViewOverlay
                 }
                 if bluetooth.isChoosingTarget {
                     candidateSelectionOverlay(in: geometry.size)
@@ -64,6 +68,9 @@ struct ContentView: View {
         .onChange(of: bluetooth.isCalibrating) { _, active in
             if active { calibrationPhaseStartedAt = Date() }
         }
+        .onChange(of: bluetooth.isMultiViewCapturing) { _, active in
+            if active { multiViewPhaseStartedAt = Date() }
+        }
         .onChange(of: bluetooth.shouldRecordVideo) { _, shouldRecord in
             if shouldRecord {
                 camera.startRecording()
@@ -75,7 +82,7 @@ struct ContentView: View {
 
     private var enrollmentOverlay: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { timeline in
-            let duration = bluetooth.isRefining ? 2.0 : 3.0
+            let duration = 3.0
             let elapsed = max(0, timeline.date.timeIntervalSince(enrollmentPhaseStartedAt))
             // The local clock keeps the ring moving even if one BLE progress
             // packet is delayed.  Stop at 98% until MaixCAM confirms completion.
@@ -90,6 +97,59 @@ struct ContentView: View {
                 remaining: remaining,
                 activeColor: activeColor
             )
+        }
+    }
+
+    private var multiViewOverlay: some View {
+        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { timeline in
+            let duration = 3.0
+            let elapsed = max(0, timeline.date.timeIntervalSince(multiViewPhaseStartedAt))
+            // BLE/UART packets may arrive in small bursts. The local clock keeps
+            // the ring visually fluid while MaixCAM remains the completion source.
+            let localProgress = min(0.98, elapsed / duration * 0.98)
+            let smoothProgress = min(1, max(bluetooth.multiViewProgress, localProgress))
+            let complete = bluetooth.multiViewProgress >= 0.999
+            let remaining = max(1, Int(ceil((1 - smoothProgress) * duration)))
+
+            ZStack {
+                Circle()
+                    .fill(.black.opacity(0.58))
+                    .frame(width: 184, height: 184)
+                    .shadow(color: .black.opacity(0.45), radius: 18)
+
+                Circle()
+                    .stroke(.white.opacity(0.20), lineWidth: 8)
+                    .frame(width: 160, height: 160)
+
+                Circle()
+                    .trim(from: 0, to: max(0.012, smoothProgress))
+                    .stroke(
+                        complete ? Color.green : Color.purple,
+                        style: StrokeStyle(lineWidth: 8, lineCap: .round)
+                    )
+                    .frame(width: 160, height: 160)
+                    .rotationEffect(.degrees(-90))
+                    .shadow(color: (complete ? Color.green : Color.purple).opacity(0.56), radius: 7)
+
+                VStack(spacing: 6) {
+                    Image(systemName: complete ? "checkmark" : "move.3d")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(complete ? .green : .white)
+                    Text(complete ? "XONG" : "\(remaining)")
+                        .font(.custom("Arial", size: 30).monospacedDigit().weight(.bold))
+                    Text(complete ? "Đã học thêm đa góc" : "Xoay/nghiêng vật chậm")
+                        .font(.custom("Arial", size: 12).weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.84))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .frame(width: 136)
+                }
+            }
+            .transition(.scale(scale: 0.88).combined(with: .opacity))
+            .animation(.spring(response: 0.30, dampingFraction: 0.84), value: complete)
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(bluetooth.multiViewStatus)
         }
     }
 
@@ -381,6 +441,9 @@ struct ContentView: View {
         if bluetooth.isCalibrating || bluetooth.isRefining {
             return "Đang căn tâm • chưa lưu video"
         }
+        if bluetooth.isMultiViewCapturing {
+            return "Xoay/nghiêng vật 3 giây • chưa lưu video"
+        }
         if bluetooth.needsCenterCalibration {
             return "Đưa vật vào dấu + rồi bấm Căn tâm • chưa lưu video"
         }
@@ -596,6 +659,7 @@ struct ContentView: View {
         case .search, .acquire: return .yellow
         case .choose: return .cyan
         case .refine: return .mint
+        case .multiView: return .purple
         case .home: return .blue
         case .calibrate: return .cyan
         case .disconnected: return .orange
@@ -610,6 +674,7 @@ struct ContentView: View {
         case .acquire: return "dot.scope"
         case .choose: return "hand.tap.fill"
         case .refine: return "viewfinder.circle"
+        case .multiView: return "move.3d"
         case .home: return "house.fill"
         case .calibrate: return "scope"
         case .disconnected: return "antenna.radiowaves.left.and.right.slash"
