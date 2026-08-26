@@ -137,7 +137,7 @@ struct ContentView: View {
                         .frame(width: 46, height: 46)
                     Image(systemName: profile?.mode.icon ?? "plus")
                         .font(.system(size: 19, weight: .bold))
-                        .foregroundStyle(profile == nil ? .secondary : .orange)
+                        .foregroundStyle(profile == nil ? Color.gray : Color.orange)
                 }
                 VStack(alignment: .leading, spacing: 3) {
                     Text(profile?.name ?? "Ô mẫu \(slot)")
