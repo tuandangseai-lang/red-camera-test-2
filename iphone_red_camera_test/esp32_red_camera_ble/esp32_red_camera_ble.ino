@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.11.0 - predictive reacquisition + repeatable alignment
+// SE Rocket Tracker v3.12.0 - persistent identities + lower-latency control
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -54,7 +54,7 @@ constexpr uint8_t MAIX_MIN_PINGS_BEFORE_FAULT = 8;
 constexpr uint32_t REFINE_REPLY_TIMEOUT_MS = 3800;
 constexpr uint32_t MULTIVIEW_REPLY_TIMEOUT_MS = 4300;
 constexpr uint32_t CONTROL_PERIOD_US = 20000;  // MG996R: 50 Hz
-constexpr uint32_t TARGET_STALE_MS = 180;
+constexpr uint32_t TARGET_STALE_MS = 140;
 constexpr uint32_t SEARCH_PREDICT_MS = 2000;
 constexpr uint32_t SEARCH_RETURN_MS = 1000;
 constexpr float SEARCH_MAX_PAN_EXCURSION_DEG = 28.0f;
@@ -96,7 +96,9 @@ constexpr int CENTER_CALIBRATION_MIN_CONFIDENCE = 30;
 constexpr float CENTER_CALIBRATION_MAX_SPEED = 250.0f;
 
 constexpr int MIN_LOCK_CONFIDENCE = 38;
-constexpr uint8_t CONSISTENT_LOCK_PACKETS = 2;
+// MaixCAM already validates the selected identity. Requiring a second packet
+// added a full inference frame of latency before either servo could react.
+constexpr uint8_t CONSISTENT_LOCK_PACKETS = 1;
 constexpr int MAX_LOCK_JUMP = 260;
 
 constexpr char DEVICE_NAME[] = "RocketTracker-Test";
@@ -163,6 +165,8 @@ bool multiViewActive = false;
 bool multiViewCompleted = false;
 uint32_t multiViewStartedAtMs = 0;
 int selectedCandidateSlot = -1;
+bool profileReuseSession = false;
+int activeProfileSlot = 0;
 String lockedTargetToken = "WATER_ROCKET";
 
 float panAngle = Config::PAN_HOME_DEG;
@@ -421,6 +425,8 @@ void armSession() {
   multiViewCompleted = false;
   multiViewStartedAtMs = 0;
   selectedCandidateSlot = -1;
+  profileReuseSession = false;
+  activeProfileSlot = 0;
   enrollmentProgress = 0;
   armStartedAtMs = millis();
   lastMaixPingAtMs = 0;
@@ -463,6 +469,8 @@ void selectTrackingMode(String mode) {
   multiViewCompleted = false;
   multiViewStartedAtMs = 0;
   selectedCandidateSlot = -1;
+  profileReuseSession = false;
+  activeProfileSlot = 0;
   enrollmentProgress = 0;
   cancelCenterCalibration();
   resetTrackingFilter();
@@ -485,6 +493,8 @@ void stopSession() {
   multiViewCompleted = false;
   multiViewStartedAtMs = 0;
   selectedCandidateSlot = -1;
+  profileReuseSession = false;
+  activeProfileSlot = 0;
   enrollmentProgress = 0;
   cancelCenterCalibration();
   resetTrackingFilter();
@@ -512,6 +522,8 @@ void requestHome() {
   multiViewCompleted = false;
   multiViewStartedAtMs = 0;
   selectedCandidateSlot = -1;
+  profileReuseSession = false;
+  activeProfileSlot = 0;
   enrollmentProgress = 0;
   cancelCenterCalibration();
   resetTrackingFilter();
@@ -657,6 +669,32 @@ void processMaixLine(char *line) {
       completeMultiViewCapture("MaixCAM ready");
     }
     Serial.printf("[MAIX MULTIVIEW] %s\n", multiView.c_str());
+  } else if (strncmp(bodyText, "P,", 2) == 0) {
+    const String profile = String(bodyText + 2);
+    notifyPhone(String("PROFILE,") + profile);
+    const int firstComma = profile.indexOf(',');
+    const int secondComma = profile.indexOf(',', firstComma + 1);
+    const int thirdComma = profile.indexOf(',', secondComma + 1);
+    const int slot = firstComma > 0 ? profile.substring(0, firstComma).toInt() : 0;
+    const String status = secondComma > firstComma
+                              ? profile.substring(firstComma + 1, secondComma)
+                              : profile.substring(firstComma + 1);
+    if (status == "LOADED") {
+      activeProfileSlot = slot;
+      profileReuseSession = true;
+      candidateSelected = true;
+      targetIdentityReady = false;
+      alignmentReady = false;
+      enrollmentActive = false;
+      selectedCandidateSlot = slot;
+      if (thirdComma > secondComma) {
+        selectedTrackingMode = profile.substring(secondComma + 1, thirdComma);
+        lockedTargetToken = profile.substring(thirdComma + 1);
+      }
+      notifyPhone(String("TARGET,") + lockedTargetToken);
+      notifyPhone("CALIBRATE,REQUIRED,PROFILE_CENTER");
+    }
+    Serial.printf("[MAIX PROFILE] %s\n", profile.c_str());
   } else if (strncmp(bodyText, "D,", 2) == 0) {
     // Candidate packet: slot, track id, class id, confidence and normalised
     // box.  ESP32 forwards it untouched; the iPhone is the only selector.
@@ -1133,11 +1171,11 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
                               (rawSpeed > 65.0f || rawError > 45.0f);
       const bool quietMeasurement = rawSpeed < 34.0f && rawError < 24.0f;
       const float alpha = filterReady
-                              ? (rocketFast ? 0.70f
-                                            : quietMeasurement ? 0.24f : 0.42f)
+                              ? (rocketFast ? 0.84f
+                                            : quietMeasurement ? 0.30f : 0.56f)
                               : 1.0f;
-      const float velocityAlpha = rocketFast ? 0.58f
-                                              : quietMeasurement ? 0.16f : 0.30f;
+      const float velocityAlpha = rocketFast ? 0.72f
+                                              : quietMeasurement ? 0.22f : 0.44f;
       if (lastDynamicsAtMs != 0 && target.receivedAtMs > lastDynamicsAtMs) {
         const float visionDt = clampFloat(
             (target.receivedAtMs - lastDynamicsAtMs) / 1000.0f, 0.015f,
@@ -1148,7 +1186,7 @@ void runTracking(float dt, const TargetPacket &target, uint32_t nowMs) {
         const float rawAY = clampFloat(
             (target.velocityY - previousVisionVY) / visionDt, -5000.0f,
             5000.0f);
-        const float accelerationAlpha = rocketFast ? 0.28f : 0.15f;
+        const float accelerationAlpha = rocketFast ? 0.38f : 0.22f;
         filteredAX += accelerationAlpha * (rawAX - filteredAX);
         filteredAY += accelerationAlpha * (rawAY - filteredAY);
       }
@@ -1386,6 +1424,63 @@ void handlePhoneCommand(String command) {
   command.toUpperCase();
   if (command.startsWith("MODE,")) {
     selectTrackingMode(command.substring(5));
+  } else if (command.startsWith("PROFILE_LOAD,")) {
+    const String profileText = command.substring(13);
+    const int separator = profileText.indexOf(',');
+    const int slot = separator > 0 ? profileText.substring(0, separator).toInt()
+                                   : profileText.toInt();
+    String mode = separator > 0 ? profileText.substring(separator + 1)
+                                : selectedTrackingMode;
+    mode.trim();
+    mode.toUpperCase();
+    if (slot >= 1 && slot <= 2 && isSupportedTrackingMode(mode)) {
+      cancelCenterCalibration();
+      resetTrackingFilter();
+      selectedTrackingMode = mode;
+      lockedTargetToken = mode == "ROCKET" ? "WATER_ROCKET" : mode;
+      sessionArmed = true;
+      homeRequested = false;
+      enrollmentActive = false;
+      alignmentReady = false;
+      targetIdentityReady = false;
+      candidateSelected = true;
+      pendingCenterAfterRefine = false;
+      refineRequestedAtMs = 0;
+      multiViewActive = false;
+      // REFINE is the requested three-second extra learning step. A reused
+      // profile therefore skips the separate initial MULTIVIEW pass.
+      multiViewCompleted = true;
+      profileReuseSession = true;
+      activeProfileSlot = slot;
+      selectedCandidateSlot = slot;
+      setPhoneCharging(false);
+      chargeResumePending = false;
+      const String argument = String(slot) + "," +
+                              lroundf(targetCenterX) + "," +
+                              lroundf(targetCenterY);
+      sendMaixCommand("PROFILE_LOAD", argument.c_str());
+      notifyPhone("CANDIDATES,CLEAR");
+      notifyPhone("MEDIA,RECORD_STOP");
+      notifyPhone(String("MODE,") + selectedTrackingMode);
+      notifyPhone(String("PROFILE,") + slot + ",LOADING," +
+                  selectedTrackingMode);
+    } else {
+      notifyPhone(String("PROFILE,") + slot + ",ERROR,LOAD");
+    }
+  } else if (command.startsWith("PROFILE_SAVE,")) {
+    const int slot = command.substring(13).toInt();
+    if (slot >= 1 && slot <= 2 && sessionArmed && targetIdentityReady) {
+      activeProfileSlot = slot;
+      sendMaixCommand("PROFILE_SAVE", String(slot).c_str());
+    } else {
+      notifyPhone(String("PROFILE,") + slot + ",ERROR,SAVE");
+    }
+  } else if (command.startsWith("PROFILE_DELETE,")) {
+    const int slot = command.substring(15).toInt();
+    if (slot >= 1 && slot <= 2) {
+      if (activeProfileSlot == slot) activeProfileSlot = 0;
+      sendMaixCommand("PROFILE_DELETE", String(slot).c_str());
+    }
   } else if (command.startsWith("SELECT_POINT,")) {
     const String pointText = command.substring(13);
     const int separator = pointText.indexOf(',');
@@ -1455,7 +1550,7 @@ void handlePhoneCommand(String command) {
       beginCenterCalibration();
     }
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,3.11.0");
+    notifyPhone("ESP32,SE_GIMBAL,3.12.0");
     notifyPhone("RIG,GEARED,3.20,1.60,90,120,MAIX_TILT_TOP");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +

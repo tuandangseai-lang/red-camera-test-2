@@ -7,6 +7,10 @@ struct ContentView: View {
     @State private var enrollmentPhaseStartedAt = Date()
     @State private var calibrationPhaseStartedAt = Date()
     @State private var multiViewPhaseStartedAt = Date()
+    @State private var showingProfiles = false
+    @State private var showingRenamePrompt = false
+    @State private var renameSlot: Int?
+    @State private var renameText = ""
 
     var body: some View {
         GeometryReader { geometry in
@@ -77,6 +81,123 @@ struct ContentView: View {
             } else if camera.isRecording {
                 camera.stopRecording()
             }
+        }
+        .sheet(isPresented: $showingProfiles) {
+            savedProfilesSheet
+        }
+        .alert("Đổi tên mẫu", isPresented: $showingRenamePrompt) {
+            TextField("Tên mẫu", text: $renameText)
+            Button("Hủy", role: .cancel) { renameSlot = nil }
+            Button("Lưu") {
+                if let slot = renameSlot {
+                    bluetooth.renameProfile(in: slot, to: renameText)
+                }
+                renameSlot = nil
+            }
+        } message: {
+            Text("Tên này chỉ dùng để bạn dễ nhận ra mẫu trên iPhone.")
+        }
+    }
+
+    private var savedProfilesSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 12) {
+                    Text("MaixCAM lưu đặc trưng thật của tối đa 2 mục tiêu. Khi dùng lại, bạn chỉ cần đưa mẫu vào dấu +, bấm Căn tâm và học bổ sung 3 giây.")
+                        .font(.custom("Arial", size: 13))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.bottom, 4)
+
+                    ForEach(1...2, id: \.self) { slot in
+                        savedProfileRow(slot: slot)
+                    }
+                }
+                .padding(16)
+            }
+            .navigationTitle("Mẫu đã tracking")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Xong") { showingProfiles = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    @ViewBuilder
+    private func savedProfileRow(slot: Int) -> some View {
+        let profile = bluetooth.profile(in: slot)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 11) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(profile == nil ? Color.white.opacity(0.08) : Color.orange.opacity(0.18))
+                        .frame(width: 46, height: 46)
+                    Image(systemName: profile?.mode.icon ?? "plus")
+                        .font(.system(size: 19, weight: .bold))
+                        .foregroundStyle(profile == nil ? .secondary : .orange)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(profile?.name ?? "Ô mẫu \(slot)")
+                        .font(.custom("Arial", size: 16).weight(.bold))
+                    Text(profile == nil
+                         ? "Chưa có dữ liệu"
+                         : "\(profile!.mode.title) • lưu trên iPhone + MaixCAM")
+                        .font(.custom("Arial", size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if bluetooth.activeProfileSlot == slot {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                }
+            }
+
+            HStack(spacing: 9) {
+                if let profile {
+                    Button {
+                        bluetooth.useProfile(profile)
+                        showingProfiles = false
+                    } label: {
+                        Label("Dùng mẫu", systemImage: "scope")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+
+                    Button {
+                        renameSlot = slot
+                        renameText = profile.name
+                        showingRenamePrompt = true
+                    } label: {
+                        Image(systemName: "pencil")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button(role: .destructive) {
+                        bluetooth.deleteProfile(in: slot)
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                Spacer()
+
+                Button(profile == nil ? "Lưu vào ô này" : "Ghi đè mẫu") {
+                    bluetooth.saveCurrentProfile(in: slot)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!bluetooth.canSaveCurrentProfile)
+                .opacity(bluetooth.canSaveCurrentProfile ? 1 : 0.38)
+            }
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(.white.opacity(0.10), lineWidth: 1)
         }
     }
 
@@ -286,6 +407,27 @@ struct ContentView: View {
                         .lineLimit(1)
                 }
                 Spacer()
+                Button {
+                    showingProfiles = true
+                } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "person.crop.rectangle.stack.fill")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.88))
+                            .frame(width: 34, height: 34)
+                            .background(.white.opacity(0.10), in: Circle())
+                        if !bluetooth.savedProfiles.isEmpty {
+                            Text("\(bluetooth.savedProfiles.count)")
+                                .font(.custom("Arial", size: 9).weight(.bold))
+                                .foregroundStyle(.black)
+                                .frame(width: 15, height: 15)
+                                .background(.orange, in: Circle())
+                                .offset(x: 2, y: -2)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Hai mẫu tracking đã lưu")
                 if camera.isRecording {
                     HStack(spacing: 6) {
                         Circle().fill(.red).frame(width: 8, height: 8)
@@ -439,7 +581,12 @@ struct ContentView: View {
             return camera.statusText
         }
         if bluetooth.isCalibrating || bluetooth.isRefining {
-            return "Đang căn tâm • chưa lưu video"
+            return bluetooth.activeProfileSlot == nil
+                ? "Đang căn tâm • chưa lưu video"
+                : "Đang căn tâm + học thêm 3 giây • chưa lưu video"
+        }
+        if bluetooth.isProfileLoading {
+            return "Đang mở mẫu đã lưu trên MaixCAM • chưa lưu video"
         }
         if bluetooth.isMultiViewCapturing {
             return "Xoay/nghiêng vật 3 giây • chưa lưu video"

@@ -28,6 +28,16 @@ enum TrackingMode: String, CaseIterable, Identifiable {
     }
 }
 
+struct SavedTrackingProfile: Identifiable, Codable, Equatable {
+    let slot: Int
+    var name: String
+    var modeRawValue: String
+    var updatedAt: Date
+
+    var id: Int { slot }
+    var mode: TrackingMode { TrackingMode(rawValue: modeRawValue) ?? .object }
+}
+
 struct SelectionCandidate: Identifiable, Equatable {
     let id: Int
     let trackID: Int
@@ -104,6 +114,9 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var calibrationProgress = 0.0
     @Published private(set) var calibrationStatus = "Đặt mục tiêu vào dấu + giữa iPhone"
     @Published private(set) var needsCenterCalibration = false
+    @Published private(set) var savedProfiles: [SavedTrackingProfile] = []
+    @Published private(set) var activeProfileSlot: Int?
+    @Published private(set) var isProfileLoading = false
 
     private let serviceUUID = CBUUID(string: "7E57A000-8E3A-4D6A-9B2B-13B10A000001")
     private let eventUUID = CBUUID(string: "7E57A001-8E3A-4D6A-9B2B-13B10A000001")
@@ -125,6 +138,7 @@ final class BLEManager: NSObject, ObservableObject {
     private var savedMaixCenterX = 0.5
     private var savedMaixCenterY = 0.5
     private var calibrationWasRecording = false
+    private let savedProfilesKey = "SE.savedTrackingProfiles.v1"
 
     var trackingTitle: String {
         switch trackingState {
@@ -146,7 +160,13 @@ final class BLEManager: NSObject, ObservableObject {
         // started, so the button must remain available for the whole session.
         isConnected && isSessionActive && hasSelectedCandidate &&
             !isConfirmingCandidate && !isRefining && !isCalibrating &&
-            !isMultiViewCapturing
+            !isMultiViewCapturing && !isProfileLoading
+    }
+
+    var canSaveCurrentProfile: Bool {
+        isConnected && isSessionActive && hasSelectedCandidate &&
+            !needsCenterCalibration && !isRefining && !isCalibrating &&
+            !isMultiViewCapturing && !isProfileLoading
     }
 
     var isCandidateListReady: Bool {
@@ -157,7 +177,85 @@ final class BLEManager: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        if let data = UserDefaults.standard.data(forKey: savedProfilesKey),
+           let profiles = try? JSONDecoder().decode([SavedTrackingProfile].self, from: data) {
+            savedProfiles = profiles
+                .filter { (1...2).contains($0.slot) }
+                .sorted { $0.slot < $1.slot }
+        }
         central = CBCentralManager(delegate: self, queue: .main)
+    }
+
+    func profile(in slot: Int) -> SavedTrackingProfile? {
+        savedProfiles.first { $0.slot == slot }
+    }
+
+    func saveCurrentProfile(in slot: Int) {
+        guard (1...2).contains(slot), canSaveCurrentProfile else { return }
+        let existingName = profile(in: slot)?.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let defaultName = lockedTargetName.isEmpty ? String(format: "Mẫu %d", slot) : lockedTargetName
+        let saved = SavedTrackingProfile(
+            slot: slot,
+            name: (existingName?.isEmpty == false ? existingName! : defaultName),
+            modeRawValue: selectedMode.rawValue,
+            updatedAt: Date()
+        )
+        savedProfiles.removeAll { $0.slot == slot }
+        savedProfiles.append(saved)
+        savedProfiles.sort { $0.slot < $1.slot }
+        activeProfileSlot = slot
+        persistSavedProfiles()
+        send("PROFILE_SAVE,\(slot)")
+    }
+
+    func renameProfile(in slot: Int, to proposedName: String) {
+        let name = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              let index = savedProfiles.firstIndex(where: { $0.slot == slot }) else { return }
+        savedProfiles[index].name = String(name.prefix(32))
+        savedProfiles[index].updatedAt = Date()
+        if activeProfileSlot == slot { lockedTargetName = savedProfiles[index].name }
+        persistSavedProfiles()
+    }
+
+    func deleteProfile(in slot: Int) {
+        savedProfiles.removeAll { $0.slot == slot }
+        if activeProfileSlot == slot { activeProfileSlot = nil }
+        persistSavedProfiles()
+        send("PROFILE_DELETE,\(slot)")
+    }
+
+    func useProfile(_ profile: SavedTrackingProfile) {
+        guard isConnected, (1...2).contains(profile.slot) else { return }
+        if isSessionActive { send("STOP") }
+        cancelEnrollmentUI()
+        cancelCalibrationUI()
+        selectedMode = profile.mode
+        lockedTargetName = profile.name
+        activeProfileSlot = profile.slot
+        isProfileLoading = true
+        isSessionActive = true
+        shouldRecordVideo = false
+        hasSelectedCandidate = true
+        selectedCandidateID = profile.slot
+        needsCenterCalibration = true
+        trackingState = .acquire
+        enrollmentStatus = "Đang mở \(profile.name) trên MaixCAM"
+        calibrationStatus = "Đưa \(profile.name.lowercased()) vào dấu + rồi bấm Căn tâm"
+        send("PROFILE_LOAD,\(profile.slot),\(profile.mode.rawValue)")
+    }
+
+    private func persistSavedProfiles() {
+        if let data = try? JSONEncoder().encode(savedProfiles) {
+            UserDefaults.standard.set(data, forKey: savedProfilesKey)
+        }
+    }
+
+    private func currentProfileDisplayName(for fallbackToken: String) -> String {
+        if let slot = activeProfileSlot, let profile = profile(in: slot) {
+            return profile.name
+        }
+        return localizedTargetName(fallbackToken)
     }
 
     func arm() {
@@ -165,6 +263,8 @@ final class BLEManager: NSObject, ObservableObject {
         shouldRecordVideo = false
         needsCenterCalibration = false
         calibrationWasRecording = false
+        activeProfileSlot = nil
+        isProfileLoading = false
         beginEnrollmentUI()
         isSessionActive = true
         send("ARM")
@@ -180,6 +280,8 @@ final class BLEManager: NSObject, ObservableObject {
         trackingState = .idle
         needsCenterCalibration = false
         calibrationWasRecording = false
+        activeProfileSlot = nil
+        isProfileLoading = false
     }
 
     func home() {
@@ -191,6 +293,8 @@ final class BLEManager: NSObject, ObservableObject {
         trackingState = .home
         needsCenterCalibration = false
         calibrationWasRecording = false
+        activeProfileSlot = nil
+        isProfileLoading = false
     }
 
     func calibrateCenter() {
@@ -280,6 +384,8 @@ final class BLEManager: NSObject, ObservableObject {
     func selectMode(_ mode: TrackingMode) {
         guard selectedMode != mode else { return }
         selectedMode = mode
+        activeProfileSlot = nil
+        isProfileLoading = false
         confidence = 0
         targetX = 0.5
         targetY = 0.5
@@ -643,6 +749,49 @@ final class BLEManager: NSObject, ObservableObject {
             default:
                 break
             }
+        } else if head == "PROFILE", fields.count >= 3,
+                  let slot = Int(fields[1]) {
+            let status = fields[2].uppercased()
+            switch status {
+            case "LOADING":
+                isProfileLoading = true
+                shouldRecordVideo = false
+                trackingState = .acquire
+                enrollmentStatus = "Đang mở mẫu đã lưu trên MaixCAM"
+            case "LOADED":
+                isProfileLoading = false
+                activeProfileSlot = slot
+                if fields.count >= 4,
+                   let mode = TrackingMode(rawValue: fields[3].uppercased()) {
+                    selectedMode = mode
+                }
+                lockedTargetName = profile(in: slot)?.name ??
+                    (fields.count >= 5 ? localizedTargetName(fields[4]) : selectedMode.title)
+                hasSelectedCandidate = true
+                selectedCandidateID = slot
+                needsCenterCalibration = true
+                isEnrolling = false
+                isRefining = false
+                trackingState = .lock
+                enrollmentStatus = "Đã mở \(lockedTargetName) • đặt vào dấu + rồi bấm Căn tâm"
+                calibrationStatus = "Căn tâm và học bổ sung \(lockedTargetName.lowercased()) trong 3 giây"
+            case "SAVED":
+                activeProfileSlot = slot
+                connectionText = "Đã lưu mẫu \(profile(in: slot)?.name ?? String(slot))"
+            case "DELETED":
+                if activeProfileSlot == slot { activeProfileSlot = nil }
+            case "ERROR":
+                isProfileLoading = false
+                if fields.count >= 4, fields[3].uppercased() == "LOAD" {
+                    isSessionActive = false
+                    hasSelectedCandidate = false
+                    needsCenterCalibration = false
+                    trackingState = .idle
+                    enrollmentStatus = "Không mở được mẫu • hãy lưu lại mẫu này"
+                }
+            default:
+                break
+            }
         } else if head == "ENROLL", fields.count >= 4 {
             let progress = min(100, max(0, Double(fields[1]) ?? 0)) / 100
             if let mode = TrackingMode(rawValue: fields[2].uppercased()) {
@@ -663,7 +812,7 @@ final class BLEManager: NSObject, ObservableObject {
                 scanCompletionWorkItem?.cancel()
                 confirmCandidateSelection()
                 if fields.count >= 5 {
-                    lockedTargetName = localizedTargetName(fields[4])
+                    lockedTargetName = currentProfileDisplayName(for: fields[4])
                 }
                 isEnrolling = false
                 isRefining = false
@@ -693,7 +842,7 @@ final class BLEManager: NSObject, ObservableObject {
                 scanCompletionWorkItem?.cancel()
                 confirmCandidateSelection()
                 if fields.count >= 5 {
-                    lockedTargetName = localizedTargetName(fields[4])
+                    lockedTargetName = currentProfileDisplayName(for: fields[4])
                 }
                 hasSelectedCandidate = true
                 isChoosingTarget = false
@@ -711,7 +860,7 @@ final class BLEManager: NSObject, ObservableObject {
                 isEnrolling = true
                 trackingState = .refine
                 if fields.count >= 5 {
-                    lockedTargetName = localizedTargetName(fields[4])
+                    lockedTargetName = currentProfileDisplayName(for: fields[4])
                 }
                 enrollmentStatus = "MaixCAM đang đối chiếu và ghi nhớ \(lockedTargetName.lowercased())"
             case "RETRY":
@@ -732,7 +881,7 @@ final class BLEManager: NSObject, ObservableObject {
             selectedMode = mode
             lockedTargetName = mode.title
         } else if head == "TARGET", fields.count >= 2 {
-            lockedTargetName = localizedTargetName(fields[1])
+            lockedTargetName = currentProfileDisplayName(for: fields[1])
         } else if head == "CANDIDATES", fields.count >= 2,
                   fields[1].uppercased() == "CLEAR" {
             clearCandidateSelection()

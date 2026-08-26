@@ -10,9 +10,10 @@ from maix import app, camera, display, err, image, nn, pinmap, time, tracker, ua
 import math
 import os
 import gc
+import json
 
 
-APP_VERSION = "1.21.0"
+APP_VERSION = "1.22.0"
 MOUNT_PROFILE = "MAIX_TILT_TOP"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
@@ -38,8 +39,10 @@ LOCK_CONFIRM_FRAMES = 2
 LOST_AFTER_FRAMES = 4
 REACQUIRE_MEMORY_MS = 3400
 MAX_PREDICT_SECONDS = 0.50
-PREVIEW_INTERVAL_MS = 40
-TARGET_REPORT_INTERVAL_MS = 25
+# Rendering the small MaixCAM display less often leaves more NPU/CPU time for
+# NanoTrack and UART. Target packets remain at the MG996R's real 50 Hz limit.
+PREVIEW_INTERVAL_MS = 66
+TARGET_REPORT_INTERVAL_MS = 20
 IDLE_FRAME_INTERVAL_MS = 120
 ENROLL_DURATION_MS = 3000
 ENROLL_REPORT_INTERVAL_MS = 80
@@ -65,6 +68,8 @@ NANO_MIN_BOX_SIDE = 4
 APPEARANCE_TEMPLATE_LIMIT = 8
 APPEARANCE_DIVERSITY_MIN = 0.055
 CUSTOM_ROCKET_CLASS_ID = 1000
+PROFILE_LIMIT = 2
+PROFILE_PATH = "/maixapp/apps/se_rocket_tracker/profiles.json"
 
 STATE_IDLE = 0
 STATE_ACQUIRE = 1
@@ -216,16 +221,16 @@ class AlphaBetaBox:
         quiet_radius = max(2.4, min(w, h) * 0.045)
         quiet = residual_distance <= quiet_radius and current_speed < 38.0
         if quiet:
-            alpha = clamp(0.18 + confidence * 0.18, 0.20, 0.36)
-            beta = clamp(0.025 + confidence * 0.035, 0.025, 0.060)
+            alpha = clamp(0.22 + confidence * 0.20, 0.24, 0.42)
+            beta = clamp(0.032 + confidence * 0.042, 0.032, 0.074)
             gamma = clamp(0.004 + confidence * 0.008, 0.004, 0.012)
             velocity_memory = 0.68
             acceleration_memory = 0.55
         else:
-            alpha = clamp(0.40 + confidence * 0.34, 0.44, 0.78)
-            beta = clamp(0.07 + confidence * 0.09, 0.08, 0.17)
-            gamma = clamp(0.012 + confidence * 0.022, 0.014, 0.036)
-            velocity_memory = 0.89
+            alpha = clamp(0.50 + confidence * 0.36, 0.54, 0.86)
+            beta = clamp(0.09 + confidence * 0.12, 0.10, 0.22)
+            gamma = clamp(0.016 + confidence * 0.026, 0.018, 0.044)
+            velocity_memory = 0.86
             acceleration_memory = 0.74
         self.cx = predicted_x + alpha * residual_x
         self.cy = predicted_y + alpha * residual_y
@@ -323,6 +328,8 @@ class RocketTracker:
         self.enrollment_class_id = -1
         self.appearance_template = None
         self.appearance_templates = []
+        self.saved_profiles = self._load_saved_profiles()
+        self.active_profile_slot = 0
         self.awaiting_selection = False
         self.selection_candidates = {}
         self.selection_order = []
@@ -352,6 +359,147 @@ class RocketTracker:
         self.last_yolo_lock_frame = -1000
         self.tracking_source = "YOLO"
         self.locked_label = "WATER_ROCKET"
+
+    def _load_saved_profiles(self):
+        try:
+            with open(PROFILE_PATH, "r") as profile_file:
+                payload = json.load(profile_file)
+            profiles = payload if isinstance(payload, dict) else {}
+            clean = {}
+            for slot in range(1, PROFILE_LIMIT + 1):
+                profile = profiles.get(str(slot))
+                if not isinstance(profile, dict):
+                    continue
+                mode = str(profile.get("mode", "OBJECT")).upper()
+                templates = profile.get("templates", [])
+                if mode not in SUPPORTED_MODES or not isinstance(templates, list):
+                    continue
+                valid_templates = []
+                for signature in templates[:APPEARANCE_TEMPLATE_LIMIT]:
+                    if isinstance(signature, list) and len(signature) >= 91:
+                        valid_templates.append([float(value) for value in signature])
+                if not valid_templates:
+                    continue
+                clean[str(slot)] = {
+                    "mode": mode,
+                    "label": str(profile.get("label", target_label(mode, -1))),
+                    "class_id": int(profile.get("class_id", -1)),
+                    "templates": valid_templates,
+                }
+            print("Loaded {0} saved identity profiles".format(len(clean)), flush=True)
+            return clean
+        except Exception:
+            return {}
+
+    def _persist_saved_profiles(self):
+        temporary_path = PROFILE_PATH + ".tmp"
+        try:
+            serializable = {}
+            for key, profile in self.saved_profiles.items():
+                serializable[key] = {
+                    "mode": profile["mode"],
+                    "label": profile["label"],
+                    "class_id": profile["class_id"],
+                    # Five decimals are ample for the colour/edge descriptor
+                    # and keep both profiles small enough for flash storage.
+                    "templates": [
+                        [round(float(value), 5) for value in signature]
+                        for signature in profile["templates"]
+                    ],
+                }
+            with open(temporary_path, "w") as profile_file:
+                json.dump(serializable, profile_file)
+            os.rename(temporary_path, PROFILE_PATH)
+            return True
+        except Exception as exception:
+            print("Profile write failed: {0}".format(exception), flush=True)
+            try:
+                if os.path.exists(temporary_path):
+                    os.remove(temporary_path)
+            except Exception:
+                pass
+            return False
+
+    def _save_profile(self, slot):
+        if (slot < 1 or slot > PROFILE_LIMIT or
+                not self.appearance_templates):
+            return False
+        self.saved_profiles[str(slot)] = {
+            "mode": self.active_mode,
+            "label": self.locked_label,
+            "class_id": self.enrollment_class_id,
+            "templates": [list(signature)
+                          for signature in self.appearance_templates[:APPEARANCE_TEMPLATE_LIMIT]],
+        }
+        if not self._persist_saved_profiles():
+            return False
+        self.active_profile_slot = slot
+        self._write("P,{0},SAVED,{1},{2}".format(
+            slot, self.active_mode, self.locked_label
+        ))
+        print("Identity profile {0} saved ({1})".format(slot, self.active_mode),
+              flush=True)
+        return True
+
+    def _delete_profile(self, slot):
+        self.saved_profiles.pop(str(slot), None)
+        if self.active_profile_slot == slot:
+            self.active_profile_slot = 0
+        if not self._persist_saved_profiles():
+            return False
+        self._write("P,{0},DELETED".format(slot))
+        return True
+
+    def _load_profile(self, slot, center_x, center_y, now_ms):
+        profile = self.saved_profiles.get(str(slot))
+        if profile is None:
+            return False
+        # Change model while disabled so _set_mode cannot start the ordinary
+        # 3-second candidate scan. A reused identity goes straight to the
+        # user's centre/refine step.
+        self.enabled = False
+        if not self._set_mode(profile["mode"]):
+            return False
+        self.enabled = True
+        self._clear_target()
+        self.enrolling = False
+        self.awaiting_selection = False
+        self.refining = False
+        self.multiview_active = False
+        self.active_profile_slot = slot
+        self.enrollment_class_id = int(profile.get("class_id", -1))
+        self.locked_label = str(profile.get("label", target_label(self.active_mode, -1)))
+        self.appearance_templates = [list(signature)
+                                     for signature in profile["templates"]]
+        self.appearance_template = list(self.appearance_templates[0])
+        width = float(max(1, self.camera.width()))
+        height = float(max(1, self.camera.height()))
+        center_x = clamp(center_x, 0.12, 0.88) * width
+        center_y = clamp(center_y, 0.12, 0.88) * height
+        if self.active_mode == "PERSON":
+            box_w, box_h = width * 0.20, height * 0.34
+        elif self.active_mode == "ROCKET":
+            box_w, box_h = width * 0.17, height * 0.30
+        else:
+            box_w, box_h = width * 0.22, height * 0.22
+        self.last_box = (
+            clamp(center_x - box_w * 0.5, 0, width - box_w),
+            clamp(center_y - box_h * 0.5, 0, height - box_h),
+            box_w, box_h,
+        )
+        self.last_confidence = 0.62
+        self.selected_candidate_slot = slot
+        self.selected_waiting_center = True
+        self.refine_manual = True
+        self.identity_is_manual = True
+        self.target_id = -1000 - slot
+        self.state = STATE_ACQUIRE
+        self._write("P,{0},LOADED,{1},{2}".format(
+            slot, self.active_mode, self.locked_label
+        ))
+        print("Identity profile {0} loaded; waiting at saved optical centre".format(slot),
+              flush=True)
+        return True
 
     def _mode_configuration(self, mode):
         if mode == "ROCKET":
@@ -572,6 +720,30 @@ class RocketTracker:
                     self._write("A,{0},MULTIVIEW".format(parts[1]))
                 else:
                     self._write("A,{0},MULTIVIEW_ERROR".format(parts[1]))
+            elif command == "PROFILE_SAVE" and len(parts) >= 4:
+                try:
+                    slot = int(parts[3])
+                except Exception:
+                    slot = 0
+                if not self._save_profile(slot):
+                    self._write("P,{0},ERROR,SAVE".format(slot))
+            elif command == "PROFILE_DELETE" and len(parts) >= 4:
+                try:
+                    slot = int(parts[3])
+                except Exception:
+                    slot = 0
+                if not self._delete_profile(slot):
+                    self._write("P,{0},ERROR,DELETE".format(slot))
+            elif command == "PROFILE_LOAD" and len(parts) >= 6:
+                try:
+                    slot = int(parts[3])
+                    center_x = int(parts[4]) / 1000.0
+                    center_y = int(parts[5]) / 1000.0
+                except Exception:
+                    slot, center_x, center_y = 0, 0.5, 0.5
+                if not self._load_profile(slot, center_x, center_y,
+                                          time.ticks_ms()):
+                    self._write("P,{0},ERROR,LOAD".format(slot))
             elif command == "PING":
                 print("UART command: PING", flush=True)
                 self._write("A,{0},PONG,{1},{2},{3}".format(
@@ -622,6 +794,7 @@ class RocketTracker:
         self.selected_candidate_slot = -1
         self.selected_waiting_center = False
         self.identity_is_manual = False
+        self.active_profile_slot = 0
 
     def _begin_enrollment(self):
         self.enrolling = True
@@ -1442,10 +1615,12 @@ class RocketTracker:
         self.refine_visible_frames = 0
         self.refine_signature_sum = None
         self.refine_signature_count = 0
-        self.refine_signatures = []
-        if self.appearance_template is not None:
-            self.refine_signature_sum = list(self.appearance_template)
-            self.refine_signature_count = 1
+        # Keep every previously learned view. The new three-second pass adds
+        # information to a reused profile; it must never collapse eight saved
+        # views into one current camera angle.
+        self.refine_signatures = [list(signature)
+                                  for signature in self.appearance_templates]
+        if not self.refine_signatures and self.appearance_template is not None:
             self.refine_signatures = [list(self.appearance_template)]
         self._write("E,0,{0},REFINE,{1}".format(
             self.active_mode, self.locked_label
@@ -1552,18 +1727,19 @@ class RocketTracker:
                 self.last_box, now_ms, max(0.45, self.last_confidence)
             )
         if self.refine_signature_count > 0:
-            self.appearance_template = [
+            current_average = [
                 value / self.refine_signature_count
                 for value in self.refine_signature_sum
             ]
-            self.appearance_templates = [self.appearance_template]
+            merged_templates = [current_average]
             for signature in self.refine_signatures:
-                if len(self.appearance_templates) >= APPEARANCE_TEMPLATE_LIMIT:
+                if len(merged_templates) >= APPEARANCE_TEMPLATE_LIMIT:
                     break
-                if (self._signature_distance(
-                        signature, self.appearance_template) >=
-                        APPEARANCE_DIVERSITY_MIN * 0.55):
-                    self.appearance_templates.append(signature)
+                if min(self._signature_distance(signature, saved)
+                       for saved in merged_templates) >= APPEARANCE_DIVERSITY_MIN * 0.45:
+                    merged_templates.append(signature)
+            self.appearance_templates = merged_templates
+            self.appearance_template = list(merged_templates[0])
         self.refining = False
         self.selected_waiting_center = False
         self.selection_candidates = {}
@@ -1580,6 +1756,10 @@ class RocketTracker:
         self._write("E,100,{0},READY,{1}".format(
             self.active_mode, self.locked_label
         ))
+        # Reusing a saved identity learns the current view for three seconds,
+        # then refreshes that same flash profile automatically.
+        if self.active_profile_slot > 0:
+            self._save_profile(self.active_profile_slot)
         print("Selected subject memorised: mode={0} id={1} visible={2:.0f}%".format(
             self.active_mode, self.target_id, visible_ratio * 100.0
         ), flush=True)
