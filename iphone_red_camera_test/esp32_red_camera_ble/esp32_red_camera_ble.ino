@@ -6,7 +6,7 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
-// SE Rocket Tracker v3.12.0 - persistent identities + lower-latency control
+// SE Rocket Tracker v3.13.0 - 40/80 pan gear + persistent identities
 // MaixCAM = vision authority, ESP32 = deterministic servo controller,
 // iPhone = recording/control UI. Do not send AI coordinates from the phone.
 
@@ -22,13 +22,14 @@ constexpr uint8_t PHONE_CHARGING_LEVEL = HIGH;
 constexpr uint8_t PHONE_CHARGE_CUT_LEVEL = LOW;
 constexpr uint32_t CHARGE_RESUME_DELAY_MS = 10000;
 
-// Module 0.8 gear set supplied with the SE mount:
-//   30T / 96T pan  = 3.20:1
-//   30T / 48T tilt = 1.60:1
+// Equal-module external gears on the current SE mount. Pitch-diameter ratios
+// and tooth-count ratios are equivalent:
+//   40 mm servo gear / 80 mm output gear pan  = 2.00:1
+//   25 mm servo gear / 40 mm output gear tilt = 1.60:1
 // Rates computed from the camera image are output-axis rates.  The servo must
 // turn this many times faster to produce the requested camera movement.
-constexpr float PAN_GEAR_RATIO = 96.0f / 30.0f;
-constexpr float TILT_GEAR_RATIO = 48.0f / 30.0f;
+constexpr float PAN_GEAR_RATIO = 80.0f / 40.0f;
+constexpr float TILT_GEAR_RATIO = 40.0f / 25.0f;
 
 constexpr float PAN_HOME_DEG = 90.0f;
 // Re-index the tilt gear so the camera is level at 120 servo degrees.  With
@@ -1550,8 +1551,8 @@ void handlePhoneCommand(String command) {
       beginCenterCalibration();
     }
   } else if (command == "PING" || command == "APP_READY") {
-    notifyPhone("ESP32,SE_GIMBAL,3.12.0");
-    notifyPhone("RIG,GEARED,3.20,1.60,90,120,MAIX_TILT_TOP");
+    notifyPhone("ESP32,SE_GIMBAL,3.13.0");
+    notifyPhone("RIG,GEARED,2.00,1.60,90,120,MAIX_TILT_TOP_PAN_40_80");
     notifyPhone(String("MODE,") + selectedTrackingMode);
     notifyPhone(String("CALIBRATE,SAVED,") + lroundf(targetCenterX) + "," +
                 lroundf(targetCenterY));
@@ -1594,7 +1595,7 @@ void setupBle() {
       Config::EVENT_UUID, BLECharacteristic::PROPERTY_READ |
                               BLECharacteristic::PROPERTY_NOTIFY);
   eventCharacteristic->addDescriptor(new BLE2902());
-  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.12.0");
+  eventCharacteristic->setValue("ESP32,SE_GIMBAL,3.13.0");
   BLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE |
                                 BLECharacteristic::PROPERTY_WRITE_NR);
@@ -1609,7 +1610,7 @@ void setupBle() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nSE AI Tracker ESP32 v3.11.0 (geared 3.20/1.60)");
+  Serial.println("\nSE AI Tracker ESP32 v3.13.0 (geared 2.00/1.60)");
   Serial.println(
       "USB bench: a=ARM, 1..9=SELECT, c=REFINE/CENTER, s=STOP, h=HOME, p=PING");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);

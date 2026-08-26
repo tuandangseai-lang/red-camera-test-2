@@ -13,8 +13,8 @@ import gc
 import json
 
 
-APP_VERSION = "1.22.0"
-MOUNT_PROFILE = "MAIX_TILT_TOP"
+APP_VERSION = "1.23.0"
+MOUNT_PROFILE = "MAIX_TILT_TOP_PAN_40_80"
 MODEL_PATH = "/maixapp/apps/se_rocket_tracker/models/se_water_rocket_yolo11n.mud"
 FALLBACK_MODEL_PATH = "/root/models/yolo11n.mud"
 NANOTRACK_MODEL_PATH = "/root/models/nanotrack.mud"
