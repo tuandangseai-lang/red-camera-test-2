@@ -95,7 +95,7 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var panAngle = 90.0
     @Published private(set) var tiltAngle = 120.0
     @Published private(set) var maixVersion = "Đang chờ MaixCAM"
-    @Published private(set) var rigVersion = "Bánh răng P 3,20:1 • T 1,60:1"
+    @Published private(set) var rigVersion = "Bánh răng P 2,00:1 • T 1,60:1"
     @Published private(set) var selectedMode: TrackingMode = .waterRocket
     @Published private(set) var isEnrolling = false
     @Published private(set) var isChoosingTarget = false

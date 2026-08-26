@@ -1,4 +1,4 @@
-name: Tao IPA SE v8.2 build75 - banh ngang 40 tren 80
+name: Tao IPA SE v8.2 build76 - banh ngang 40 tren 80
 
 on:
   workflow_dispatch:
@@ -104,17 +104,17 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "8.2"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "75"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "76"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v8.2-build75-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v8.2-build76-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v8.2-build75-unsigned-ipa
-          path: SE-v8.2-build75-unsigned.ipa
+          name: SE-v8.2-build76-unsigned-ipa
+          path: SE-v8.2-build76-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
