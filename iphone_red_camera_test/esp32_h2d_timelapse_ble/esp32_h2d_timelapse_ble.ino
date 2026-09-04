@@ -10,7 +10,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE H2D Timelapse Bridge v1.2.0
+// SE H2D Timelapse Bridge v1.3.0
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -25,11 +25,14 @@ constexpr char EVENT_UUID[] = "7E57A001-8E3A-4D6A-9B2B-13B10A000001";
 constexpr char COMMAND_UUID[] = "7E57A002-8E3A-4D6A-9B2B-13B10A000001";
 
 constexpr uint16_t MQTT_PORT = 8883;
-constexpr uint16_t MQTT_BUFFER_BYTES = 32768;
+// H2D full-state packets can exceed 32 KB, especially when AMS data and HMS
+// warnings are present. PubSubClient silently drops packets larger than this
+// buffer, which used to hide printer alerts from the iPhone.
+constexpr uint16_t MQTT_BUFFER_BYTES = 40960;
 constexpr uint32_t WIFI_RETRY_MS = 12000;
-constexpr uint32_t MQTT_RETRY_MS = 4000;
+constexpr uint32_t MQTT_RETRY_MS = 10000;
 constexpr uint32_t STATUS_PERIOD_MS = 2000;
-constexpr uint32_t DATA_TIMEOUT_MS = 20000;
+constexpr uint32_t DATA_TIMEOUT_MS = 45000;
 constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
@@ -72,8 +75,8 @@ bool printWasRunning = false;
 bool hmsAlertActive = false;
 bool printErrorActive = false;
 bool lastReportedPrinterAlert = false;
-int printErrorCode = 0;
-int lastReportedPrintErrorCode = 0;
+uint32_t printErrorCode = 0;
+uint32_t lastReportedPrintErrorCode = 0;
 String printState = "IDLE";
 String activeJob = "0";
 int currentLayer = 0;
@@ -213,6 +216,35 @@ bool extractLastJsonInt(const uint8_t *payload, size_t length, const char *key,
   return found;
 }
 
+bool extractLastJsonUInt32(const uint8_t *payload, size_t length,
+                           const char *key, uint32_t &output) {
+  bool found = false;
+  size_t searchFrom = 0;
+  size_t valuePosition = 0;
+  while (findKey(payload, length, key, searchFrom, valuePosition)) {
+    size_t cursor = valuePosition;
+    while (cursor < length &&
+           (payload[cursor] == ' ' || payload[cursor] == '\t' ||
+            payload[cursor] == '"')) {
+      ++cursor;
+    }
+    uint64_t value = 0;
+    bool hasDigit = false;
+    while (cursor < length && payload[cursor] >= '0' && payload[cursor] <= '9') {
+      value = value * 10 + (payload[cursor] - '0');
+      hasDigit = true;
+      ++cursor;
+    }
+    if (hasDigit) {
+      output = value > 0xFFFFFFFFULL ? 0xFFFFFFFFUL
+                                     : static_cast<uint32_t>(value);
+      found = true;
+    }
+    searchFrom = valuePosition;
+  }
+  return found;
+}
+
 bool extractJsonString(const uint8_t *payload, size_t length, const char *key,
                        String &output) {
   size_t valuePosition = 0;
@@ -259,8 +291,11 @@ void reportPrinterAlert(bool force = false) {
   }
   if (active) {
     if (printErrorActive) {
+      char errorCode[11];
+      snprintf(errorCode, sizeof(errorCode), "0x%08lX",
+               static_cast<unsigned long>(printErrorCode));
       queuePhoneEvent(String("H2D,ALERT,1,H2D báo lỗi máy in • mã ") +
-                      printErrorCode + " • xem màn hình H2D");
+                      errorCode + " • xem màn hình H2D");
     } else {
       queuePhoneEvent("H2D,ALERT,1,H2D có cảnh báo HMS • xem màn hình máy in");
     }
@@ -355,7 +390,7 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   int layer = -1;
   int total = -1;
   int percent = -1;
-  int incomingPrintError = 0;
+  uint32_t incomingPrintError = 0;
   bool incomingHmsAlert = false;
   String state;
   String job;
@@ -364,15 +399,17 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
       extractLastJsonInt(payload, length, "total_layer_num", total);
   const bool hasPercent = extractLastJsonInt(payload, length, "mc_percent", percent);
   const bool hasPrintError =
-      extractLastJsonInt(payload, length, "print_error", incomingPrintError);
+      extractLastJsonUInt32(payload, length, "print_error", incomingPrintError);
   const bool hasHms =
       extractJsonArrayHasItems(payload, length, "hms", incomingHmsAlert);
   const bool hasState = extractJsonString(payload, length, "gcode_state", state);
   bool hasJob = extractJsonString(payload, length, "job_id", job);
   if (!hasJob) hasJob = extractJsonString(payload, length, "subtask_id", job);
 
-  if (hasLayer || hasTotal || hasPercent || hasState) {
+  if (hasLayer || hasTotal || hasPercent || hasState || hasPrintError || hasHms) {
     statusDataSeen = true;
+  }
+  if (hasLayer || hasTotal || hasPercent || hasState) {
     processPrintUpdate(hasState ? state : "", hasLayer ? layer : -1,
                        hasTotal ? total : -1, hasPercent ? percent : -1,
                        hasJob ? safeJobID(job) : activeJob);
@@ -388,11 +425,10 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
 void publishStatusRequest() {
   if (!mqtt.connected()) return;
   const String topic = "device/" + settings.printerSerial + "/request";
-  const String start = String("{\"pushing\":{\"sequence_id\":\"") +
-                       ++sequenceId + "\",\"command\":\"start\"}}";
-  mqtt.publish(topic.c_str(), start.c_str());
   const String pushAll = String("{\"pushing\":{\"sequence_id\":\"") +
-                         ++sequenceId + "\",\"command\":\"pushall\"}}";
+                         ++sequenceId +
+                         "\",\"command\":\"pushall\",\"version\":1,"
+                         "\"push_target\":1}}";
   mqtt.publish(topic.c_str(), pushAll.c_str());
 }
 
@@ -422,7 +458,6 @@ void maintainWiFi() {
 void maintainMqtt() {
   if (!settings.complete() || WiFi.status() != WL_CONNECTED) return;
   if (mqtt.connected()) {
-    mqtt.loop();
     if (!mqttWasConnected) {
       mqttWasConnected = true;
       reportStatus("READY");
@@ -436,6 +471,9 @@ void maintainMqtt() {
     return;
   }
 
+  if (mqttWasConnected) {
+    Serial.printf("[MQTT] disconnected, state=%d; reconnecting\n", mqtt.state());
+  }
   mqttWasConnected = false;
   const uint32_t now = millis();
   if (now - lastMqttAttemptAt < Config::MQTT_RETRY_MS) return;
@@ -457,7 +495,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.2.0");
+  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.3.0");
   if (!settings.complete()) {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -584,7 +622,7 @@ void updateLed() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE H2D Timelapse Bridge v1.0.1");
+  Serial.println("\nSE H2D Timelapse Bridge v1.3.0");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   loadSettings();
   setupBle();
@@ -592,9 +630,13 @@ void setup() {
   tlsClient.setInsecure();  // H2D uses a per-device/self-signed LAN certificate.
   mqtt.setServer(settings.printerIp.c_str(), Config::MQTT_PORT);
   mqtt.setCallback(onMqttMessage);
-  mqtt.setKeepAlive(20);
+  mqtt.setKeepAlive(60);
   mqtt.setSocketTimeout(5);
-  mqtt.setBufferSize(Config::MQTT_BUFFER_BYTES);
+  if (!mqtt.setBufferSize(Config::MQTT_BUFFER_BYTES)) {
+    Serial.printf("[MQTT] failed to allocate %u-byte receive buffer\n",
+                  Config::MQTT_BUFFER_BYTES);
+    reportStatus("BUFFER_ERROR");
+  }
   if (settings.complete()) {
     reportStatus("WIFI_CONNECTING");
   } else {

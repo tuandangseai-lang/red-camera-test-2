@@ -45,6 +45,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private var reconnectWorkItem: DispatchWorkItem?
     private var recognitionWorkItem: DispatchWorkItem?
     private var configurationTimeoutWorkItem: DispatchWorkItem?
+    private var mqttLossWorkItem: DispatchWorkItem?
     private var lifecycleActive = true
 
     private struct ConfigurationCommand {
@@ -70,7 +71,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         accessCode: String
     ) {
         guard isConnected, isH2DBridge else {
-            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.2 • hãy nạp lại ESP32"
+            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.3 • hãy nạp lại ESP32"
             requestH2DStatus()
             return
         }
@@ -167,7 +168,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     self.sendNextConfigurationCommand()
                 }
             } else {
-                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.2")
+                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.3")
             }
         }
         configurationTimeoutWorkItem = timeout
@@ -222,6 +223,37 @@ final class H2DBLEManager: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: item)
     }
 
+    private func confirmH2DReady() {
+        mqttLossWorkItem?.cancel()
+        mqttLossWorkItem = nil
+        isH2DReady = true
+    }
+
+    private func markH2DUnavailable() {
+        mqttLossWorkItem?.cancel()
+        mqttLossWorkItem = nil
+        isH2DReady = false
+    }
+
+    private func beginMqttLossGrace() {
+        guard isH2DReady else {
+            markH2DUnavailable()
+            return
+        }
+        mqttLossWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.isH2DReady = false
+            if !self.hasPrinterAlert {
+                self.h2dBridgeStatus = "Mất dữ liệu H2D • ESP32 đang tự kết nối lại"
+            }
+        }
+        mqttLossWorkItem = item
+        // A short MQTT renegotiation must not make the Island flash green/yellow.
+        // A real outage still becomes visible after this grace period.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0, execute: item)
+    }
+
     private func activateTransportIfReady(_ peripheral: CBPeripheral) {
         guard peripheral.state == .connected,
               commandCharacteristic != nil,
@@ -235,7 +267,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             let item = DispatchWorkItem { [weak self] in
                 guard let self, self.isConnected, !self.isH2DBridge else { return }
                 self.hasBridgeError = true
-                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.2"
+                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.3"
             }
             recognitionWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: item)
@@ -279,19 +311,23 @@ final class H2DBLEManager: NSObject, ObservableObject {
             }
             switch status {
             case "READY", "ARMED", "DISARMED":
-                isH2DReady = true
-            case "BOOTING", "CONFIG_REQUIRED", "CONFIG_SAVED", "WIFI_CONNECTING", "WIFI_OK", "MQTT_CONNECTING":
-                isH2DReady = false
+                confirmH2DReady()
+            case "MQTT_CONNECTING":
+                beginMqttLossGrace()
+            case "BOOTING", "CONFIG_REQUIRED", "CONFIG_SAVED", "WIFI_CONNECTING", "WIFI_OK", "BUFFER_ERROR":
+                markH2DUnavailable()
             default:
                 break
             }
-            hasBridgeError = false
+            hasBridgeError = status == "BUFFER_ERROR"
             if !hasPrinterAlert {
-                h2dBridgeStatus = known[status] ?? fields.dropFirst(2).joined(separator: " • ")
+                h2dBridgeStatus = status == "BUFFER_ERROR"
+                    ? "ESP32 thiếu bộ nhớ nhận gói H2D • hãy khởi động lại"
+                    : known[status] ?? fields.dropFirst(2).joined(separator: " • ")
             }
         case "PRINT":
             guard fields.count >= 6 else { return }
-            isH2DReady = true
+            confirmH2DReady()
             h2dPrintState = fields[2].uppercased()
             h2dCurrentLayer = max(0, Int(fields[3]) ?? h2dCurrentLayer)
             h2dTotalLayers = max(0, Int(fields[4]) ?? h2dTotalLayers)
@@ -304,7 +340,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             }
         case "SNAP":
             guard fields.count >= 5 else { return }
-            isH2DReady = true
+            confirmH2DReady()
             let layer = max(1, Int(fields[2]) ?? 1)
             let total = max(layer, Int(fields[3]) ?? layer)
             h2dCurrentLayer = layer
@@ -318,7 +354,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             )
         case "DONE":
             guard fields.count >= 5 else { return }
-            isH2DReady = true
+            confirmH2DReady()
             let layer = max(0, Int(fields[2]) ?? h2dCurrentLayer)
             let total = max(layer, Int(fields[3]) ?? h2dTotalLayers)
             h2dPrintState = "FINISH"
@@ -377,7 +413,7 @@ extension H2DBLEManager: CBCentralManagerDelegate {
         case .poweredOn:
             startScanning()
         case .poweredOff:
-            isH2DReady = false
+            markH2DUnavailable()
             connectionText = "Bluetooth đang tắt"
         case .unauthorized:
             connectionText = "Hãy cấp quyền Bluetooth cho SE"
@@ -404,7 +440,7 @@ extension H2DBLEManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         isConnected = false
         isH2DBridge = false
-        isH2DReady = false
+        markH2DUnavailable()
         hasBridgeError = true
         connectionText = "Đã nối BLE • đang mở kênh H2D..."
         peripheral.discoverServices([serviceUUID])
@@ -419,7 +455,7 @@ extension H2DBLEManager: CBCentralManagerDelegate {
         if isConfiguring { failConfiguration("Kết nối ESP32 bị gián đoạn • hãy thử lại") }
         isConnected = false
         isH2DBridge = false
-        isH2DReady = false
+        markH2DUnavailable()
         hasBridgeError = true
         connectionText = "Kết nối lỗi, đang thử lại..."
         bridgePeripheral = nil
@@ -435,7 +471,7 @@ extension H2DBLEManager: CBCentralManagerDelegate {
         if isConfiguring { failConfiguration("ESP32 đã ngắt • đang kết nối lại") }
         isConnected = false
         isH2DBridge = false
-        isH2DReady = false
+        markH2DUnavailable()
         eventCharacteristic = nil
         commandCharacteristic = nil
         bridgePeripheral = nil
