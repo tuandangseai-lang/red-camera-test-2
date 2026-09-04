@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "8.2"
-    CURRENT_PROJECT_VERSION: "76"
+    MARKETING_VERSION: "8.3"
+    CURRENT_PROJECT_VERSION: "77"
 targets:
   RedCameraTest:
     type: application
@@ -18,6 +18,8 @@ targets:
       - path: RedCameraTest/CameraPreview.swift
       - path: RedCameraTest/CameraController.swift
       - path: RedCameraTest/BLEManager.swift
+      - path: RedCameraTest/H2DTimelapseManager.swift
+      - path: RedCameraTest/H2DTimelapseView.swift
       - path: RedCameraTest/VoiceNotifier.swift
       - path: RedCameraTest/Assets.xcassets
     info:
@@ -27,8 +29,8 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
-        NSBluetoothAlwaysUsageDescription: Kết nối ESP32 để điều khiển MaixCAM và giá đỡ bám tên lửa nước.
-        NSCameraUsageDescription: Dùng camera góc rộng để quay tên lửa nước; MaixCAM thực hiện AI tracking.
+        NSBluetoothAlwaysUsageDescription: Kết nối ESP32 để điều khiển giá đỡ và nhận tín hiệu từng lớp từ máy in H2D.
+        NSCameraUsageDescription: Quay tên lửa nước hoặc chụp từng lớp để tạo timelapse H2D.
         NSMicrophoneUsageDescription: Thu âm thanh cùng video thử nghiệm.
         NSPhotoLibraryAddUsageDescription: Lưu video thử nghiệm vào ứng dụng Ảnh.
         UILaunchScreen: {}
@@ -39,8 +41,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: vn.rockettracker.RedCameraTest
-        MARKETING_VERSION: "8.2"
-        CURRENT_PROJECT_VERSION: "76"
+        MARKETING_VERSION: "8.3"
+        CURRENT_PROJECT_VERSION: "77"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"

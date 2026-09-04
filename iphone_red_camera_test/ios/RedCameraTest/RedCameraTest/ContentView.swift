@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var camera = CameraController()
     @StateObject private var bluetooth = BLEManager()
+    @StateObject private var h2dTimelapse = H2DTimelapseManager()
     @Environment(\.scenePhase) private var scenePhase
     @State private var enrollmentPhaseStartedAt = Date()
     @State private var calibrationPhaseStartedAt = Date()
@@ -11,6 +12,7 @@ struct ContentView: View {
     @State private var showingRenamePrompt = false
     @State private var renameSlot: Int?
     @State private var renameText = ""
+    @State private var showingH2DTimelapse = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -52,9 +54,10 @@ struct ContentView: View {
             bluetooth.resumeFromForeground()
         }
         .onChange(of: scenePhase) { _, phase in
+            h2dTimelapse.handleScenePhase(phase)
             switch phase {
             case .active:
-                camera.resume()
+                if !showingH2DTimelapse { camera.resume() }
                 bluetooth.resumeFromForeground()
             case .inactive, .background:
                 camera.suspend()
@@ -82,8 +85,23 @@ struct ContentView: View {
                 camera.stopRecording()
             }
         }
+        .onChange(of: bluetooth.h2dTimelapseEvent) { _, event in
+            if let event { h2dTimelapse.handle(event) }
+        }
+        .onChange(of: showingH2DTimelapse) { _, showing in
+            if showing {
+                camera.suspend()
+            } else if scenePhase == .active {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    camera.resume()
+                }
+            }
+        }
         .sheet(isPresented: $showingProfiles) {
             savedProfilesSheet
+        }
+        .fullScreenCover(isPresented: $showingH2DTimelapse) {
+            H2DTimelapseView(bluetooth: bluetooth, timelapse: h2dTimelapse)
         }
         .alert("Đổi tên mẫu", isPresented: $showingRenamePrompt) {
             TextField("Tên mẫu", text: $renameText)
@@ -407,6 +425,25 @@ struct ContentView: View {
                         .lineLimit(1)
                 }
                 Spacer()
+                Button {
+                    showingH2DTimelapse = true
+                } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "printer.fill")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(bluetooth.isH2DBridge ? .green : .white.opacity(0.88))
+                            .frame(width: 34, height: 34)
+                            .background(.white.opacity(0.10), in: Circle())
+                        if h2dTimelapse.isArmed {
+                            Circle()
+                                .fill(.orange)
+                                .frame(width: 10, height: 10)
+                                .offset(x: 1, y: -1)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Timelapse máy in H2D")
                 Button {
                     showingProfiles = true
                 } label: {

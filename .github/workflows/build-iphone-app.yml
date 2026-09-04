@@ -1,4 +1,4 @@
-name: Tao IPA SE v8.2 build76 - banh ngang 40 tren 80
+name: Tao IPA SE v8.3 build77 - H2D timelapse theo layer
 
 on:
   workflow_dispatch:
@@ -63,6 +63,11 @@ jobs:
           grep -q 'case "SELECTED"' "RedCameraTest/BLEManager.swift"
           grep -q 'case "CENTER"' "RedCameraTest/BLEManager.swift"
           grep -q "MaixCAM" "RedCameraTest/ContentView.swift"
+          test -f "RedCameraTest/H2DTimelapseManager.swift"
+          test -f "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "H2D,SNAP" "RedCameraTest/BLEManager.swift"
+          grep -q "AVAssetWriter" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "isIdleTimerDisabled" "RedCameraTest/H2DTimelapseManager.swift"
           if grep -q "import Vision" "RedCameraTest/CameraController.swift"; then
             echo "iPhone khong duoc chay AI Vision trong kien truc MaixCAM"
             exit 1
@@ -103,18 +108,55 @@ jobs:
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "8.2"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "76"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "8.3"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "77"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v8.2-build76-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v8.3-build77-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v8.2-build76-unsigned-ipa
-          path: SE-v8.2-build76-unsigned.ipa
+          name: SE-v8.3-build77-unsigned-ipa
+          path: SE-v8.3-build77-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+  build-h2d-esp32:
+    name: Build ESP32 H2D Bridge
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Lay ma nguon
+        uses: actions/checkout@v6
+
+      - name: Cai Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Cai ESP32 va thu vien MQTT
+        run: |
+          set -euo pipefail
+          arduino-cli config init
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install PubSubClient
+
+      - name: Bien dich firmware cau noi H2D
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/SE-H2D-ESP32"
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32 \
+            --output-dir "$RUNNER_TEMP/SE-H2D-ESP32" \
+            iphone_red_camera_test/esp32_h2d_timelapse_ble
+
+      - name: Tai firmware ESP32
+        uses: actions/upload-artifact@v7
+        with:
+          name: SE-H2D-ESP32-v1.0.0
+          path: ${{ runner.temp }}/SE-H2D-ESP32/*
           if-no-files-found: error
           retention-days: 7

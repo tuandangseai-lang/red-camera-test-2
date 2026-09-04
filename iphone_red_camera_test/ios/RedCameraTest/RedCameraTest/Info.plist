@@ -23,9 +23,9 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Kết nối ESP32 để điều khiển MaixCAM và giá đỡ bám tên lửa nước.</string>
+	<string>Kết nối ESP32 để điều khiển giá đỡ và nhận tín hiệu từng lớp từ máy in H2D.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Dùng camera góc rộng để quay tên lửa nước; MaixCAM thực hiện AI tracking.</string>
+	<string>Quay tên lửa nước hoặc chụp từng lớp để tạo timelapse H2D.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Thu âm thanh cùng video thử nghiệm.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
