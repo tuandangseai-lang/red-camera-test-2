@@ -26,7 +26,7 @@ dùng LED trạng thái ở GPIO 25 và không sử dụng servo.
 
 ## Dùng app SE
 
-1. Mở SE và bấm nút hình máy in ở thanh trên.
+1. Mở SE; ứng dụng đi thẳng vào màn hình **Timelapse H2D**.
 2. Căn khung hình iPhone khi màn hình xem trước còn sáng.
 3. Nhập Wi-Fi, IP, Serial và Access Code; bấm **Lưu cấu hình vào ESP32**.
 4. Khi báo H2D sẵn sàng, bấm **Bật chờ H2D và làm tối màn hình**.

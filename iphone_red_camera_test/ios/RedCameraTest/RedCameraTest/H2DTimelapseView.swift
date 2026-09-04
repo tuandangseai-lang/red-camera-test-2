@@ -1,9 +1,8 @@
 import SwiftUI
 
 struct H2DTimelapseView: View {
-    @ObservedObject var bluetooth: BLEManager
+    @ObservedObject var bluetooth: H2DBLEManager
     @ObservedObject var timelapse: H2DTimelapseManager
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
     @AppStorage("SE.H2D.wifiSSID") private var wifiSSID = ""
@@ -27,8 +26,7 @@ struct H2DTimelapseView: View {
             timelapse.didStoreFrame = { layer, success in
                 bluetooth.acknowledgeH2DFrame(layer: layer, success: success)
             }
-            // Let the main tracking capture session release the camera first.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 timelapse.preparePreview()
             }
             bluetooth.requestH2DStatus()
@@ -75,11 +73,6 @@ struct H2DTimelapseView: View {
             .background(Color.black)
             .navigationTitle("Timelapse H2D")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Đóng") { dismiss() }
-                }
-            }
         }
     }
 
@@ -262,15 +255,6 @@ struct H2DTimelapseView: View {
             }
         }
         .background(Color.black)
-        .overlay(alignment: .topTrailing) {
-            if !timelapse.isArmed && !timelapse.isRendering {
-                Button { dismiss() } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 26))
-                }
-                .padding()
-            }
-        }
     }
 }
 

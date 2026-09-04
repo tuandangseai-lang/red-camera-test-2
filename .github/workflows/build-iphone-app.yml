@@ -1,4 +1,4 @@
-name: Tao IPA SE v8.3 build77 - H2D timelapse theo layer
+name: Tao IPA SE v9.0 build78 - H2D timelapse co dinh
 
 on:
   workflow_dispatch:
@@ -29,49 +29,29 @@ jobs:
         working-directory: iphone_red_camera_test/ios/RedCameraTest
         run: |
           set -euo pipefail
-          test -f "RedCameraTest/VoiceNotifier.swift"
+          test -f "RedCameraTest/H2DBLEManager.swift"
           xcodegen generate
 
-      - name: Kiem tra kien truc MaixCAM
+      - name: Kiem tra kien truc H2D co dinh
         working-directory: iphone_red_camera_test/ios/RedCameraTest
         run: |
           set -euo pipefail
           PLIST="RedCameraTest/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :NSCameraUsageDescription" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :NSBluetoothAlwaysUsageDescription" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :NSPhotoLibraryAddUsageDescription" "$PLIST"
           test -f "RedCameraTest/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
-          test -f "RedCameraTest/Assets.xcassets/WaterRocketTabIcon.imageset/WaterRocketTabIcon@3x.png"
-          grep -q "builtInUltraWideCamera" "RedCameraTest/CameraController.swift"
-          grep -q "lockedUltraWideZoomFactor" "RedCameraTest/CameraController.swift"
-          if grep -q "ramp(toVideoZoomFactor" "RedCameraTest/CameraController.swift"; then
-            echo "Camera iPhone phai giu 0,5x, khong duoc zoom/ramp"
-            exit 1
-          fi
-          grep -q "bluetooth.arm" "RedCameraTest/ContentView.swift"
-          grep -q "GimbalTrackingState" "RedCameraTest/BLEManager.swift"
-          grep -q "enrollmentOverlay" "RedCameraTest/ContentView.swift"
-          grep -q "ENROLL" "RedCameraTest/BLEManager.swift"
-          grep -q "WaterRocketTabIcon" "RedCameraTest/ContentView.swift"
-          grep -q "calibrateCenter" "RedCameraTest/BLEManager.swift"
-          grep -q "calibrationOverlay" "RedCameraTest/ContentView.swift"
-          grep -q "lockedTargetName" "RedCameraTest/BLEManager.swift"
-          grep -q "SelectionCandidate" "RedCameraTest/BLEManager.swift"
-          grep -q "candidateSelectionOverlay" "RedCameraTest/ContentView.swift"
-          grep -q "SpatialTapGesture" "RedCameraTest/ContentView.swift"
-          grep -q 'case "SELECTED"' "RedCameraTest/BLEManager.swift"
-          grep -q 'case "CENTER"' "RedCameraTest/BLEManager.swift"
-          grep -q "MaixCAM" "RedCameraTest/ContentView.swift"
+          test -f "RedCameraTest/H2DBLEManager.swift"
           test -f "RedCameraTest/H2DTimelapseManager.swift"
           test -f "RedCameraTest/H2DTimelapseView.swift"
-          grep -q 'case "SNAP"' "RedCameraTest/BLEManager.swift"
+          grep -q 'case "SNAP"' "RedCameraTest/H2DBLEManager.swift"
           grep -q "AVAssetWriter" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "isIdleTimerDisabled" "RedCameraTest/H2DTimelapseManager.swift"
-          if grep -q "import Vision" "RedCameraTest/CameraController.swift"; then
-            echo "iPhone khong duoc chay AI Vision trong kien truc MaixCAM"
-            exit 1
-          fi
+          grep -q "H2DTimelapseView" "RedCameraTest/ContentView.swift"
+          ! grep -q "CameraController.swift" project.yml
+          ! grep -q "path: RedCameraTest/BLEManager.swift" project.yml
+          ! grep -q "VoiceNotifier.swift" project.yml
+          ! grep -q "NSMicrophoneUsageDescription" "$PLIST"
 
       - name: Bien dich app iPhone chua ky
         working-directory: iphone_red_camera_test/ios/RedCameraTest
@@ -108,19 +88,19 @@ jobs:
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "8.3"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "77"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "78"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v8.3-build77-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.0-build78-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v8.3-build77-unsigned-ipa
-          path: SE-v8.3-build77-unsigned.ipa
+          name: SE-v9.0-build78-unsigned-ipa
+          path: SE-v9.0-build78-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 

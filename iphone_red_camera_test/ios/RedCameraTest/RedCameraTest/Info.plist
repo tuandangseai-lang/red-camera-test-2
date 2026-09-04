@@ -23,19 +23,16 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Kết nối ESP32 để điều khiển giá đỡ và nhận tín hiệu từng lớp từ máy in H2D.</string>
+	<string>Kết nối ESP32 để nhận tín hiệu từng lớp từ máy in H2D.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Quay tên lửa nước hoặc chụp từng lớp để tạo timelapse H2D.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Thu âm thanh cùng video thử nghiệm.</string>
+	<string>Chụp từng lớp để tạo timelapse H2D.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Lưu video thử nghiệm vào ứng dụng Ảnh.</string>
+	<string>Lưu video timelapse H2D vào ứng dụng Ảnh.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIRequiredDeviceCapabilities</key>
 	<array>
 		<string>arm64</string>
-		<string>camera-flash</string>
 	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
