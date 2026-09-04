@@ -24,6 +24,9 @@ Chọn board **ESP32 Dev Module**, đặt **Partition Scheme = Huge APP (3MB No
 OTA/1MB SPIFFS)**, cài thư viện **PubSubClient**, sau đó nạp qua USB. Firmware
 dùng LED trạng thái ở GPIO 25 và không sử dụng servo.
 
+Firmware v1.1 gửi xác nhận riêng cho từng trường cấu hình. Nếu Bluetooth hụt
+một gói, app tự gửi lại tối đa hai lần và báo rõ bước lỗi thay vì chờ vô hạn.
+
 ## Dùng app SE
 
 1. Mở SE; ứng dụng đi thẳng vào màn hình **Timelapse H2D**.

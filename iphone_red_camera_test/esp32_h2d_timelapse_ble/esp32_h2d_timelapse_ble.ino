@@ -10,7 +10,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE H2D Timelapse Bridge v1.0.1
+// SE H2D Timelapse Bridge v1.1.0
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -396,7 +396,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.0.1");
+  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.1.0");
   if (!settings.complete()) {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -417,16 +417,22 @@ void handlePhoneCommand(String command) {
 
   if (head == "H2D_WIFI_SSID") {
     pendingSettings.wifiSsid = decodeBase64(argument);
+    queuePhoneEvent("H2D,CFG_ACK,SSID");
   } else if (head == "H2D_WIFI_PASS") {
     pendingSettings.wifiPassword = decodeBase64(argument);
+    queuePhoneEvent("H2D,CFG_ACK,PASS");
   } else if (head == "H2D_IP") {
     pendingSettings.printerIp = argument;
+    queuePhoneEvent("H2D,CFG_ACK,IP");
   } else if (head == "H2D_SERIAL") {
     pendingSettings.printerSerial = argument;
+    queuePhoneEvent("H2D,CFG_ACK,SERIAL");
   } else if (head == "H2D_CODE") {
     pendingSettings.accessCode = decodeBase64(argument);
+    queuePhoneEvent("H2D,CFG_ACK,CODE");
   } else if (head == "H2D_SAVE") {
     if (savePendingSettings()) {
+      queuePhoneEvent("H2D,CFG_ACK,SAVE");
       reportStatus("CONFIG_SAVED");
       disconnectNetwork();
     } else {

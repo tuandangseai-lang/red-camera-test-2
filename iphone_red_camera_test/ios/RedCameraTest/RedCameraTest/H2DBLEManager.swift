@@ -27,6 +27,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var h2dTotalLayers = 0
     @Published private(set) var h2dPrintPercent = 0
     @Published private(set) var h2dTimelapseEvent: H2DTimelapseEvent?
+    @Published private(set) var isConfiguring = false
+    @Published private(set) var configurationProgress = 0
+    @Published private(set) var hasBridgeError = false
 
     private let serviceUUID = CBUUID(string: "7E57A000-8E3A-4D6A-9B2B-13B10A000001")
     private let eventUUID = CBUUID(string: "7E57A001-8E3A-4D6A-9B2B-13B10A000001")
@@ -37,7 +40,19 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private var eventCharacteristic: CBCharacteristic?
     private var commandCharacteristic: CBCharacteristic?
     private var reconnectWorkItem: DispatchWorkItem?
+    private var recognitionWorkItem: DispatchWorkItem?
+    private var configurationTimeoutWorkItem: DispatchWorkItem?
     private var lifecycleActive = true
+
+    private struct ConfigurationCommand {
+        let payload: String
+        let acknowledgement: String
+        let label: String
+    }
+
+    private var configurationCommands: [ConfigurationCommand] = []
+    private var configurationIndex = 0
+    private var configurationRetryCount = 0
 
     override init() {
         super.init()
@@ -51,27 +66,38 @@ final class H2DBLEManager: NSObject, ObservableObject {
         printerSerial: String,
         accessCode: String
     ) {
-        let values = [wifiSSID, wifiPassword, printerIP, printerSerial, accessCode]
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard isConnected, isH2DBridge else {
+            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.1 • hãy nạp lại ESP32"
+            requestH2DStatus()
+            return
+        }
+
+        let values = [
+            wifiSSID.trimmingCharacters(in: .whitespacesAndNewlines),
+            wifiPassword,
+            printerIP.trimmingCharacters(in: .whitespacesAndNewlines),
+            printerSerial.trimmingCharacters(in: .whitespacesAndNewlines),
+            accessCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        ]
         guard values.allSatisfy({ !$0.isEmpty }) else {
             h2dBridgeStatus = "Hãy nhập đủ Wi-Fi, IP, serial và mã truy cập"
             return
         }
 
-        h2dBridgeStatus = "Đang gửi cấu hình bảo mật sang ESP32..."
-        let commands = [
-            "H2D_WIFI_SSID,\(base64(values[0]))",
-            "H2D_WIFI_PASS,\(base64(values[1]))",
-            "H2D_IP,\(values[2])",
-            "H2D_SERIAL,\(values[3])",
-            "H2D_CODE,\(base64(values[4]))",
-            "H2D_SAVE"
+        configurationTimeoutWorkItem?.cancel()
+        configurationCommands = [
+            ConfigurationCommand(payload: "H2D_WIFI_SSID,\(base64(values[0]))", acknowledgement: "SSID", label: "tên Wi-Fi"),
+            ConfigurationCommand(payload: "H2D_WIFI_PASS,\(base64(values[1]))", acknowledgement: "PASS", label: "mật khẩu Wi-Fi"),
+            ConfigurationCommand(payload: "H2D_IP,\(values[2])", acknowledgement: "IP", label: "địa chỉ H2D"),
+            ConfigurationCommand(payload: "H2D_SERIAL,\(values[3])", acknowledgement: "SERIAL", label: "serial H2D"),
+            ConfigurationCommand(payload: "H2D_CODE,\(base64(values[4]))", acknowledgement: "CODE", label: "Access Code"),
+            ConfigurationCommand(payload: "H2D_SAVE", acknowledgement: "SAVE", label: "lưu cấu hình")
         ]
-        for (index, command) in commands.enumerated() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 0.18) { [weak self] in
-                self?.send(command)
-            }
-        }
+        configurationIndex = 0
+        configurationRetryCount = 0
+        configurationProgress = 0
+        isConfiguring = true
+        sendNextConfigurationCommand()
     }
 
     func setH2DTimelapseArmed(_ armed: Bool) {
@@ -104,15 +130,73 @@ final class H2DBLEManager: NSObject, ObservableObject {
         Data(value.utf8).base64EncodedString()
     }
 
-    private func send(_ command: String) {
+    @discardableResult
+    private func send(_ command: String) -> Bool {
         guard let peripheral = bridgePeripheral,
               peripheral.state == .connected,
               let characteristic = commandCharacteristic,
-              let data = command.data(using: .utf8) else { return }
+              let data = command.data(using: .utf8) else { return false }
         let type: CBCharacteristicWriteType = characteristic.properties.contains(.write)
             ? .withResponse
             : .withoutResponse
         peripheral.writeValue(data, for: characteristic, type: type)
+        return true
+    }
+
+    private func sendNextConfigurationCommand() {
+        guard isConfiguring, configurationIndex < configurationCommands.count else { return }
+        let item = configurationCommands[configurationIndex]
+        h2dBridgeStatus = "Đang gửi \(configurationIndex + 1)/\(configurationCommands.count): \(item.label)"
+        guard send(item.payload) else {
+            failConfiguration("Mất kết nối Bluetooth • hãy thử lưu lại")
+            return
+        }
+
+        configurationTimeoutWorkItem?.cancel()
+        let expectedIndex = configurationIndex
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.isConfiguring,
+                  self.configurationIndex == expectedIndex else { return }
+            if self.configurationRetryCount < 2 {
+                self.configurationRetryCount += 1
+                self.h2dBridgeStatus = "ESP32 chưa xác nhận • đang gửi lại lần \(self.configurationRetryCount)"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    self.sendNextConfigurationCommand()
+                }
+            } else {
+                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.1")
+            }
+        }
+        configurationTimeoutWorkItem = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4, execute: timeout)
+    }
+
+    private func acceptConfigurationAcknowledgement(_ value: String) {
+        guard isConfiguring, configurationIndex < configurationCommands.count,
+              configurationCommands[configurationIndex].acknowledgement == value.uppercased() else { return }
+        configurationTimeoutWorkItem?.cancel()
+        configurationIndex += 1
+        configurationRetryCount = 0
+        configurationProgress = configurationIndex
+        if configurationIndex == configurationCommands.count {
+            isConfiguring = false
+            h2dBridgeStatus = "Đã lưu cấu hình • ESP32 đang kết nối Wi-Fi"
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                self?.sendNextConfigurationCommand()
+            }
+        }
+    }
+
+    private func failConfiguration(_ message: String) {
+        configurationTimeoutWorkItem?.cancel()
+        configurationCommands.removeAll()
+        configurationIndex = 0
+        configurationRetryCount = 0
+        configurationProgress = 0
+        isConfiguring = false
+        hasBridgeError = true
+        h2dBridgeStatus = message
     }
 
     private func startScanning() {
@@ -142,7 +226,17 @@ final class H2DBLEManager: NSObject, ObservableObject {
         let firstActivation = !isConnected
         isConnected = true
         connectionText = "Đã kết nối ESP32 • đang kiểm tra H2D"
-        if firstActivation { send("H2D_STATUS") }
+        if firstActivation {
+            send("H2D_STATUS")
+            recognitionWorkItem?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                guard let self, self.isConnected, !self.isH2DBridge else { return }
+                self.hasBridgeError = true
+                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.1"
+            }
+            recognitionWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: item)
+        }
     }
 
     private func parseEvent(_ event: String) {
@@ -150,10 +244,17 @@ final class H2DBLEManager: NSObject, ObservableObject {
             .split(separator: ",", omittingEmptySubsequences: false)
             .map(String.init)
         guard fields.count >= 2, fields[0].uppercased() == "H2D" else { return }
+        recognitionWorkItem?.cancel()
         isH2DBridge = true
         connectionText = "Đã kết nối ESP32 • cầu nối H2D"
 
         switch fields[1].uppercased() {
+        case "ESP32":
+            hasBridgeError = false
+        case "CFG_ACK":
+            guard fields.count >= 3 else { return }
+            hasBridgeError = false
+            acceptConfigurationAcknowledgement(fields[2])
         case "STATUS":
             guard fields.count >= 3 else { return }
             let status = fields[2].uppercased()
@@ -168,6 +269,12 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 "ARMED": "Đã bật chụp theo lớp • đang chờ máy in",
                 "DISARMED": "Đã dừng chụp theo lớp"
             ]
+            if status == "CONFIG_SAVED", isConfiguring {
+                configurationTimeoutWorkItem?.cancel()
+                configurationProgress = configurationCommands.count
+                isConfiguring = false
+            }
+            hasBridgeError = false
             h2dBridgeStatus = known[status] ?? fields.dropFirst(2).joined(separator: " • ")
         case "PRINT":
             guard fields.count >= 6 else { return }
@@ -175,6 +282,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             h2dCurrentLayer = max(0, Int(fields[3]) ?? h2dCurrentLayer)
             h2dTotalLayers = max(0, Int(fields[4]) ?? h2dTotalLayers)
             h2dPrintPercent = min(100, max(0, Int(fields[5]) ?? h2dPrintPercent))
+            hasBridgeError = h2dPrintState == "FAILED"
             h2dBridgeStatus = h2dPrintState == "RUNNING"
                 ? "H2D đang in lớp \(h2dCurrentLayer)/\(max(1, h2dTotalLayers))"
                 : "Trạng thái H2D: \(h2dPrintState)"
@@ -208,6 +316,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         case "ERROR":
             let detail = fields.dropFirst(2).joined(separator: " • ")
             h2dBridgeStatus = detail.isEmpty ? "Cầu nối H2D gặp lỗi" : detail
+            hasBridgeError = true
             h2dTimelapseEvent = H2DTimelapseEvent(
                 kind: .error,
                 layer: h2dCurrentLayer,
@@ -253,6 +362,7 @@ extension H2DBLEManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         isConnected = false
         isH2DBridge = false
+        hasBridgeError = true
         connectionText = "Đã nối BLE • đang mở kênh H2D..."
         peripheral.discoverServices([serviceUUID])
     }
@@ -262,8 +372,11 @@ extension H2DBLEManager: CBCentralManagerDelegate {
         didFailToConnect peripheral: CBPeripheral,
         error: Error?
     ) {
+        recognitionWorkItem?.cancel()
+        if isConfiguring { failConfiguration("Kết nối ESP32 bị gián đoạn • hãy thử lại") }
         isConnected = false
         isH2DBridge = false
+        hasBridgeError = true
         connectionText = "Kết nối lỗi, đang thử lại..."
         bridgePeripheral = nil
         scheduleReconnect()
@@ -274,6 +387,8 @@ extension H2DBLEManager: CBCentralManagerDelegate {
         didDisconnectPeripheral peripheral: CBPeripheral,
         error: Error?
     ) {
+        recognitionWorkItem?.cancel()
+        if isConfiguring { failConfiguration("ESP32 đã ngắt • đang kết nối lại") }
         isConnected = false
         isH2DBridge = false
         eventCharacteristic = nil
@@ -339,5 +454,16 @@ extension H2DBLEManager: CBPeripheralDelegate {
               let data = characteristic.value,
               let message = String(data: data, encoding: .utf8) else { return }
         parseEvent(message)
+    }
+
+    func peripheral(
+        _ peripheral: CBPeripheral,
+        didWriteValueFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        guard characteristic.uuid == commandUUID, let error else { return }
+        if isConfiguring {
+            failConfiguration("Bluetooth không gửi được dữ liệu: \(error.localizedDescription)")
+        }
     }
 }

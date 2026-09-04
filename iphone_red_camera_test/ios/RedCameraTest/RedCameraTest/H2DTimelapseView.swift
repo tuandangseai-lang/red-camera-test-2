@@ -11,6 +11,7 @@ struct H2DTimelapseView: View {
     @State private var wifiPassword = ""
     @State private var accessCode = ""
     @State private var showConfiguration = true
+    @State private var idlePulse = false
 
     var body: some View {
         ZStack {
@@ -22,7 +23,15 @@ struct H2DTimelapseView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            printerStatusIsland
+                .padding(.horizontal, 18)
+                .padding(.bottom, 6)
+        }
         .onAppear {
+            withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) {
+                idlePulse = true
+            }
             timelapse.didStoreFrame = { layer, success in
                 bluetooth.acknowledgeH2DFrame(layer: layer, success: success)
             }
@@ -40,6 +49,89 @@ struct H2DTimelapseView: View {
         .onChange(of: timelapse.isArmed) { _, armed in
             bluetooth.setH2DTimelapseArmed(armed)
         }
+    }
+
+    private enum PrinterIslandState: Equatable {
+        case idle
+        case preparing
+        case printing
+        case capturing
+        case error
+
+        var color: Color {
+            switch self {
+            case .idle, .preparing: return .yellow
+            case .printing: return .green
+            case .capturing: return .blue
+            case .error: return .red
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .idle: return "clock"
+            case .preparing: return "hourglass"
+            case .printing: return "printer.fill"
+            case .capturing: return "camera.fill"
+            case .error: return "exclamationmark.triangle.fill"
+            }
+        }
+    }
+
+    private var printerIslandState: PrinterIslandState {
+        if timelapse.isCapturing { return .capturing }
+        if bluetooth.hasBridgeError || !bluetooth.isConnected { return .error }
+        switch bluetooth.h2dPrintState.uppercased() {
+        case "FAILED", "ERROR": return .error
+        case "RUNNING": return .printing
+        case "PREPARE", "SLICING", "INIT", "HEATING", "PAUSE": return .preparing
+        default: return .idle
+        }
+    }
+
+    private var printerIslandTitle: String {
+        switch printerIslandState {
+        case .idle: return "H2D • CHƯA BẮT ĐẦU"
+        case .preparing: return "H2D • ĐANG CHUẨN BỊ"
+        case .printing: return "H2D • ĐANG IN \(bluetooth.h2dPrintPercent)%"
+        case .capturing: return "ĐANG CHỤP LỚP \(max(1, bluetooth.h2dCurrentLayer))"
+        case .error: return bluetooth.isConnected ? "H2D • CÓ LỖI" : "ESP32 • MẤT KẾT NỐI"
+        }
+    }
+
+    private var printerStatusIsland: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                Circle()
+                    .fill(printerIslandState.color.opacity(0.20))
+                    .frame(width: 29, height: 29)
+                Image(systemName: printerIslandState.icon)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(printerIslandState.color)
+            }
+
+            Text(printerIslandTitle)
+                .font(.custom("Arial", size: 12).weight(.bold))
+                .monospacedDigit()
+                .lineLimit(1)
+
+            Spacer(minLength: 4)
+
+            Circle()
+                .fill(printerIslandState.color)
+                .frame(width: 9, height: 9)
+                .shadow(color: printerIslandState.color.opacity(0.8), radius: 5)
+                .opacity(printerIslandState == .idle ? (idlePulse ? 1 : 0.18) : 1)
+        }
+        .padding(.horizontal, 13)
+        .frame(height: 43)
+        .background(.black.opacity(0.94), in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(printerIslandState.color.opacity(0.42), lineWidth: 1)
+        }
+        .shadow(color: printerIslandState.color.opacity(0.16), radius: 10, y: 3)
+        .accessibilityLabel(printerIslandTitle)
     }
 
     private var setupView: some View {
@@ -146,27 +238,41 @@ struct H2DTimelapseView: View {
             .buttonStyle(.plain)
 
             if showConfiguration {
-                Text("Trên H2D: Cài đặt › Mạng › LAN Only › bật Developer Mode. Ghi lại IP, Serial và Access Code.")
-                    .font(.custom("Arial", size: 12))
+                Label("Bắt buộc: LAN Only và Developer Mode trên H2D đều phải bật màu xanh.", systemImage: "exclamationmark.shield.fill")
+                    .font(.custom("Arial", size: 12).weight(.bold))
                     .foregroundStyle(.orange)
 
-                Group {
-                    TextField("Tên Wi-Fi mà ESP32 sẽ dùng", text: $wifiSSID)
-                    SecureField("Mật khẩu Wi-Fi", text: $wifiPassword)
-                    TextField("IP H2D, ví dụ 192.168.1.50", text: $printerIP)
+                VStack(alignment: .leading, spacing: 12) {
+                    configurationLabel("Tên Wi-Fi", detail: "Mạng mà ESP32 sẽ kết nối")
+                    TextField("Ví dụ: Khoá học cùng SE", text: $wifiSSID)
+
+                    configurationLabel("Mật khẩu Wi-Fi")
+                    SecureField("Nhập mật khẩu Wi-Fi", text: $wifiPassword)
+
+                    configurationLabel("IP của H2D")
+                    TextField("Ví dụ: 192.168.100.210", text: $printerIP)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.numbersAndPunctuation)
-                    TextField("Serial H2D", text: $printerSerial)
+
+                    configurationLabel("Serial H2D")
+                    TextField("Nhập số serial trên màn hình H2D", text: $printerSerial)
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled()
-                    SecureField("Access Code của H2D", text: $accessCode)
+
+                    configurationLabel("Access Code")
+                    SecureField("Nhập mã trong mục LAN Only", text: $accessCode)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 }
                 .font(.custom("Arial", size: 14))
                 .padding(12)
                 .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+
+                if bluetooth.isConfiguring {
+                    ProgressView(value: Double(bluetooth.configurationProgress), total: 6)
+                        .tint(.blue)
+                }
 
                 Button {
                     bluetooth.configureH2DBridge(
@@ -177,12 +283,15 @@ struct H2DTimelapseView: View {
                         accessCode: accessCode
                     )
                 } label: {
-                    Label("Lưu cấu hình vào ESP32", systemImage: "square.and.arrow.down")
+                    Label(
+                        bluetooth.isConfiguring ? "Đang gửi từng bước..." : "Lưu cấu hình vào ESP32",
+                        systemImage: bluetooth.isConfiguring ? "arrow.triangle.2.circlepath" : "square.and.arrow.down"
+                    )
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
-                .disabled(!bluetooth.isConnected)
+                .disabled(!bluetooth.isH2DBridge || bluetooth.isConfiguring)
             }
         }
         .cardStyle()
@@ -255,6 +364,19 @@ struct H2DTimelapseView: View {
             }
         }
         .background(Color.black)
+    }
+
+    private func configurationLabel(_ title: String, detail: String? = nil) -> some View {
+        HStack(spacing: 6) {
+            Text(title)
+                .font(.custom("Arial", size: 12).weight(.bold))
+                .foregroundStyle(.white.opacity(0.78))
+            if let detail {
+                Text("• \(detail)")
+                    .font(.custom("Arial", size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 
