@@ -10,7 +10,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE H2D Timelapse Bridge v1.0.0
+// SE H2D Timelapse Bridge v1.0.1
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -270,7 +270,10 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
   if (newTotal >= 0) totalLayers = newTotal;
   if (newPercent >= 0) printPercent = constrain(newPercent, 0, 100);
 
-  const bool running = printState == "RUNNING" || printState == "PREPARE";
+  // PREPARE may already report layer 0/1 while the bed is heating. Baseline
+  // only on the first real RUNNING packet, otherwise layer 1 is photographed
+  // before it has actually finished.
+  const bool running = printState == "RUNNING";
   if (running) {
     if (!wasRunning || (jobToken != "0" && jobToken != activeJob)) {
       resetForNewPrint(jobToken, currentLayer);
@@ -393,7 +396,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.0.0");
+  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.0.1");
   if (!settings.complete()) {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -513,7 +516,7 @@ void updateLed() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE H2D Timelapse Bridge v1.0.0");
+  Serial.println("\nSE H2D Timelapse Bridge v1.0.1");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   loadSettings();
   setupBle();
