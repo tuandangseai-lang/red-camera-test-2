@@ -65,7 +65,7 @@ jobs:
           grep -q "MaixCAM" "RedCameraTest/ContentView.swift"
           test -f "RedCameraTest/H2DTimelapseManager.swift"
           test -f "RedCameraTest/H2DTimelapseView.swift"
-          grep -q "H2D,SNAP" "RedCameraTest/BLEManager.swift"
+          grep -q 'case "SNAP"' "RedCameraTest/BLEManager.swift"
           grep -q "AVAssetWriter" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "isIdleTimerDisabled" "RedCameraTest/H2DTimelapseManager.swift"
           if grep -q "import Vision" "RedCameraTest/CameraController.swift"; then
