@@ -21,6 +21,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var connectionText = "Đang bật Bluetooth..."
     @Published private(set) var isConnected = false
     @Published private(set) var isH2DBridge = false
+    @Published private(set) var isH2DReady = false
     @Published private(set) var h2dBridgeStatus = "Chưa nhận dữ liệu H2D"
     @Published private(set) var h2dPrintState = "IDLE"
     @Published private(set) var h2dCurrentLayer = 0
@@ -30,6 +31,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var isConfiguring = false
     @Published private(set) var configurationProgress = 0
     @Published private(set) var hasBridgeError = false
+    @Published private(set) var hasPrinterAlert = false
+    @Published private(set) var printerAlertText = ""
 
     private let serviceUUID = CBUUID(string: "7E57A000-8E3A-4D6A-9B2B-13B10A000001")
     private let eventUUID = CBUUID(string: "7E57A001-8E3A-4D6A-9B2B-13B10A000001")
@@ -67,7 +70,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         accessCode: String
     ) {
         guard isConnected, isH2DBridge else {
-            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.1 • hãy nạp lại ESP32"
+            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.2 • hãy nạp lại ESP32"
             requestH2DStatus()
             return
         }
@@ -164,7 +167,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     self.sendNextConfigurationCommand()
                 }
             } else {
-                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.1")
+                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.2")
             }
         }
         configurationTimeoutWorkItem = timeout
@@ -232,7 +235,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             let item = DispatchWorkItem { [weak self] in
                 guard let self, self.isConnected, !self.isH2DBridge else { return }
                 self.hasBridgeError = true
-                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.1"
+                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.2"
             }
             recognitionWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: item)
@@ -274,20 +277,34 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 configurationProgress = configurationCommands.count
                 isConfiguring = false
             }
+            switch status {
+            case "READY", "ARMED", "DISARMED":
+                isH2DReady = true
+            case "BOOTING", "CONFIG_REQUIRED", "CONFIG_SAVED", "WIFI_CONNECTING", "WIFI_OK", "MQTT_CONNECTING":
+                isH2DReady = false
+            default:
+                break
+            }
             hasBridgeError = false
-            h2dBridgeStatus = known[status] ?? fields.dropFirst(2).joined(separator: " • ")
+            if !hasPrinterAlert {
+                h2dBridgeStatus = known[status] ?? fields.dropFirst(2).joined(separator: " • ")
+            }
         case "PRINT":
             guard fields.count >= 6 else { return }
+            isH2DReady = true
             h2dPrintState = fields[2].uppercased()
             h2dCurrentLayer = max(0, Int(fields[3]) ?? h2dCurrentLayer)
             h2dTotalLayers = max(0, Int(fields[4]) ?? h2dTotalLayers)
             h2dPrintPercent = min(100, max(0, Int(fields[5]) ?? h2dPrintPercent))
-            hasBridgeError = h2dPrintState == "FAILED"
-            h2dBridgeStatus = h2dPrintState == "RUNNING"
-                ? "H2D đang in lớp \(h2dCurrentLayer)/\(max(1, h2dTotalLayers))"
-                : "Trạng thái H2D: \(h2dPrintState)"
+            hasBridgeError = false
+            if !hasPrinterAlert {
+                h2dBridgeStatus = h2dPrintState == "RUNNING"
+                    ? "H2D đang in lớp \(h2dCurrentLayer)/\(max(1, h2dTotalLayers))"
+                    : "Trạng thái H2D: \(h2dPrintState)"
+            }
         case "SNAP":
             guard fields.count >= 5 else { return }
+            isH2DReady = true
             let layer = max(1, Int(fields[2]) ?? 1)
             let total = max(layer, Int(fields[3]) ?? layer)
             h2dCurrentLayer = layer
@@ -301,6 +318,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             )
         case "DONE":
             guard fields.count >= 5 else { return }
+            isH2DReady = true
             let layer = max(0, Int(fields[2]) ?? h2dCurrentLayer)
             let total = max(layer, Int(fields[3]) ?? h2dTotalLayers)
             h2dPrintState = "FINISH"
@@ -313,6 +331,29 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 jobID: fields[4],
                 message: "H2D đã in xong"
             )
+        case "ALERT":
+            guard fields.count >= 3 else { return }
+            let active = fields[2] == "1"
+            hasPrinterAlert = active
+            printerAlertText = active
+                ? (fields.count >= 4
+                    ? fields.dropFirst(3).joined(separator: " • ")
+                    : "Máy in đang có cảnh báo")
+                : ""
+            if active {
+                h2dBridgeStatus = printerAlertText
+                h2dTimelapseEvent = H2DTimelapseEvent(
+                    kind: .error,
+                    layer: h2dCurrentLayer,
+                    totalLayers: h2dTotalLayers,
+                    jobID: "",
+                    message: printerAlertText
+                )
+            } else {
+                h2dBridgeStatus = isH2DReady
+                    ? "Cảnh báo đã được xử lý • H2D sẵn sàng"
+                    : "Cảnh báo đã được xử lý • đang kết nối H2D"
+            }
         case "ERROR":
             let detail = fields.dropFirst(2).joined(separator: " • ")
             h2dBridgeStatus = detail.isEmpty ? "Cầu nối H2D gặp lỗi" : detail
@@ -336,6 +377,7 @@ extension H2DBLEManager: CBCentralManagerDelegate {
         case .poweredOn:
             startScanning()
         case .poweredOff:
+            isH2DReady = false
             connectionText = "Bluetooth đang tắt"
         case .unauthorized:
             connectionText = "Hãy cấp quyền Bluetooth cho SE"
@@ -362,6 +404,7 @@ extension H2DBLEManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         isConnected = false
         isH2DBridge = false
+        isH2DReady = false
         hasBridgeError = true
         connectionText = "Đã nối BLE • đang mở kênh H2D..."
         peripheral.discoverServices([serviceUUID])
@@ -376,6 +419,7 @@ extension H2DBLEManager: CBCentralManagerDelegate {
         if isConfiguring { failConfiguration("Kết nối ESP32 bị gián đoạn • hãy thử lại") }
         isConnected = false
         isH2DBridge = false
+        isH2DReady = false
         hasBridgeError = true
         connectionText = "Kết nối lỗi, đang thử lại..."
         bridgePeripheral = nil
@@ -391,6 +435,7 @@ extension H2DBLEManager: CBCentralManagerDelegate {
         if isConfiguring { failConfiguration("ESP32 đã ngắt • đang kết nối lại") }
         isConnected = false
         isH2DBridge = false
+        isH2DReady = false
         eventCharacteristic = nil
         commandCharacteristic = nil
         bridgePeripheral = nil

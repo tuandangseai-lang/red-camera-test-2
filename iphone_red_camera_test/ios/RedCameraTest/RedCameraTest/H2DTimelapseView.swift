@@ -48,6 +48,7 @@ struct H2DTimelapseView: View {
         }
         .onChange(of: timelapse.isArmed) { _, armed in
             bluetooth.setH2DTimelapseArmed(armed)
+            if !armed { timelapse.preparePreview() }
         }
     }
 
@@ -56,11 +57,12 @@ struct H2DTimelapseView: View {
         case preparing
         case printing
         case capturing
+        case connecting
         case error
 
         var color: Color {
             switch self {
-            case .idle, .preparing: return .yellow
+            case .idle, .preparing, .connecting: return .yellow
             case .printing: return .green
             case .capturing: return .blue
             case .error: return .red
@@ -73,18 +75,20 @@ struct H2DTimelapseView: View {
             case .preparing: return "hourglass"
             case .printing: return "printer.fill"
             case .capturing: return "camera.fill"
+            case .connecting: return "wifi.exclamationmark"
             case .error: return "exclamationmark.triangle.fill"
             }
         }
     }
 
     private var printerIslandState: PrinterIslandState {
+        if bluetooth.hasBridgeError || bluetooth.hasPrinterAlert || !bluetooth.isConnected { return .error }
         if timelapse.isCapturing { return .capturing }
-        if bluetooth.hasBridgeError || !bluetooth.isConnected { return .error }
+        if !bluetooth.isH2DReady { return .connecting }
         switch bluetooth.h2dPrintState.uppercased() {
         case "FAILED", "ERROR": return .error
         case "RUNNING": return .printing
-        case "PREPARE", "SLICING", "INIT", "HEATING", "PAUSE": return .preparing
+        case "PREPARE", "PREPARING", "SLICING", "INIT", "HEATING", "PAUSE", "PAUSED": return .preparing
         default: return .idle
         }
     }
@@ -95,7 +99,10 @@ struct H2DTimelapseView: View {
         case .preparing: return "H2D • ĐANG CHUẨN BỊ"
         case .printing: return "H2D • ĐANG IN \(bluetooth.h2dPrintPercent)%"
         case .capturing: return "ĐANG CHỤP LỚP \(max(1, bluetooth.h2dCurrentLayer))"
-        case .error: return bluetooth.isConnected ? "H2D • CÓ LỖI" : "ESP32 • MẤT KẾT NỐI"
+        case .connecting: return "ESP32 • ĐANG KẾT NỐI H2D"
+        case .error:
+            if bluetooth.hasPrinterAlert { return "H2D • CÓ CẢNH BÁO" }
+            return bluetooth.isConnected ? "H2D • CÓ LỖI" : "ESP32 • MẤT KẾT NỐI"
         }
     }
 
@@ -121,7 +128,11 @@ struct H2DTimelapseView: View {
                 .fill(printerIslandState.color)
                 .frame(width: 9, height: 9)
                 .shadow(color: printerIslandState.color.opacity(0.8), radius: 5)
-                .opacity(printerIslandState == .idle ? (idlePulse ? 1 : 0.18) : 1)
+                .opacity(
+                    printerIslandState == .idle || printerIslandState == .connecting
+                        ? (idlePulse ? 1 : 0.18)
+                        : 1
+                )
         }
         .padding(.horizontal, 13)
         .frame(height: 43)
@@ -152,8 +163,8 @@ struct H2DTimelapseView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.orange)
-                    .disabled(!timelapse.isCameraReady || !bluetooth.isConnected || !bluetooth.isH2DBridge)
-                    .opacity(timelapse.isCameraReady && bluetooth.isConnected && bluetooth.isH2DBridge ? 1 : 0.42)
+                    .disabled(!timelapse.isPreviewRunning || !bluetooth.isH2DReady)
+                    .opacity(timelapse.isPreviewRunning && bluetooth.isH2DReady ? 1 : 0.42)
 
                     Text("Khi đã bật: giữ SE ở màn hình trước, có thể hạ sáng xuống mức thấp nhất nhưng không khóa iPhone. Camera chỉ thức dậy khi ESP32 báo một lớp vừa hoàn tất.")
                         .font(.custom("Arial", size: 12))
@@ -174,16 +185,27 @@ struct H2DTimelapseView: View {
                 Label("Khung hình iPhone", systemImage: "iphone.gen3")
                     .font(.custom("Arial", size: 15).weight(.bold))
                 Spacer()
-                Text(timelapse.isCameraReady ? "Sẵn sàng" : "Đang mở")
+                Text(timelapse.isPreviewRunning ? "Đang hiển thị" : "Đang mở")
                     .font(.custom("Arial", size: 12).weight(.bold))
-                    .foregroundStyle(timelapse.isCameraReady ? .green : .yellow)
+                    .foregroundStyle(timelapse.isPreviewRunning ? .green : .yellow)
             }
             H2DCameraPreview(session: timelapse.previewSession)
                 .frame(height: 220)
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(.white.opacity(0.14), lineWidth: 1)
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(.white.opacity(0.14), lineWidth: 1)
+                        if !timelapse.isPreviewRunning {
+                            VStack(spacing: 9) {
+                                ProgressView()
+                                    .tint(.orange)
+                                Text("Đang khởi động lại camera iPhone...")
+                                    .font(.custom("Arial", size: 12).weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
                 }
             Text("Đặt iPhone cố định, lấy trọn vùng in. Khi bắt đầu chờ, hình xem trước sẽ tắt hoàn toàn.")
                 .font(.custom("Arial", size: 12))
@@ -196,7 +218,11 @@ struct H2DTimelapseView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 Circle()
-                    .fill(bluetooth.isH2DBridge ? Color.green : bluetooth.isConnected ? .yellow : .red)
+                    .fill(
+                        bluetooth.hasBridgeError || !bluetooth.isConnected
+                            ? Color.red
+                            : bluetooth.isH2DReady ? .green : .yellow
+                    )
                     .frame(width: 10, height: 10)
                 Text(bluetooth.h2dBridgeStatus)
                     .font(.custom("Arial", size: 14).weight(.semibold))

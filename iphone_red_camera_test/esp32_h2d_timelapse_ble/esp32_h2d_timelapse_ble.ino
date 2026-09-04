@@ -10,7 +10,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE H2D Timelapse Bridge v1.1.0
+// SE H2D Timelapse Bridge v1.2.0
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -69,6 +69,11 @@ bool mqttWasConnected = false;
 bool statusDataSeen = false;
 bool finishSent = false;
 bool printWasRunning = false;
+bool hmsAlertActive = false;
+bool printErrorActive = false;
+bool lastReportedPrinterAlert = false;
+int printErrorCode = 0;
+int lastReportedPrintErrorCode = 0;
 String printState = "IDLE";
 String activeJob = "0";
 int currentLayer = 0;
@@ -225,6 +230,47 @@ bool extractJsonString(const uint8_t *payload, size_t length, const char *key,
   return cursor < length;
 }
 
+bool extractJsonArrayHasItems(const uint8_t *payload, size_t length,
+                              const char *key, bool &hasItems) {
+  size_t valuePosition = 0;
+  if (!findKey(payload, length, key, 0, valuePosition)) return false;
+  size_t cursor = valuePosition;
+  while (cursor < length &&
+         (payload[cursor] == ' ' || payload[cursor] == '\t' ||
+          payload[cursor] == '\r' || payload[cursor] == '\n')) {
+    ++cursor;
+  }
+  if (cursor >= length || payload[cursor] != '[') return false;
+  ++cursor;
+  while (cursor < length &&
+         (payload[cursor] == ' ' || payload[cursor] == '\t' ||
+          payload[cursor] == '\r' || payload[cursor] == '\n')) {
+    ++cursor;
+  }
+  hasItems = cursor < length && payload[cursor] != ']';
+  return true;
+}
+
+void reportPrinterAlert(bool force = false) {
+  const bool active = hmsAlertActive || printErrorActive;
+  if (!force && active == lastReportedPrinterAlert &&
+      printErrorCode == lastReportedPrintErrorCode) {
+    return;
+  }
+  if (active) {
+    if (printErrorActive) {
+      queuePhoneEvent(String("H2D,ALERT,1,H2D báo lỗi máy in • mã ") +
+                      printErrorCode + " • xem màn hình H2D");
+    } else {
+      queuePhoneEvent("H2D,ALERT,1,H2D có cảnh báo HMS • xem màn hình máy in");
+    }
+  } else {
+    queuePhoneEvent("H2D,ALERT,0,CLEAR");
+  }
+  lastReportedPrinterAlert = active;
+  lastReportedPrintErrorCode = printErrorCode;
+}
+
 uint32_t hashJobToken(const String &value) {
   uint32_t hash = 2166136261u;
   for (size_t i = 0; i < value.length(); ++i) {
@@ -265,7 +311,10 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
                         int newPercent, const String &jobToken) {
   const String previousState = printState;
   const bool wasRunning = printWasRunning;
-  if (!newState.isEmpty()) printState = newState;
+  if (!newState.isEmpty()) {
+    printState = newState;
+    printState.toUpperCase();
+  }
   if (newLayer >= 0) currentLayer = newLayer;
   if (newTotal >= 0) totalLayers = newTotal;
   if (newPercent >= 0) printPercent = constrain(newPercent, 0, 100);
@@ -306,12 +355,18 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   int layer = -1;
   int total = -1;
   int percent = -1;
+  int incomingPrintError = 0;
+  bool incomingHmsAlert = false;
   String state;
   String job;
   const bool hasLayer = extractLastJsonInt(payload, length, "layer_num", layer);
   const bool hasTotal =
       extractLastJsonInt(payload, length, "total_layer_num", total);
   const bool hasPercent = extractLastJsonInt(payload, length, "mc_percent", percent);
+  const bool hasPrintError =
+      extractLastJsonInt(payload, length, "print_error", incomingPrintError);
+  const bool hasHms =
+      extractJsonArrayHasItems(payload, length, "hms", incomingHmsAlert);
   const bool hasState = extractJsonString(payload, length, "gcode_state", state);
   bool hasJob = extractJsonString(payload, length, "job_id", job);
   if (!hasJob) hasJob = extractJsonString(payload, length, "subtask_id", job);
@@ -322,6 +377,12 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
                        hasTotal ? total : -1, hasPercent ? percent : -1,
                        hasJob ? safeJobID(job) : activeJob);
   }
+  if (hasPrintError) {
+    printErrorCode = incomingPrintError;
+    printErrorActive = incomingPrintError != 0;
+  }
+  if (hasHms) hmsAlertActive = incomingHmsAlert;
+  if (hasPrintError || hasHms) reportPrinterAlert();
 }
 
 void publishStatusRequest() {
@@ -396,7 +457,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.1.0");
+  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.2.0");
   if (!settings.complete()) {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -406,6 +467,7 @@ void sendCurrentStatus() {
   } else {
     reportStatus(timelapseArmed ? "ARMED" : "READY");
     reportPrintStatus(true);
+    reportPrinterAlert(true);
   }
 }
 

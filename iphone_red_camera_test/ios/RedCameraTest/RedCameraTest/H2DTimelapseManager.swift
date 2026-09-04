@@ -5,6 +5,7 @@ import UIKit
 
 final class H2DTimelapseManager: NSObject, ObservableObject {
     @Published private(set) var isCameraReady = false
+    @Published private(set) var isPreviewRunning = false
     @Published private(set) var isArmed = false
     @Published private(set) var isCapturing = false
     @Published private(set) var isRendering = false
@@ -53,8 +54,9 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
 
     func stopPreview() {
         sessionQueue.async { [weak self] in
-            guard let self, !self.isArmed, self.previewSession.isRunning else { return }
-            self.previewSession.stopRunning()
+            guard let self, !self.isArmed else { return }
+            if self.previewSession.isRunning { self.previewSession.stopRunning() }
+            self.publishOnMain { self.isPreviewRunning = false }
         }
     }
 
@@ -95,6 +97,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                     ? "Đã dừng và xóa ảnh của lần chụp này"
                     : "Đã dừng chờ H2D"
                 self.restoreDisplay()
+                self.preparePreview()
             }
         }
     }
@@ -116,6 +119,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             if isArmed {
                 UIApplication.shared.isIdleTimerDisabled = true
                 setDimmedDisplay()
+            } else if !isRendering {
+                preparePreview()
             }
         case .inactive, .background:
             if isArmed {
@@ -124,6 +129,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             sessionQueue.async { [weak self] in
                 guard let self, self.previewSession.isRunning else { return }
                 self.previewSession.stopRunning()
+                self.publishOnMain { self.isPreviewRunning = false }
             }
         @unknown default:
             break
@@ -329,6 +335,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             guard let self, self.currentRequest == nil, self.pendingRequests.isEmpty,
                   self.previewSession.isRunning else { return }
             self.previewSession.stopRunning()
+            self.publishOnMain { self.isPreviewRunning = false }
         }
         cameraStopWorkItem = item
         sessionQueue.asyncAfter(deadline: .now() + seconds, execute: item)
@@ -573,8 +580,16 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
 
     private func startSessionIfNeeded() {
         configureIfNeeded()
-        guard configured, !previewSession.isRunning else { return }
-        previewSession.startRunning()
+        guard configured else {
+            publishOnMain { self.isPreviewRunning = false }
+            return
+        }
+        if !previewSession.isRunning { previewSession.startRunning() }
+        let running = previewSession.isRunning
+        publishOnMain {
+            self.isPreviewRunning = running
+            if !running { self.statusText = "Camera chưa phát hình • đang thử mở lại" }
+        }
     }
 
     private func setDimmedDisplay() {
