@@ -20,8 +20,9 @@ Mở file:
 
 `esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino`
 
-Chọn board **ESP32 Dev Module**, cài thư viện **PubSubClient**, sau đó nạp qua
-USB. Firmware dùng LED trạng thái ở GPIO 25 và không sử dụng servo.
+Chọn board **ESP32 Dev Module**, đặt **Partition Scheme = Huge APP (3MB No
+OTA/1MB SPIFFS)**, cài thư viện **PubSubClient**, sau đó nạp qua USB. Firmware
+dùng LED trạng thái ở GPIO 25 và không sử dụng servo.
 
 ## Dùng app SE
 
