@@ -7,7 +7,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE H2D Timelapse Bridge v1.7.0
+// SE H2D Timelapse Bridge v1.7.1
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -373,14 +373,22 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
   if (actualLayerPrinting) {
     if (!wasRunning || (jobToken != "0" && jobToken != activeJob)) {
       resetForNewPrint(jobToken, currentLayer);
-      // Smooth Timelapse needs a keyframe at the real start of printing. The
-      // old baseline intentionally skipped this frame, leaving the first
-      // seconds of a print empty until layer 2 was announced.
-      if (currentLayer > 0) sendSnapshot(1);
+      // Smooth Timelapse needs a keyframe at the real start of printing. H2D
+      // commonly reports layer_num=0 in the first RUNNING packet, so this
+      // must be unconditional; otherwise the first seconds are empty until
+      // the next layer transition arrives.
+      sendSnapshot(1);
     } else if (currentLayer > lastObservedLayer) {
       // When H2D announces layer N, layer N-1 has completed. This avoids taking
-      // a picture while the reported layer is still being printed.
-      sendSnapshot(max(1, currentLayer - 1));
+      // a picture while the reported layer is still being printed. If a
+      // report jumps over more than one layer, queue each missing completed
+      // layer instead of silently turning the timelapse into a timer-like
+      // sequence.
+      const int lastCompletedLayer = currentLayer - 1;
+      for (int completedLayer = max(1, lastSnapLayer + 1);
+           completedLayer <= lastCompletedLayer; ++completedLayer) {
+        sendSnapshot(completedLayer);
+      }
       lastObservedLayer = currentLayer;
     }
     printWasRunning = true;
@@ -535,7 +543,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.7.0");
+  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.7.1");
   if (!settings.complete()) {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -664,7 +672,7 @@ void updateLed() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE H2D Timelapse Bridge v1.7.0");
+  Serial.println("\nSE H2D Timelapse Bridge v1.7.1");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   loadSettings();
   setupBle();
