@@ -80,7 +80,7 @@ jobs:
           grep -q "ClockwiseScreenBorderShape" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "9.0 / 16.0" "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'case "FAILED", "ERROR": return .idle' "RedCameraTest/H2DTimelapseView.swift"
-          grep -q "Cấu hình H2D đã lưu" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "Hồ sơ.*đã lưu" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "H2DTimelapseView" "RedCameraTest/ContentView.swift"
           ! grep -q "CameraController.swift" project.yml
           ! grep -q "path: RedCameraTest/BLEManager.swift" project.yml
