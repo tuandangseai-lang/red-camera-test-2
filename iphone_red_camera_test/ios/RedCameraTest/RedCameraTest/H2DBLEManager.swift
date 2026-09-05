@@ -375,7 +375,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
             if !hasPrinterAlert {
                 if isActuallyPrinting {
                     h2dBridgeStatus = "H2D đang in lớp \(h2dCurrentLayer)/\(max(1, h2dTotalLayers))"
-                } else if h2dPrintState == "RUNNING" || h2dStageCode > 0 {
+                } else if h2dPrintState == "RUNNING" ||
+                            (h2dStageCode > 0 && h2dStageCode != 255) {
                     h2dBridgeStatus = h2dStageText
                 } else {
                     h2dBridgeStatus = "Trạng thái H2D: \(h2dPrintState)"
