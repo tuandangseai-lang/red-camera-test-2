@@ -6,12 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "9.16"
-    CURRENT_PROJECT_VERSION: "95"
-packages:
-  VLCKit:
-    url: https://github.com/videolan/vlckit.git
-    exactVersion: 4.0.0-a24
+    MARKETING_VERSION: "9.17"
+    CURRENT_PROJECT_VERSION: "96"
 targets:
   RedCameraTest:
     type: application
@@ -23,11 +19,8 @@ targets:
       - path: RedCameraTest/H2DTimelapseManager.swift
       - path: RedCameraTest/H2DTimelapseView.swift
       - path: RedCameraTest/BambuPrinterProfile.swift
-      - path: RedCameraTest/H2DPrinterCameraView.swift
-      - path: RedCameraTest/H2DNativeRTSPPlayer.swift
+      - path: RedCameraTest/BambuCredentialStore.swift
       - path: RedCameraTest/Assets.xcassets
-    dependencies:
-      - package: VLCKit
     info:
       path: RedCameraTest/Info.plist
       properties:
@@ -37,7 +30,6 @@ targets:
         LSRequiresIPhoneOS: true
         NSBluetoothAlwaysUsageDescription: Kết nối ESP32 để nhận tín hiệu từng lớp từ máy in H2D.
         NSCameraUsageDescription: Chụp từng lớp để tạo timelapse H2D.
-        NSLocalNetworkUsageDescription: Kết nối trực tiếp camera H2D trong mạng Wi-Fi nội bộ.
         NSPhotoLibraryAddUsageDescription: Lưu video timelapse H2D vào ứng dụng Ảnh.
         UILaunchScreen: {}
         UIRequiredDeviceCapabilities:
@@ -47,8 +39,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: vn.rockettracker.RedCameraTest
-        MARKETING_VERSION: "9.16"
-        CURRENT_PROJECT_VERSION: "95"
+        MARKETING_VERSION: "9.17"
+        CURRENT_PROJECT_VERSION: "96"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"

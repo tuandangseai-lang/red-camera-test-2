@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for ESP32-C3 Mini v1.8.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.8.1
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -37,7 +37,7 @@ constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
 // External WS2812/NeoPixel strip. DATA -> GPIO4 through a 330-ohm resistor;
-// strip 5V/GND uses a separate 5V supply and MUST share GND with ESP32-C3.
+// strip 5V/GND uses a separate 5V supply and MUST share GND with ESP32.
 // Change only these two values if a different free pin/count is wired.
 constexpr uint8_t LED_STRIP_PIN = 4;
 constexpr uint16_t LED_STRIP_COUNT = 24;
@@ -977,7 +977,7 @@ void updateLedStrip() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32-C3 Mini v1.8.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.1");
   ledStrip.begin();
   ledStrip.setBrightness(Config::LED_BRIGHTNESS);
   ledStrip.clear();

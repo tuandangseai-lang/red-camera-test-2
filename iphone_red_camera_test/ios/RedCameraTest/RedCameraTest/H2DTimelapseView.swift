@@ -14,7 +14,6 @@ struct H2DTimelapseView: View {
     @State private var showConfiguration = true
     @State private var idlePulse = false
     @State private var showStopOptions = false
-    @State private var showPrinterCamera = false
     @State private var automaticConfigurationAttempted = false
     @State private var selectedPrinterKind: BambuPrinterKind = .h2d
     @State private var savedProfiles: [BambuPrinterProfile] = []
@@ -93,7 +92,7 @@ struct H2DTimelapseView: View {
                 // expensive AVCapture session again. This removes the visible
                 // hitch when leaving capture mode.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    guard !timelapse.isArmed, !showPrinterCamera else { return }
+                    guard !timelapse.isArmed else { return }
                     timelapse.preparePreview()
                 }
             }
@@ -133,20 +132,6 @@ struct H2DTimelapseView: View {
             // do not reopen this form.
             if hasError && bluetooth.isH2DBridge && !configurationSaved {
                 showConfiguration = true
-            }
-        }
-        .fullScreenCover(isPresented: $showPrinterCamera) {
-            H2DPrinterCameraView(
-                printerIP: printerIP,
-                accessCode: accessCode,
-                printerKind: detectedPrinterKind
-            )
-        }
-        .onChange(of: showPrinterCamera) { _, showing in
-            if !showing && !timelapse.isArmed {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                    timelapse.preparePreview()
-                }
             }
         }
         .confirmationDialog(
@@ -318,7 +303,6 @@ struct H2DTimelapseView: View {
                 VStack(spacing: 16) {
                     cameraCard
                     bridgeStatusCard
-                    remoteCameraCard
                     configurationCard
 
                     Button {
@@ -395,40 +379,6 @@ struct H2DTimelapseView: View {
             Text("Đặt iPhone dọc 16:9, lấy trọn vùng in. Khi bắt đầu chờ, hình xem trước sẽ tắt hoàn toàn.")
                 .font(.custom("Arial", size: 12))
                 .foregroundStyle(.secondary)
-        }
-        .cardStyle()
-    }
-
-    private var remoteCameraCard: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Label("Camera có sẵn của \(printerName)", systemImage: "video.fill")
-                .font(.custom("Arial", size: 15).weight(.bold))
-            Text("\(detectedPrinterKind.cameraDescription). iPhone phải ở cùng Wi‑Fi và Liveview LAN trên máy in phải được bật.")
-                .font(.custom("Arial", size: 12))
-                .foregroundStyle(.secondary)
-
-            SecureField("Access Code trong LAN Only (không phải Serial)", text: $accessCode)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .font(.custom("Arial", size: 13))
-                .padding(11)
-                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
-
-            Button {
-                H2DAccessCodeStore.save(accessCode, for: detectedPrinterKind)
-                timelapse.stopPreview()
-                showPrinterCamera = true
-            } label: {
-                Label("Xem camera \(printerName) trong SE", systemImage: "play.rectangle.fill")
-                    .font(.custom("Arial", size: 13).weight(.bold))
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.blue)
-            .disabled(
-                printerIP.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                accessCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            )
         }
         .cardStyle()
     }
@@ -724,18 +674,6 @@ struct H2DTimelapseView: View {
             Spacer(minLength: 4)
 
             if !timelapse.isRendering {
-                if !printerIP.isEmpty && !accessCode.isEmpty {
-                    Button {
-                        timelapse.setLiveMonitorVisible(false)
-                        showPrinterCamera = true
-                    } label: {
-                        Label("Xem camera \(printerName)", systemImage: "video.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .padding(.horizontal, 22)
-                }
-
                 HStack(spacing: 12) {
                     Button {
                         timelapse.setLiveMonitorVisible(!timelapse.isLiveMonitorVisible)

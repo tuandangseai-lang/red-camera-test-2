@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.16 build95 - 3 may Bambu, camera truc tiep va LED C3
+name: Tao IPA SE v9.17 build96 - ESP32 thuong, bo camera may in
 
 on:
   workflow_dispatch:
@@ -39,15 +39,13 @@ jobs:
           PLIST="RedCameraTest/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :NSCameraUsageDescription" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :NSBluetoothAlwaysUsageDescription" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Print :NSLocalNetworkUsageDescription" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :NSPhotoLibraryAddUsageDescription" "$PLIST"
           test -f "RedCameraTest/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
           test -f "RedCameraTest/H2DBLEManager.swift"
           test -f "RedCameraTest/H2DTimelapseManager.swift"
           test -f "RedCameraTest/H2DTimelapseView.swift"
           test -f "RedCameraTest/BambuPrinterProfile.swift"
-          test -f "RedCameraTest/H2DPrinterCameraView.swift"
-          test -f "RedCameraTest/H2DNativeRTSPPlayer.swift"
+          test -f "RedCameraTest/BambuCredentialStore.swift"
           grep -q 'case "SNAP"' "RedCameraTest/H2DBLEManager.swift"
           grep -q 'case "CFG_ACK"' "RedCameraTest/H2DBLEManager.swift"
           grep -q 'case "ALERT"' "RedCameraTest/H2DBLEManager.swift"
@@ -62,20 +60,13 @@ jobs:
           grep -q "recentFramePreviews" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "finishEarlyAndRender" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "isLiveMonitorVisible" "RedCameraTest/H2DTimelapseManager.swift"
-          grep -q "VLCKit" "RedCameraTest/H2DPrinterCameraView.swift"
-          grep -q "NWConnection" "RedCameraTest/H2DPrinterCameraView.swift"
-          grep -q "startAttempt" "RedCameraTest/H2DPrinterCameraView.swift"
-          grep -q "action = 2" "RedCameraTest/H2DPrinterCameraView.swift"
-          grep -q "H2DNativeRTSPPlayer" "RedCameraTest/H2DPrinterCameraView.swift"
-          grep -q "CMVideoFormatDescriptionCreateFromH264ParameterSets" "RedCameraTest/H2DNativeRTSPPlayer.swift"
-          grep -q "BambuJPEGCameraPlayer" "RedCameraTest/H2DNativeRTSPPlayer.swift"
           grep -q 'case "PRINTER"' "RedCameraTest/H2DBLEManager.swift"
           grep -q 'case "MATERIAL"' "RedCameraTest/H2DBLEManager.swift"
           grep -q 'hasPrefix("22E")' "RedCameraTest/BambuPrinterProfile.swift"
           grep -q "hasActivePrinterAlert" "RedCameraTest/H2DBLEManager.swift"
           grep -q "hasActiveCriticalPrinterAlert" "RedCameraTest/H2DBLEManager.swift"
           grep -q "attemptAutomaticConfigurationIfNeeded" "RedCameraTest/H2DTimelapseView.swift"
-          grep -q "lanAccessCode.recovery" "RedCameraTest/H2DPrinterCameraView.swift"
+          grep -q "lanAccessCode.recovery" "RedCameraTest/BambuCredentialStore.swift"
           grep -q "ScreenEdgeLEDStrip" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "ClockwiseScreenBorderShape" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "9.0 / 16.0" "RedCameraTest/H2DTimelapseView.swift"
@@ -85,6 +76,9 @@ jobs:
           ! grep -q "CameraController.swift" project.yml
           ! grep -q "path: RedCameraTest/BLEManager.swift" project.yml
           ! grep -q "VoiceNotifier.swift" project.yml
+          ! grep -q "VLCKit\|H2DPrinterCameraView\|H2DNativeRTSPPlayer" project.yml
+          ! grep -q "Xem camera" "RedCameraTest/H2DTimelapseView.swift"
+          ! /usr/libexec/PlistBuddy -c "Print :NSLocalNetworkUsageDescription" "$PLIST" >/dev/null 2>&1
           ! grep -q "NSMicrophoneUsageDescription" "$PLIST"
 
       - name: Bien dich app iPhone chua ky
@@ -122,24 +116,24 @@ jobs:
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.16"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "95"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.17"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "96"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.16-build95-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.17-build96-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.16-build95-unsigned-ipa
-          path: SE-v9.16-build95-unsigned.ipa
+          name: SE-v9.17-build96-unsigned-ipa
+          path: SE-v9.17-build96-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
   build-h2d-esp32:
-    name: Build ESP32-C3 Bambu Bridge
+    name: Build ESP32 Bambu Bridge
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -150,7 +144,7 @@ jobs:
       - name: Cai Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
-      - name: Cai ESP32-C3, MQTT, NimBLE va NeoPixel
+      - name: Cai ESP32, MQTT, NimBLE va NeoPixel
         run: |
           set -euo pipefail
           arduino-cli config init
@@ -163,16 +157,16 @@ jobs:
       - name: Bien dich firmware cau noi H2D
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/SE-Bambu-ESP32-C3"
+          mkdir -p "$RUNNER_TEMP/SE-Bambu-ESP32"
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32c3:PartitionScheme=huge_app \
-            --output-dir "$RUNNER_TEMP/SE-Bambu-ESP32-C3" \
+            --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
+            --output-dir "$RUNNER_TEMP/SE-Bambu-ESP32" \
             iphone_red_camera_test/esp32_h2d_timelapse_ble
 
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-C3-v1.8.0
-          path: ${{ runner.temp }}/SE-Bambu-ESP32-C3/*
+          name: SE-Bambu-ESP32-v1.8.1
+          path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

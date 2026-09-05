@@ -17,15 +17,6 @@ enum BambuPrinterKind: String, Codable, CaseIterable, Identifiable {
         if normalized.hasPrefix("22E") { return .p2s }
         return .unknown
     }
-
-    var cameraDescription: String {
-        switch self {
-        case .h2d: return "RTSPS trực tiếp • cổng 322"
-        case .a1: return "Live View LAN • cổng 6000"
-        case .p2s: return "Live View phụ thuộc firmware/khu vực của P2S"
-        case .unknown: return "Nhập serial để SE chọn đúng camera"
-        }
-    }
 }
 
 struct BambuPrinterProfile: Codable, Equatable, Identifiable {
