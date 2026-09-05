@@ -25,6 +25,10 @@ struct H2DTimelapseView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .overlay {
+            screenEdgeLEDStrip
+                .ignoresSafeArea()
+        }
         .safeAreaInset(edge: .top, spacing: 0) {
             printerStatusIsland
                 .padding(.horizontal, 18)
@@ -183,6 +187,31 @@ struct H2DTimelapseView: View {
         }
         .shadow(color: printerIslandState.color.opacity(0.16), radius: 10, y: 3)
         .accessibilityLabel(printerIslandTitle)
+    }
+
+    /// A low-cost status light that hugs the physical screen edge.  The
+    /// printing segment starts at 12 o'clock and advances clockwise with the
+    /// printer's reported progress; all other states use a steady/breathing
+    /// colour and do not continuously redraw the camera preview.
+    private var screenEdgeLEDStrip: some View {
+        let isPrinting = printerIslandState == .printing
+        let isBlinking = printerIslandState == .idle || printerIslandState == .connecting
+        let progress: Double? = isPrinting ? min(1, max(0, printerProgress)) : nil
+
+        return ScreenEdgeLEDStrip(
+            color: printerIslandState.color,
+            progress: progress,
+            blinks: isBlinking
+        )
+        .padding(.horizontal, 4)
+        .padding(.vertical, 6)
+    }
+
+    private var printerProgress: Double {
+        if bluetooth.h2dTotalLayers > 0 {
+            return Double(bluetooth.h2dCurrentLayer) / Double(max(1, bluetooth.h2dTotalLayers))
+        }
+        return Double(bluetooth.h2dPrintPercent) / 100.0
     }
 
     private var setupView: some View {
@@ -621,5 +650,111 @@ private extension View {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(.white.opacity(0.10), lineWidth: 1)
             }
+    }
+}
+
+private struct ScreenEdgeLEDStrip: View {
+    let color: Color
+    let progress: Double?
+    let blinks: Bool
+
+    @State private var pulse = true
+
+    var body: some View {
+        ZStack {
+            // Dim rail keeps the state readable even when progress is near 0%.
+            ClockwiseScreenBorderShape()
+                .stroke(
+                    color.opacity(0.20),
+                    style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: [1, 8])
+                )
+
+            if let progress {
+                ClockwiseScreenBorderShape()
+                    .trim(from: 0, to: max(0.008, progress))
+                    .stroke(
+                        color,
+                        style: StrokeStyle(lineWidth: 4, lineCap: .round, dash: [1, 8])
+                    )
+                    .shadow(color: color.opacity(0.8), radius: 5)
+
+                // A small bright head gives the progress a clock-hand feel
+                // without adding a continuously animated timer.
+                ClockwiseScreenBorderShape()
+                    .trim(from: max(0, progress - 0.028), to: progress)
+                    .stroke(
+                        .white.opacity(0.78),
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round)
+                    )
+                    .animation(.linear(duration: 0.35), value: progress)
+            } else {
+                ClockwiseScreenBorderShape()
+                    .stroke(
+                        color,
+                        style: StrokeStyle(lineWidth: 4, lineCap: .round, dash: [1, 8])
+                    )
+                    .shadow(color: color.opacity(0.65), radius: 5)
+            }
+        }
+        .opacity(blinks && !pulse ? 0.22 : 1)
+        .onAppear {
+            guard blinks else { return }
+            withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) {
+                pulse = false
+            }
+        }
+        .onChange(of: blinks) { _, shouldBlink in
+            if shouldBlink {
+                withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) {
+                    pulse = false
+                }
+            } else {
+                withAnimation(.linear(duration: 0.15)) {
+                    pulse = true
+                }
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// A rounded-rectangle path whose first point is at 12 o'clock.  Trimming it
+/// therefore fills the edge in the same clockwise direction as a clock hand.
+private struct ClockwiseScreenBorderShape: Shape {
+    var inset: CGFloat = 7
+    var cornerRadius: CGFloat = 24
+
+    func path(in rect: CGRect) -> Path {
+        let left = rect.minX + inset
+        let right = rect.maxX - inset
+        let top = rect.minY + inset
+        let bottom = rect.maxY - inset
+        let radius = min(cornerRadius, min((right - left) / 2, (bottom - top) / 2))
+        let midX = (left + right) / 2
+
+        var path = Path()
+        path.move(to: CGPoint(x: midX, y: top))
+        path.addLine(to: CGPoint(x: right - radius, y: top))
+        path.addQuadCurve(
+            to: CGPoint(x: right, y: top + radius),
+            control: CGPoint(x: right, y: top)
+        )
+        path.addLine(to: CGPoint(x: right, y: bottom - radius))
+        path.addQuadCurve(
+            to: CGPoint(x: right - radius, y: bottom),
+            control: CGPoint(x: right, y: bottom)
+        )
+        path.addLine(to: CGPoint(x: left + radius, y: bottom))
+        path.addQuadCurve(
+            to: CGPoint(x: left, y: bottom - radius),
+            control: CGPoint(x: left, y: bottom)
+        )
+        path.addLine(to: CGPoint(x: left, y: top + radius))
+        path.addQuadCurve(
+            to: CGPoint(x: left + radius, y: top),
+            control: CGPoint(x: left, y: top)
+        )
+        path.addLine(to: CGPoint(x: midX, y: top))
+        return path
     }
 }
