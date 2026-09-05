@@ -312,9 +312,10 @@ struct H2DTimelapseView: View {
                     session: timelapse.previewSession,
                     rotationAngle: timelapse.cameraRotationAngle
                 )
-                    // The sensor feed is rotated into a true portrait viewport.
-                    .frame(height: 300)
-                    .aspectRatio(9.0 / 16.0, contentMode: .fit)
+                     // Give the portrait viewport an explicit 9.0 / 16.0 size.  Leaving
+                    // only an aspect-ratio constraint inside an HStack with
+                    // Spacers can collapse the width to a thin strip.
+                    .frame(width: 180, height: 320)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay {
                         ZStack {
@@ -348,14 +349,12 @@ struct H2DTimelapseView: View {
                 .font(.custom("Arial", size: 12))
                 .foregroundStyle(.secondary)
 
-            if accessCode.isEmpty {
-                SecureField("Nhập Access Code để xem camera", text: $accessCode)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .font(.custom("Arial", size: 13))
-                    .padding(11)
-                    .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
-            }
+            SecureField("Access Code trong LAN Only (không phải Serial)", text: $accessCode)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.custom("Arial", size: 13))
+                .padding(11)
+                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
 
             Button {
                 H2DAccessCodeStore.save(accessCode)
@@ -516,8 +515,7 @@ struct H2DTimelapseView: View {
                         session: timelapse.previewSession,
                         rotationAngle: timelapse.cameraRotationAngle
                     )
-                    .frame(height: 300)
-                    .aspectRatio(9.0 / 16.0, contentMode: .fit)
+                    .frame(width: 180, height: 320)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay(alignment: .topTrailing) {
                         HStack(spacing: 8) {

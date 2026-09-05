@@ -5,6 +5,71 @@ import SwiftUI
 import UIKit
 import VLCKit
 
+/// H2D's LAN RTSPS endpoint uses a printer-local certificate.  VLC asks the
+/// host application to confirm that certificate before it starts decoding;
+/// without a dialog provider the question is silently cancelled and the app
+/// only reports a generic "camera could not be opened" error.  This renderer
+/// accepts certificate questions automatically (the stream is already limited
+/// to the user's private LAN and authenticated with the H2D access code),
+/// while cancelling unrelated dialogs instead of blocking playback.
+private final class H2DVLCCertificateDialogRenderer: NSObject, VLCCustomDialogRendererProtocol {
+    weak var provider: VLCDialogProvider?
+    var password = ""
+
+    func showError(withTitle error: String, message: String) {
+        // VLC's error is surfaced by VLCMediaPlayerStateError; no modal UI is
+        // needed here because the camera view has its own status banner.
+    }
+
+    func showLogin(
+        withTitle title: String,
+        message: String,
+        defaultUsername username: String?,
+        askingForStorage: Bool,
+        withReference reference: NSValue
+    ) {
+        // Credentials are supplied in the media URL/options.  Do not display
+        // a second login prompt that would stall the live view.
+        provider?.postUsername("bblp", andPassword: password, forDialogReference: reference, store: false)
+    }
+
+    func showQuestion(
+        withTitle title: String,
+        message: String,
+        type questionType: VLCDialogQuestionType,
+        cancelString: String?,
+        action1String: String?,
+        action2String: String?,
+        withReference reference: NSValue
+    ) {
+        let text = "\(title) \(message)".lowercased()
+        let isCertificateQuestion = ["certificate", "certificat", "ssl", "tls", "insecure", "security", "bảo mật"]
+            .contains { text.contains($0) }
+        // Action 1 is VLC's normal "accept/continue" button.  Any other
+        // question is cancelled so it cannot leave the player waiting.
+        provider?.postAction(isCertificateQuestion ? 1 : 3, forDialogReference: reference)
+    }
+
+    func showProgress(
+        withTitle title: String,
+        message: String,
+        isIndeterminate: Bool,
+        position: Float,
+        cancelString: String?,
+        withReference reference: NSValue
+    ) {
+        // No custom progress sheet; playback status is shown by SwiftUI.
+    }
+
+    func updateProgress(withReference reference: NSValue, message: String?, position: Float) {
+        // Intentionally empty.
+    }
+
+    func cancelDialog(withReference reference: NSValue) {
+        // Intentionally empty.
+    }
+}
+
 enum H2DAccessCodeStore {
     private static let service = "vn.rockettracker.RedCameraTest.h2d"
     private static let account = "lan-access-code"
@@ -57,16 +122,26 @@ final class H2DPrinterCameraPlayer: NSObject, ObservableObject, VLCMediaPlayerDe
     private var retryCount = 0
     private var activeAttemptID = UUID()
     private var isStopping = false
+    private let dialogRenderer = H2DVLCCertificateDialogRenderer()
+    private var dialogProvider: VLCDialogProvider?
 
     override init() {
         super.init()
         mediaPlayer.delegate = self
+        // Keep the provider on the same VLCLibrary instance as the player.
+        // The provider's renderer property is weak, so both objects are held
+        // strongly by this player for the entire camera session.
+        let provider = VLCDialogProvider(library: mediaPlayer.libraryInstance, customUI: true)
+        dialogProvider = provider
+        dialogRenderer.provider = provider
+        provider?.customRenderer = dialogRenderer
     }
 
     func attach(to view: UIView, printerIP: String, accessCode: String) {
         drawableView = view
         self.printerIP = printerIP.trimmingCharacters(in: .whitespacesAndNewlines)
         self.accessCode = accessCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        dialogRenderer.password = self.accessCode
         start()
     }
 
