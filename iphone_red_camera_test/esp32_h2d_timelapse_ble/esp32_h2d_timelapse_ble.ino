@@ -7,7 +7,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE H2D Timelapse Bridge v1.7.2
+// SE H2D Timelapse Bridge v1.7.3
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -29,6 +29,8 @@ constexpr uint16_t MQTT_BUFFER_BYTES = 40960;
 constexpr uint32_t WIFI_RETRY_MS = 12000;
 constexpr uint32_t MQTT_RETRY_MS = 10000;
 constexpr uint32_t STATUS_PERIOD_MS = 2000;
+constexpr uint32_t STATUS_REQUEST_RETRY_MS = 3500;
+constexpr uint32_t PRINT_DATA_STALE_MS = 10000;
 constexpr uint32_t DATA_TIMEOUT_MS = 45000;
 constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
@@ -88,6 +90,8 @@ uint32_t lastWifiAttemptAt = 0;
 uint32_t lastMqttAttemptAt = 0;
 uint32_t lastStatusNotifyAt = 0;
 uint32_t lastMqttMessageAt = 0;
+uint32_t lastPrintDataAt = 0;
+uint32_t lastStatusRequestAt = 0;
 uint32_t lastBleNotifyAt = 0;
 uint32_t sequenceId = 0;
 
@@ -475,6 +479,7 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   if (hasLayer || hasTotal || hasPercent || hasStage || hasState ||
       hasPrintError || hasHms) {
     statusDataSeen = true;
+    lastPrintDataAt = millis();
   }
   if (hasLayer || hasTotal || hasPercent || hasStage || hasState) {
     processPrintUpdate(hasState ? state : "", hasLayer ? layer : -1,
@@ -494,6 +499,7 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
 
 void publishStatusRequest() {
   if (!mqtt.connected()) return;
+  lastStatusRequestAt = millis();
   const String topic = "device/" + settings.printerSerial + "/request";
   const String pushAll = String("{\"pushing\":{\"sequence_id\":\"") +
                          ++sequenceId +
@@ -507,6 +513,8 @@ void disconnectNetwork() {
   WiFi.disconnect(false, false);
   mqttWasConnected = false;
   statusDataSeen = false;
+  lastPrintDataAt = 0;
+  lastStatusRequestAt = 0;
   lastWifiAttemptAt = 0;
   lastMqttAttemptAt = 0;
 }
@@ -531,6 +539,17 @@ void maintainMqtt() {
     if (!mqttWasConnected) {
       mqttWasConnected = true;
       reportStatus("READY");
+      publishStatusRequest();
+    }
+    // Some H2D firmware revisions do not immediately answer the first
+    // pushall sent right after MQTT subscription. Retry only while no fresh
+    // print data is arriving, so opening SE in the middle of a job reliably
+    // recovers RUNNING/layer/percent without flooding the printer.
+    const uint32_t now = millis();
+    const bool printDataStale =
+        lastPrintDataAt == 0 || now - lastPrintDataAt > Config::PRINT_DATA_STALE_MS;
+    if (printDataStale &&
+        now - lastStatusRequestAt >= Config::STATUS_REQUEST_RETRY_MS) {
       publishStatusRequest();
     }
     if (!statusDataSeen && lastMqttMessageAt > 0 &&
@@ -575,11 +594,13 @@ void maintainMqtt() {
   mqtt.subscribe(reportTopic.c_str(), 0);
   lastMqttMessageAt = millis();
   statusDataSeen = false;
+  lastPrintDataAt = 0;
+  lastStatusRequestAt = 0;
   Serial.println("[MQTT] connected and subscribed to H2D report topic");
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.7.2");
+  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.7.3");
   if (!settings.complete()) {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -587,9 +608,15 @@ void sendCurrentStatus() {
   } else if (!mqtt.connected()) {
     reportStatus("MQTT_CONNECTING");
   } else {
-    reportStatus(timelapseArmed ? "ARMED" : "READY");
-    reportPrintStatus(true);
-    reportPrinterAlert(true);
+    if (!statusDataSeen) {
+      // Never label a job IDLE from boot-time defaults while the first H2D
+      // packet is still in flight.
+      reportStatus("SYNCING");
+    } else {
+      reportStatus(timelapseArmed ? "ARMED" : "READY");
+      reportPrintStatus(true);
+      reportPrinterAlert(true);
+    }
   }
 }
 
@@ -708,7 +735,7 @@ void updateLed() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE H2D Timelapse Bridge v1.7.2");
+  Serial.println("\nSE H2D Timelapse Bridge v1.7.3");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   loadSettings();
   setupBle();

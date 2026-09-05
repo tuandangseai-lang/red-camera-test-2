@@ -122,7 +122,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         accessCode: String
     ) {
         guard isConnected, isH2DBridge else {
-            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.7.2 trở lên"
+            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.7.3 trở lên"
             requestH2DStatus()
             return
         }
@@ -249,7 +249,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     self.sendNextConfigurationCommand()
                 }
             } else {
-                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.7.2 trở lên")
+                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.7.3 trở lên")
             }
         }
         configurationTimeoutWorkItem = timeout
@@ -347,7 +347,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             let item = DispatchWorkItem { [weak self] in
                 guard let self, self.isConnected, !self.isH2DBridge else { return }
                 self.hasBridgeError = true
-                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.7.2 khi máy rảnh"
+                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.7.3 khi máy rảnh"
             }
             recognitionWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: item)
@@ -383,6 +383,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 "MQTT_CONNECTING": "Đang xác thực H2D LAN bằng Access Code",
                 "MQTT_AUTH_FAILED": "Không xác thực được H2D • kiểm tra Access Code LAN",
                 "MQTT_RETRY": "Mạng đã thấy H2D • đang thử kết nối lại",
+                "SYNCING": "Đang đồng bộ trạng thái hiện tại từ H2D",
                 "READY": "H2D đã sẵn sàng gửi dữ liệu lớp",
                 "ARMED": "Đã bật chụp theo lớp • đang chờ máy in",
                 "DISARMED": "Đã dừng chụp theo lớp"
@@ -395,7 +396,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             switch status {
             case "READY", "ARMED", "DISARMED":
                 confirmH2DReady()
-            case "MQTT_CONNECTING", "MQTT_AUTH_FAILED":
+            case "MQTT_CONNECTING", "MQTT_AUTH_FAILED", "SYNCING":
                 beginMqttLossGrace()
             case "BOOTING", "CONFIG_REQUIRED", "CONFIG_SAVED", "WIFI_CONNECTING", "WIFI_OK", "BUFFER_ERROR":
                 markH2DUnavailable()

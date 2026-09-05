@@ -45,9 +45,29 @@ private final class H2DVLCCertificateDialogRenderer: NSObject, VLCCustomDialogRe
         let text = "\(title) \(message)".lowercased()
         let isCertificateQuestion = ["certificate", "certificat", "ssl", "tls", "insecure", "security", "bảo mật"]
             .contains { text.contains($0) }
-        // Action 1 is VLC's normal "accept/continue" button.  Any other
-        // question is cancelled so it cannot leave the player waiting.
-        provider?.postAction(isCertificateQuestion ? 1 : 3, forDialogReference: reference)
+        guard isCertificateQuestion else {
+            provider?.postAction(3, forDialogReference: reference)
+            return
+        }
+
+        // VLC's first TLS dialog normally uses action 1 for "View
+        // certificate" and action 2 for "Accept temporarily".  Selecting
+        // action 1 (the old behaviour) opens the certificate-details branch
+        // instead of trusting H2D, so RTSP authentication never begins.
+        // Prefer the button whose label explicitly accepts/trusts; action 2
+        // is the correct fallback for VLC's standard insecure-site dialog.
+        let acceptWords = ["accept", "continue", "trust", "temporarily", "chấp nhận", "tiếp tục", "tin cậy"]
+        let first = (action1String ?? "").lowercased()
+        let second = (action2String ?? "").lowercased()
+        let action: Int
+        if acceptWords.contains(where: { second.contains($0) }) {
+            action = 2
+        } else if acceptWords.contains(where: { first.contains($0) }) {
+            action = 1
+        } else {
+            action = 2
+        }
+        provider?.postAction(action, forDialogReference: reference)
     }
 
     func showProgress(
@@ -285,7 +305,8 @@ final class H2DPrinterCameraPlayer: NSObject, ObservableObject, VLCMediaPlayerDe
         media.addOption(":rtsp-pwd=\(accessCode)")
         media.addOption(":network-caching=500")
         media.addOption(":live-caching=300")
-        media.addOption(":avcodec-hw=none")
+        // Let VLC use VideoToolbox for H.264. Forcing software decoding made
+        // the iPhone unnecessarily hot and did not help RTSPS authentication.
         media.addOption(":rtsp-frame-buffer-size=500000")
         media.addOption(":no-audio")
         media.addOption(":clock-jitter=0")

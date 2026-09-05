@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.13 build91 - H2D sync tien trinh giua chung
+name: Tao IPA SE v9.14 build92 - H2D tu dong dong bo trang thai
 
 on:
   workflow_dispatch:
@@ -53,6 +53,7 @@ jobs:
           grep -q "stg_cur\|h2dStageCode" "RedCameraTest/H2DBLEManager.swift"
           grep -q "configurationTimeoutWorkItem" "RedCameraTest/H2DBLEManager.swift"
           grep -q "MQTT_AUTH_FAILED" "RedCameraTest/H2DBLEManager.swift"
+          grep -q "SYNCING" "RedCameraTest/H2DBLEManager.swift"
           grep -q "H2DWiFiPasswordStore" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "AVAssetWriter" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "isIdleTimerDisabled" "RedCameraTest/H2DTimelapseManager.swift"
@@ -62,6 +63,7 @@ jobs:
           grep -q "VLCKit" "RedCameraTest/H2DPrinterCameraView.swift"
           grep -q "NWConnection" "RedCameraTest/H2DPrinterCameraView.swift"
           grep -q "startAttempt" "RedCameraTest/H2DPrinterCameraView.swift"
+          grep -q "action = 2" "RedCameraTest/H2DPrinterCameraView.swift"
           grep -q "hasActivePrinterAlert" "RedCameraTest/H2DBLEManager.swift"
           grep -q "ScreenEdgeLEDStrip" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "ClockwiseScreenBorderShape" "RedCameraTest/H2DTimelapseView.swift"
@@ -109,19 +111,19 @@ jobs:
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.13"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "91"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.14"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "92"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.13-build91-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.14-build92-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.13-build91-unsigned-ipa
-          path: SE-v9.13-build91-unsigned.ipa
+          name: SE-v9.14-build92-unsigned-ipa
+          path: SE-v9.14-build92-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -158,7 +160,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-H2D-ESP32-v1.7.2
+          name: SE-H2D-ESP32-v1.7.3
           path: ${{ runner.temp }}/SE-H2D-ESP32/*
           if-no-files-found: error
           retention-days: 7
