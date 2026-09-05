@@ -71,7 +71,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         accessCode: String
     ) {
         guard isConnected, isH2DBridge else {
-            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.3 • hãy nạp lại ESP32"
+            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.4 • hãy nạp lại ESP32"
             requestH2DStatus()
             return
         }
@@ -168,7 +168,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     self.sendNextConfigurationCommand()
                 }
             } else {
-                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.3")
+                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.4")
             }
         }
         configurationTimeoutWorkItem = timeout
@@ -267,7 +267,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             let item = DispatchWorkItem { [weak self] in
                 guard let self, self.isConnected, !self.isH2DBridge else { return }
                 self.hasBridgeError = true
-                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.3"
+                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.4"
             }
             recognitionWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: item)

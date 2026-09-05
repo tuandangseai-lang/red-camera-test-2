@@ -1,8 +1,5 @@
 #include <Arduino.h>
-#include <BLE2902.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
+#include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
@@ -10,7 +7,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE H2D Timelapse Bridge v1.3.0
+// SE H2D Timelapse Bridge v1.4.0
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -59,7 +56,7 @@ BridgeSettings settings;
 BridgeSettings pendingSettings;
 WiFiClientSecure tlsClient;
 PubSubClient mqtt(tlsClient);
-BLECharacteristic *eventCharacteristic = nullptr;
+NimBLECharacteristic *eventCharacteristic = nullptr;
 
 portMUX_TYPE eventMux = portMUX_INITIALIZER_UNLOCKED;
 char eventQueue[Config::EVENT_QUEUE_SIZE][Config::EVENT_LENGTH];
@@ -483,8 +480,15 @@ void maintainMqtt() {
   char clientId[32];
   snprintf(clientId, sizeof(clientId), "SE-H2D-%08lX",
            static_cast<unsigned long>(chip & 0xFFFFFFFF));
+  Serial.printf("[MQTT] connecting %s -> %s:%u, RSSI=%d, heap=%u, max=%u\n",
+                WiFi.localIP().toString().c_str(), settings.printerIp.c_str(),
+                Config::MQTT_PORT, WiFi.RSSI(), ESP.getFreeHeap(),
+                ESP.getMaxAllocHeap());
   if (!mqtt.connect(clientId, "bblp", settings.accessCode.c_str())) {
-    Serial.printf("[MQTT] connection failed, state=%d\n", mqtt.state());
+    char tlsError[96] = {};
+    const int tlsCode = tlsClient.lastError(tlsError, sizeof(tlsError));
+    Serial.printf("[MQTT] connection failed, state=%d, TLS=%d (%s), heap=%u\n",
+                  mqtt.state(), tlsCode, tlsError, ESP.getFreeHeap());
     return;
   }
   const String reportTopic = "device/" + settings.printerSerial + "/report";
@@ -495,7 +499,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.3.0");
+  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.4.0");
   if (!settings.complete()) {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -559,48 +563,50 @@ void handlePhoneCommand(String command) {
   }
 }
 
-class ServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer *) override {
+class ServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer *server, NimBLEConnInfo &connection) override {
     phoneConnected = true;
+    server->updateConnParams(connection.getConnHandle(), 12, 24, 0, 180);
     Serial.println("[BLE] iPhone connected");
   }
 
-  void onDisconnect(BLEServer *server) override {
+  void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int) override {
     phoneConnected = false;
     portENTER_CRITICAL(&eventMux);
     eventHead = eventTail = 0;
     portEXIT_CRITICAL(&eventMux);
     Serial.println("[BLE] iPhone disconnected");
-    server->startAdvertising();
+    NimBLEDevice::startAdvertising();
   }
 };
 
-class CommandCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *characteristic) override {
+class CommandCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *characteristic,
+               NimBLEConnInfo &) override {
     const String value = characteristic->getValue().c_str();
     if (!value.isEmpty()) handlePhoneCommand(value);
   }
 };
 
 void setupBle() {
-  BLEDevice::init(Config::DEVICE_NAME);
-  BLEDevice::setMTU(185);
-  BLEServer *server = BLEDevice::createServer();
+  NimBLEDevice::init(Config::DEVICE_NAME);
+  NimBLEDevice::setMTU(185);
+  NimBLEServer *server = NimBLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks());
-  BLEService *service = server->createService(Config::SERVICE_UUID);
+  NimBLEService *service = server->createService(Config::SERVICE_UUID);
   eventCharacteristic = service->createCharacteristic(
       Config::EVENT_UUID,
-      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-  eventCharacteristic->addDescriptor(new BLE2902());
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
   eventCharacteristic->setValue("H2D,STATUS,BOOTING");
-  BLECharacteristic *commandCharacteristic = service->createCharacteristic(
+  NimBLECharacteristic *commandCharacteristic = service->createCharacteristic(
       Config::COMMAND_UUID,
-      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   commandCharacteristic->setCallbacks(new CommandCallbacks());
   service->start();
-  BLEAdvertising *advertising = BLEDevice::getAdvertising();
+  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(Config::SERVICE_UUID);
-  advertising->setScanResponse(true);
+  advertising->setName(Config::DEVICE_NAME);
+  advertising->enableScanResponse(true);
   advertising->start();
 }
 
@@ -622,7 +628,7 @@ void updateLed() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE H2D Timelapse Bridge v1.3.0");
+  Serial.println("\nSE H2D Timelapse Bridge v1.4.0");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   loadSettings();
   setupBle();

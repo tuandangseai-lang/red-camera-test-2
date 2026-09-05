@@ -120,13 +120,14 @@ jobs:
       - name: Cai Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
-      - name: Cai ESP32 va thu vien MQTT
+      - name: Cai ESP32, MQTT va NimBLE
         run: |
           set -euo pipefail
           arduino-cli config init
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
           arduino-cli lib install PubSubClient
+          arduino-cli lib install NimBLE-Arduino@2.5.1
 
       - name: Bien dich firmware cau noi H2D
         run: |
@@ -140,7 +141,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-H2D-ESP32-v1.3.0
+          name: SE-H2D-ESP32-v1.4.0
           path: ${{ runner.temp }}/SE-H2D-ESP32/*
           if-no-files-found: error
           retention-days: 7
