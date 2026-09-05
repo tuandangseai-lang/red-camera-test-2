@@ -8,6 +8,7 @@ struct H2DTimelapseView: View {
     @AppStorage("SE.H2D.wifiSSID") private var wifiSSID = ""
     @AppStorage("SE.H2D.printerIP") private var printerIP = ""
     @AppStorage("SE.H2D.printerSerial") private var printerSerial = ""
+    @AppStorage("SE.H2D.configurationSaved") private var configurationSaved = false
     @State private var wifiPassword = ""
     @State private var accessCode = ""
     @State private var showConfiguration = true
@@ -38,6 +39,16 @@ struct H2DTimelapseView: View {
             if accessCode.isEmpty {
                 accessCode = H2DAccessCodeStore.load()
             }
+            // Migrate configurations saved by v9.6: the old build already
+            // persisted the non-secret fields, while this flag is new.
+            if !configurationSaved && !wifiSSID.isEmpty && !printerIP.isEmpty &&
+                !printerSerial.isEmpty && !accessCode.isEmpty {
+                configurationSaved = true
+            }
+            if configurationSaved && !wifiSSID.isEmpty && !printerIP.isEmpty &&
+                !printerSerial.isEmpty && !accessCode.isEmpty {
+                showConfiguration = false
+            }
             withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) {
                 idlePulse = true
             }
@@ -65,6 +76,25 @@ struct H2DTimelapseView: View {
                     guard !timelapse.isArmed, !showPrinterCamera else { return }
                     timelapse.preparePreview()
                 }
+            }
+        }
+        .onChange(of: bluetooth.isConfiguring) { wasConfiguring, configuring in
+            guard wasConfiguring && !configuring else { return }
+            if bluetooth.configurationProgress >= 6 && !bluetooth.hasBridgeError {
+                configurationSaved = true
+                showConfiguration = false
+            } else if bluetooth.hasBridgeError {
+                configurationSaved = false
+                showConfiguration = true
+            }
+        }
+        .onChange(of: bluetooth.hasBridgeError) { _, hasError in
+            // A bridge/configuration failure means the saved values need to be
+            // editable again. Printer HMS alerts use hasActivePrinterAlert and
+            // do not reopen this form.
+            if hasError && bluetooth.isH2DBridge {
+                configurationSaved = false
+                showConfiguration = true
             }
         }
         .fullScreenCover(isPresented: $showPrinterCamera) {
@@ -126,7 +156,8 @@ struct H2DTimelapseView: View {
     }
 
     private var printerIslandState: PrinterIslandState {
-        if bluetooth.hasBridgeError || bluetooth.hasActivePrinterAlert || !bluetooth.isConnected { return .error }
+        if bluetooth.hasActivePrinterAlert || visibleBridgeError { return .error }
+        if !bluetooth.isConnected { return .connecting }
         if timelapse.isCapturing { return .capturing }
         if !bluetooth.isH2DReady { return .connecting }
         switch bluetooth.h2dPrintState.uppercased() {
@@ -135,6 +166,10 @@ struct H2DTimelapseView: View {
         case "PREPARE", "PREPARING", "SLICING", "INIT", "HEATING", "PAUSE", "PAUSED": return .preparing
         default: return .idle
         }
+    }
+
+    private var visibleBridgeError: Bool {
+        bluetooth.hasBridgeError && bluetooth.isConnected && bluetooth.isH2DBridge
     }
 
     private var printerIslandTitle: String {
@@ -266,27 +301,33 @@ struct H2DTimelapseView: View {
                 }
                 .buttonStyle(.bordered)
             }
-            H2DCameraPreview(
-                session: timelapse.previewSession,
-                rotationAngle: timelapse.cameraRotationAngle
-            )
-                .frame(height: 220)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .overlay {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .stroke(.white.opacity(0.14), lineWidth: 1)
-                        if !timelapse.isPreviewRunning {
-                            VStack(spacing: 9) {
-                                ProgressView()
-                                    .tint(.orange)
-                                Text("Đang khởi động lại camera iPhone...")
-                                    .font(.custom("Arial", size: 12).weight(.semibold))
-                                    .foregroundStyle(.secondary)
+            HStack {
+                Spacer(minLength: 0)
+                H2DCameraPreview(
+                    session: timelapse.previewSession,
+                    rotationAngle: timelapse.cameraRotationAngle
+                )
+                    // The sensor feed is rotated into a true portrait viewport.
+                    .frame(height: 300)
+                    .aspectRatio(3.0 / 4.0, contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .stroke(.white.opacity(0.14), lineWidth: 1)
+                            if !timelapse.isPreviewRunning {
+                                VStack(spacing: 9) {
+                                    ProgressView()
+                                        .tint(.orange)
+                                    Text("Đang khởi động lại camera iPhone...")
+                                        .font(.custom("Arial", size: 12).weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }
-                }
+                Spacer(minLength: 0)
+            }
             Text("Đặt iPhone cố định, lấy trọn vùng in. Khi bắt đầu chờ, hình xem trước sẽ tắt hoàn toàn.")
                 .font(.custom("Arial", size: 12))
                 .foregroundStyle(.secondary)
@@ -335,7 +376,7 @@ struct H2DTimelapseView: View {
             HStack(spacing: 10) {
                 Circle()
                     .fill(
-                        bluetooth.hasBridgeError || !bluetooth.isConnected
+                        visibleBridgeError
                             ? Color.red
                             : bluetooth.isH2DReady ? .green : .yellow
                     )
@@ -439,6 +480,22 @@ struct H2DTimelapseView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
                 .disabled(!bluetooth.isH2DBridge || bluetooth.isConfiguring)
+            } else if configurationSaved {
+                VStack(alignment: .leading, spacing: 7) {
+                    Label("Cấu hình H2D đã lưu", systemImage: "checkmark.shield.fill")
+                        .font(.custom("Arial", size: 14).weight(.bold))
+                        .foregroundStyle(.green)
+                    Text("Wi‑Fi: \(wifiSSID)  •  IP: \(printerIP)  •  Serial: \(printerSerial)")
+                        .font(.custom("Arial", size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    Button("Thay đổi cấu hình") {
+                        configurationSaved = false
+                        showConfiguration = true
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.custom("Arial", size: 12).weight(.bold))
+                }
             }
         }
         .cardStyle()
@@ -448,28 +505,33 @@ struct H2DTimelapseView: View {
         VStack(spacing: 14) {
             Spacer(minLength: 8)
             if timelapse.isLiveMonitorVisible && !timelapse.isRendering {
-                H2DCameraPreview(
-                    session: timelapse.previewSession,
-                    rotationAngle: timelapse.cameraRotationAngle
-                )
-                .frame(height: 220)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .overlay(alignment: .topTrailing) {
-                    HStack(spacing: 8) {
-                        Button {
-                            timelapse.rotateCamera180()
-                        } label: {
-                            Image(systemName: "rotate.right")
+                HStack {
+                    Spacer(minLength: 0)
+                    H2DCameraPreview(
+                        session: timelapse.previewSession,
+                        rotationAngle: timelapse.cameraRotationAngle
+                    )
+                    .frame(height: 300)
+                    .aspectRatio(3.0 / 4.0, contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(alignment: .topTrailing) {
+                        HStack(spacing: 8) {
+                            Button {
+                                timelapse.rotateCamera180()
+                            } label: {
+                                Image(systemName: "rotate.right")
+                            }
+                            Button {
+                                timelapse.setLiveMonitorVisible(false)
+                            } label: {
+                                Image(systemName: "xmark")
+                            }
                         }
-                        Button {
-                            timelapse.setLiveMonitorVisible(false)
-                        } label: {
-                            Image(systemName: "xmark")
-                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.black.opacity(0.72))
+                        .padding(10)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.black.opacity(0.72))
-                    .padding(10)
+                    Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 18)
             } else {
@@ -666,15 +728,24 @@ private struct ScreenEdgeLEDStrip: View {
             ClockwiseScreenBorderShape()
                 .stroke(
                     color.opacity(0.20),
-                    style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: [1, 8])
+                    style: StrokeStyle(lineWidth: 3, lineCap: .round)
                 )
 
             if let progress {
                 ClockwiseScreenBorderShape()
                     .trim(from: 0, to: max(0.008, progress))
                     .stroke(
-                        color,
-                        style: StrokeStyle(lineWidth: 4, lineCap: .round, dash: [1, 8])
+                        AngularGradient(
+                            gradient: Gradient(colors: [
+                                color.opacity(0.35),
+                                color,
+                                .white.opacity(0.92)
+                            ]),
+                            center: .center,
+                            startAngle: .degrees(-90),
+                            endAngle: .degrees(270)
+                        ),
+                        style: StrokeStyle(lineWidth: 4, lineCap: .round)
                     )
                     .shadow(color: color.opacity(0.8), radius: 5)
 
@@ -691,7 +762,7 @@ private struct ScreenEdgeLEDStrip: View {
                 ClockwiseScreenBorderShape()
                     .stroke(
                         color,
-                        style: StrokeStyle(lineWidth: 4, lineCap: .round, dash: [1, 8])
+                        style: StrokeStyle(lineWidth: 4, lineCap: .round)
                     )
                     .shadow(color: color.opacity(0.65), radius: 5)
             }

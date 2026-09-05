@@ -7,7 +7,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE H2D Timelapse Bridge v1.6.0
+// SE H2D Timelapse Bridge v1.6.1
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -288,7 +288,7 @@ void reportPrinterAlert(bool force = false) {
   // while the printer is idle. Only surface them during a real print session;
   // FAILED/ERROR remain visible so a stopped print still reports its cause.
   const bool printContext =
-      printWasRunning || printState == "RUNNING" || printState == "PREPARE" ||
+      printState == "RUNNING" || printState == "PREPARE" ||
       printState == "PREPARING" || printState == "PAUSE" ||
       printState == "PAUSED" || printState == "FAILED" ||
       printState == "ERROR";
@@ -520,7 +520,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.5.0");
+  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.6.1");
   if (!settings.complete()) {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -649,7 +649,7 @@ void updateLed() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE H2D Timelapse Bridge v1.6.0");
+  Serial.println("\nSE H2D Timelapse Bridge v1.6.1");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   loadSettings();
   setupBle();

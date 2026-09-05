@@ -78,8 +78,17 @@ final class H2DPrinterCameraPlayer: NSObject, ObservableObject, VLCMediaPlayerDe
             hasError = true
             return
         }
+        // H2D exposes an authenticated RTSPS feed on TCP 322. Keep the
+        // credentials in VLC options as well as the URL: this avoids failures
+        // when a LAN access code contains characters that URLComponents must
+        // percent-escape.
         media.addOption(":rtsp-tcp")
-        media.addOption(":network-caching=350")
+        media.addOption(":rtsp-user=bblp")
+        media.addOption(":rtsp-pwd=\(accessCode)")
+        media.addOption(":network-caching=500")
+        media.addOption(":live-caching=300")
+        media.addOption(":avcodec-hw=none")
+        media.addOption(":rtsp-frame-buffer-size=500000")
         media.addOption(":no-audio")
         media.addOption(":clock-jitter=0")
         mediaPlayer.media = media
