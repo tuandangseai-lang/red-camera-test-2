@@ -37,7 +37,7 @@ private final class H2DVLCCertificateDialogRenderer: NSObject, VLCCustomDialogRe
         withTitle title: String,
         message: String,
         type questionType: VLCDialogQuestionType,
-        cancelString: String?,
+        cancel cancelString: String?,
         action1String: String?,
         action2String: String?,
         withReference reference: NSValue
@@ -55,7 +55,7 @@ private final class H2DVLCCertificateDialogRenderer: NSObject, VLCCustomDialogRe
         message: String,
         isIndeterminate: Bool,
         position: Float,
-        cancelString: String?,
+        cancel cancelString: String?,
         withReference reference: NSValue
     ) {
         // No custom progress sheet; playback status is shown by SwiftUI.
