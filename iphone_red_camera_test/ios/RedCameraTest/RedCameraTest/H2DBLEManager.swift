@@ -505,6 +505,11 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 // A non-critical HMS advisory remains visible below the main
                 // status, but must not replace "cleaning nozzle"/preparation
                 // or turn the Island red.
+                if shouldSurface {
+                    // A valid printer event proves the transport is alive. Clear
+                    // any stale bridge/auth error left over from a reconnect.
+                    hasBridgeError = false
+                }
                 if !shouldSurface {
                     hasBridgeError = false
                     h2dBridgeStatus = isH2DReady
