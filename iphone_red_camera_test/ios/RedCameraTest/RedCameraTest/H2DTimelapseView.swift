@@ -38,6 +38,9 @@ struct H2DTimelapseView: View {
             if accessCode.isEmpty {
                 accessCode = H2DAccessCodeStore.load()
             }
+            if wifiPassword.isEmpty {
+                wifiPassword = H2DWiFiPasswordStore.load()
+            }
             // Migrate configurations saved by v9.6: the old build already
             // persisted the non-secret fields, while this flag is new.
             if !configurationSaved && !wifiSSID.isEmpty && !printerIP.isEmpty &&
@@ -467,6 +470,7 @@ struct H2DTimelapseView: View {
 
                 Button {
                     H2DAccessCodeStore.save(accessCode)
+                    H2DWiFiPasswordStore.save(wifiPassword)
                     bluetooth.configureH2DBridge(
                         wifiSSID: wifiSSID,
                         wifiPassword: wifiPassword,
@@ -622,7 +626,7 @@ struct H2DTimelapseView: View {
                 .padding(.bottom, 20)
             }
 
-            Text("SE chờ 0,7 giây sau khi đổi lớp. Hãy bật Timelapse Smooth trong Bambu Studio để đầu in về một vị trí cố định trước mỗi ảnh.")
+            Text("Smooth Timelapse: mỗi lớp chỉ tạo 1 ảnh khi H2D báo đã chuyển lớp; ảnh đầu phiên cũng được giữ lại. SE chờ 0,7 giây để đầu in về vị trí cố định, không dùng hẹn giờ lặp.")
                 .font(.custom("Arial", size: 10))
                 .foregroundStyle(.white.opacity(0.38))
                 .multilineTextAlignment(.center)

@@ -121,20 +121,25 @@ final class H2DBLEManager: NSObject, ObservableObject {
         accessCode: String
     ) {
         guard isConnected, isH2DBridge else {
-            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.6 trở lên"
+            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.7 trở lên"
             requestH2DStatus()
             return
         }
 
+        let normalizedAccessCode = normalizeAccessCode(accessCode)
         let values = [
             wifiSSID.trimmingCharacters(in: .whitespacesAndNewlines),
             wifiPassword,
             printerIP.trimmingCharacters(in: .whitespacesAndNewlines),
             printerSerial.trimmingCharacters(in: .whitespacesAndNewlines),
-            accessCode.trimmingCharacters(in: .whitespacesAndNewlines)
+            normalizedAccessCode
         ]
         guard values.allSatisfy({ !$0.isEmpty }) else {
-            h2dBridgeStatus = "Hãy nhập đủ Wi-Fi, IP, serial và mã truy cập"
+            h2dBridgeStatus = "Hãy nhập đủ Wi-Fi, IP, serial và Access Code LAN"
+            return
+        }
+        guard values[4].count >= 6 else {
+            h2dBridgeStatus = "Access Code LAN phải có ít nhất 6 ký tự"
             return
         }
 
@@ -184,6 +189,12 @@ final class H2DBLEManager: NSObject, ObservableObject {
         Data(value.utf8).base64EncodedString()
     }
 
+    private func normalizeAccessCode(_ value: String) -> String {
+        value
+            .filter { $0.isNumber || ($0.isASCII && $0.isLetter) }
+            .lowercased()
+    }
+
     @discardableResult
     private func send(_ command: String) -> Bool {
         guard let peripheral = bridgePeripheral,
@@ -218,7 +229,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     self.sendNextConfigurationCommand()
                 }
             } else {
-                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.6 trở lên")
+                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.7 trở lên")
             }
         }
         configurationTimeoutWorkItem = timeout
@@ -317,7 +328,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             let item = DispatchWorkItem { [weak self] in
                 guard let self, self.isConnected, !self.isH2DBridge else { return }
                 self.hasBridgeError = true
-                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.6 khi máy rảnh"
+                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.7 khi máy rảnh"
             }
             recognitionWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: item)
@@ -349,7 +360,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 "CONFIG_SAVED": "Đã lưu cấu hình • đang kết nối lại",
                 "WIFI_CONNECTING": "ESP32 đang kết nối Wi-Fi",
                 "WIFI_OK": "Wi-Fi đã kết nối • đang tìm H2D",
-                "MQTT_CONNECTING": "Đang đăng nhập H2D trong mạng LAN",
+                "MQTT_CONNECTING": "Đang xác thực H2D LAN bằng Access Code",
+                "MQTT_AUTH_FAILED": "Không xác thực được H2D • kiểm tra Access Code LAN",
+                "MQTT_RETRY": "Mạng đã thấy H2D • đang thử kết nối lại",
                 "READY": "H2D đã sẵn sàng gửi dữ liệu lớp",
                 "ARMED": "Đã bật chụp theo lớp • đang chờ máy in",
                 "DISARMED": "Đã dừng chụp theo lớp"
@@ -362,14 +375,14 @@ final class H2DBLEManager: NSObject, ObservableObject {
             switch status {
             case "READY", "ARMED", "DISARMED":
                 confirmH2DReady()
-            case "MQTT_CONNECTING":
+            case "MQTT_CONNECTING", "MQTT_AUTH_FAILED":
                 beginMqttLossGrace()
             case "BOOTING", "CONFIG_REQUIRED", "CONFIG_SAVED", "WIFI_CONNECTING", "WIFI_OK", "BUFFER_ERROR":
                 markH2DUnavailable()
             default:
                 break
             }
-            hasBridgeError = status == "BUFFER_ERROR"
+            hasBridgeError = status == "BUFFER_ERROR" || status == "MQTT_AUTH_FAILED"
             if !hasPrinterAlert {
                 h2dBridgeStatus = status == "BUFFER_ERROR"
                     ? "ESP32 thiếu bộ nhớ nhận gói H2D • hãy khởi động lại"

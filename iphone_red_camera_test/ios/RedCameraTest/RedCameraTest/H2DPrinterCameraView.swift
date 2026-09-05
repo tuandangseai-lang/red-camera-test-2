@@ -90,8 +90,46 @@ enum H2DAccessCodeStore {
     }
 
     static func save(_ value: String) {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = value
+            .filter { $0.isNumber || ($0.isASCII && $0.isLetter) }
+            .lowercased()
         guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return }
+        let identity: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        let update: [String: Any] = [kSecValueData as String: data]
+        if SecItemUpdate(identity as CFDictionary, update as CFDictionary) == errSecItemNotFound {
+            var item = identity
+            item[kSecValueData as String] = data
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            SecItemAdd(item as CFDictionary, nil)
+        }
+    }
+}
+
+enum H2DWiFiPasswordStore {
+    private static let service = "vn.rockettracker.RedCameraTest.h2d"
+    private static let account = "wifi-password"
+
+    static func load() -> String {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data,
+              let value = String(data: data, encoding: .utf8) else { return "" }
+        return value
+    }
+
+    static func save(_ value: String) {
+        guard !value.isEmpty, let data = value.data(using: .utf8) else { return }
         let identity: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -140,7 +178,9 @@ final class H2DPrinterCameraPlayer: NSObject, ObservableObject, VLCMediaPlayerDe
     func attach(to view: UIView, printerIP: String, accessCode: String) {
         drawableView = view
         self.printerIP = printerIP.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.accessCode = accessCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.accessCode = accessCode
+            .filter { $0.isNumber || ($0.isASCII && $0.isLetter) }
+            .lowercased()
         dialogRenderer.password = self.accessCode
         start()
     }
@@ -315,7 +355,7 @@ final class H2DPrinterCameraPlayer: NSObject, ObservableObject, VLCMediaPlayerDe
             case .error:
                 guard !self.isStopping else { return }
                 self.isPlaying = false
-                self.scheduleRetry("Không mở được camera • kiểm tra LAN Only Liveview và Access Code")
+                self.scheduleRetry("Không xác thực được camera • kiểm tra Access Code LAN (username bblp)")
             case .stopped, .stopping:
                 self.isPlaying = false
             default:

@@ -7,7 +7,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE H2D Timelapse Bridge v1.6.1
+// SE H2D Timelapse Bridge v1.7.0
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -373,6 +373,10 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
   if (actualLayerPrinting) {
     if (!wasRunning || (jobToken != "0" && jobToken != activeJob)) {
       resetForNewPrint(jobToken, currentLayer);
+      // Smooth Timelapse needs a keyframe at the real start of printing. The
+      // old baseline intentionally skipped this frame, leaving the first
+      // seconds of a print empty until layer 2 was announced.
+      if (currentLayer > 0) sendSnapshot(1);
     } else if (currentLayer > lastObservedLayer) {
       // When H2D announces layer N, layer N-1 has completed. This avoids taking
       // a picture while the reported layer is still being printed.
@@ -514,6 +518,13 @@ void maintainMqtt() {
     const int tlsCode = tlsClient.lastError(tlsError, sizeof(tlsError));
     Serial.printf("[MQTT] connection failed, state=%d, TLS=%d (%s), heap=%u\n",
                   mqtt.state(), tlsCode, tlsError, ESP.getFreeHeap());
+    const int mqttState = mqtt.state();
+    if (mqttState == MQTT_CONNECT_BAD_CREDENTIALS ||
+        mqttState == MQTT_CONNECT_UNAUTHORIZED) {
+      reportStatus("MQTT_AUTH_FAILED");
+    } else {
+      reportStatus("MQTT_RETRY");
+    }
     return;
   }
   const String reportTopic = "device/" + settings.printerSerial + "/report";
@@ -524,7 +535,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.6.1");
+  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.7.0");
   if (!settings.complete()) {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -653,7 +664,7 @@ void updateLed() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE H2D Timelapse Bridge v1.6.1");
+  Serial.println("\nSE H2D Timelapse Bridge v1.7.0");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   loadSettings();
   setupBle();
