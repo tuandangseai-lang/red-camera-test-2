@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.20 build99 - chup Smooth tuc thi, canh bao am thanh, H2D hai dau in
+name: Tao IPA SE v9.21 build100 - chup Smooth tuc thi, canh bao am thanh, H2D hai dau in
 
 on:
   workflow_dispatch:
@@ -134,20 +134,21 @@ jobs:
           APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/RedCameraTest.app"
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
+          test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.20"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "99"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.21"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "100"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.20-build99-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.21-build100-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.20-build99-unsigned-ipa
-          path: SE-v9.20-build99-unsigned.ipa
+          name: SE-v9.21-build100-unsigned-ipa
+          path: SE-v9.21-build100-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
