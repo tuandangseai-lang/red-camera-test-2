@@ -59,7 +59,7 @@ private final class H2DVLCCertificateDialogRenderer: NSObject, VLCCustomDialogRe
         let acceptWords = ["accept", "continue", "trust", "temporarily", "chấp nhận", "tiếp tục", "tin cậy"]
         let first = (action1String ?? "").lowercased()
         let second = (action2String ?? "").lowercased()
-        let action: Int
+        let action: Int32
         if acceptWords.contains(where: { second.contains($0) }) {
             action = 2
         } else if acceptWords.contains(where: { first.contains($0) }) {
