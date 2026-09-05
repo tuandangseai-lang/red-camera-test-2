@@ -457,7 +457,7 @@ final class H2DNativeRTSPPlayer: ObservableObject {
             sampleBuffer,
             key: kCMSampleAttachmentKey_DisplayImmediately,
             value: kCFBooleanTrue,
-            attachmentMode: .shouldNotPropagate
+            attachmentMode: kCMAttachmentMode_ShouldNotPropagate
         )
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.stopped, let layer = self.videoView?.displayLayer else { return }
