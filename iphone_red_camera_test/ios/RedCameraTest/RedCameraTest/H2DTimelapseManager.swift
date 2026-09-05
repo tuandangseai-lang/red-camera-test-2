@@ -17,6 +17,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     @Published private(set) var isArmed = false
     @Published private(set) var isCapturing = false
     @Published private(set) var isRendering = false
+    @Published private(set) var isLiveMonitorVisible = false
+    @Published private(set) var cameraRotationAngle: CGFloat = 270
     @Published private(set) var capturedFrameCount = 0
     @Published private(set) var lastCapturedLayer = 0
     @Published private(set) var recentFramePreviews: [H2DCapturedFramePreview] = []
@@ -46,6 +48,9 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private var cameraStopWorkItem: DispatchWorkItem?
     private var originalBrightness: CGFloat?
     private var lastJobID = ""
+    private var monitorPreviewRequested = false
+    private var captureRotationAngle: CGFloat = 270
+    private let smoothPositionDelay: TimeInterval = 0.70
 
     func preparePreview() {
         requestCameraPermission { [weak self] granted in
@@ -92,6 +97,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.pendingRequests.removeAll()
             self.currentRequest = nil
             self.cameraStopWorkItem?.cancel()
+            self.monitorPreviewRequested = false
             if self.previewSession.isRunning { self.previewSession.stopRunning() }
             let directory = self.sessionDirectory
             self.sessionDirectory = nil
@@ -102,6 +108,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 self.isArmed = false
                 self.isCapturing = false
+                self.isLiveMonitorVisible = false
                 self.recentFramePreviews = []
                 self.statusText = deleteFrames
                     ? "Đã dừng và xóa ảnh của lần chụp này"
@@ -128,7 +135,12 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         case .active:
             if isArmed {
                 UIApplication.shared.isIdleTimerDisabled = true
-                setDimmedDisplay()
+                if isLiveMonitorVisible {
+                    showMonitorDisplay()
+                    sessionQueue.async { [weak self] in self?.startSessionIfNeeded() }
+                } else {
+                    setDimmedDisplay()
+                }
             } else if !isRendering {
                 preparePreview()
             }
@@ -153,6 +165,54 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         }
         let layer = max(1, lastCapturedLayer + 1)
         enqueueSnapshot(layer: layer, totalLayers: layer, jobID: "TEST")
+    }
+
+    func setLiveMonitorVisible(_ visible: Bool) {
+        sessionQueue.async { [weak self] in
+            guard let self, self.isArmed, !self.isRendering else { return }
+            self.monitorPreviewRequested = visible
+            self.cameraStopWorkItem?.cancel()
+            if visible {
+                self.startSessionIfNeeded()
+            } else if self.currentRequest == nil && self.pendingRequests.isEmpty {
+                self.scheduleCameraSleep(after: 0.35)
+            }
+            self.publishOnMain {
+                self.isLiveMonitorVisible = visible
+                if visible {
+                    self.showMonitorDisplay()
+                } else {
+                    self.setDimmedDisplay()
+                }
+            }
+        }
+    }
+
+    func rotateCamera180() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.captureRotationAngle = self.captureRotationAngle == 270 ? 90 : 270
+            if let connection = self.photoOutput.connection(with: .video),
+               connection.isVideoRotationAngleSupported(self.captureRotationAngle) {
+                connection.videoRotationAngle = self.captureRotationAngle
+            }
+            let angle = self.captureRotationAngle
+            self.publishOnMain { self.cameraRotationAngle = angle }
+        }
+    }
+
+    func finishEarlyAndRender() {
+        sessionQueue.async { [weak self] in
+            guard let self, self.isArmed, !self.isRendering else { return }
+            self.finishRequested = true
+            self.pendingRequests.removeAll()
+            self.monitorPreviewRequested = false
+            self.publishOnMain {
+                self.isLiveMonitorVisible = false
+                self.statusText = "Đã dừng chụp • đang ghép các ảnh đã có"
+            }
+            self.completeRunIfPossible()
+        }
     }
 
     private func requestCameraPermission(_ completion: @escaping (Bool) -> Void) {
@@ -227,6 +287,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         pendingRequests.removeAll()
         currentRequest = nil
         capturedLayers.removeAll()
+        monitorPreviewRequested = false
         capturedFrameCount = 0
         lastCapturedLayer = 0
         finishRequested = false
@@ -251,6 +312,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
 
         DispatchQueue.main.async {
             self.isArmed = true
+            self.isLiveMonitorVisible = false
             self.recentFramePreviews = []
             self.statusText = "Màn hình tối • đang chờ lớp in đầu tiên"
             self.setDimmedDisplay()
@@ -275,7 +337,13 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                 CaptureRequest(layer: layer, totalLayers: totalLayers, jobID: jobID)
             )
             self.pendingRequests.sort { $0.layer < $1.layer }
-            self.captureNextIfNeeded()
+            if jobID != "TEST" {
+                self.publishStatus("Lớp \(layer) đã xong • chờ đầu in vào vị trí chụp")
+            }
+            let delay = jobID == "TEST" ? 0 : self.smoothPositionDelay
+            self.sessionQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.captureNextIfNeeded()
+            }
         }
     }
 
@@ -313,8 +381,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                 settings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
             }
             if let connection = self.photoOutput.connection(with: .video),
-               connection.isVideoRotationAngleSupported(90) {
-                connection.videoRotationAngle = 90
+               connection.isVideoRotationAngleSupported(self.captureRotationAngle) {
+                connection.videoRotationAngle = self.captureRotationAngle
             }
             self.photoOutput.capturePhoto(with: settings, delegate: self)
         }
@@ -343,7 +411,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             }
             self.didStoreFrame?(finishedLayer, success)
         }
-        if pendingRequests.isEmpty {
+        if pendingRequests.isEmpty && !monitorPreviewRequested {
             scheduleCameraSleep(after: 0.9)
         }
         captureNextIfNeeded()
@@ -367,7 +435,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         cameraStopWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.currentRequest == nil, self.pendingRequests.isEmpty,
-                  self.previewSession.isRunning else { return }
+                  !self.monitorPreviewRequested, self.previewSession.isRunning else { return }
             self.previewSession.stopRunning()
             self.publishOnMain { self.isPreviewRunning = false }
         }
@@ -390,11 +458,20 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
               !isRendering else { return }
         finishRequested = false
         cameraStopWorkItem?.cancel()
+        monitorPreviewRequested = false
         if previewSession.isRunning { previewSession.stopRunning() }
         guard let directory = sessionDirectory, !capturedLayers.isEmpty else {
+            let emptyDirectory = sessionDirectory
+            sessionDirectory = nil
+            capturedLayers.removeAll()
+            if let emptyDirectory {
+                try? FileManager.default.removeItem(at: emptyDirectory)
+            }
             publishStatus("H2D đã xong nhưng chưa có ảnh để ghép")
             DispatchQueue.main.async {
                 self.isArmed = false
+                self.isCapturing = false
+                self.isLiveMonitorVisible = false
                 self.restoreDisplay()
             }
             return
@@ -402,6 +479,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
 
         DispatchQueue.main.async {
             self.isRendering = true
+            self.isLiveMonitorVisible = false
             self.statusText = "Đang ghép \(self.capturedLayers.count) lớp thành video..."
         }
         renderQueue.async { [weak self] in
@@ -606,6 +684,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.isRendering = false
             self.isArmed = false
             self.isCapturing = false
+            self.isLiveMonitorVisible = false
             self.lastVideoSaved = success
             self.statusText = message
             self.restoreDisplay()
@@ -629,6 +708,11 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private func setDimmedDisplay() {
         if originalBrightness == nil { originalBrightness = UIScreen.main.brightness }
         UIScreen.main.brightness = 0.01
+    }
+
+    private func showMonitorDisplay() {
+        let preferred = originalBrightness ?? UIScreen.main.brightness
+        UIScreen.main.brightness = max(0.28, preferred)
     }
 
     private func restoreDisplay() {
@@ -680,20 +764,36 @@ extension H2DTimelapseManager: AVCapturePhotoCaptureDelegate {
 
 struct H2DCameraPreview: UIViewRepresentable {
     let session: AVCaptureSession
+    let rotationAngle: CGFloat
 
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
         view.layerView.session = session
         view.layerView.videoGravity = .resizeAspectFill
+        view.rotationAngle = rotationAngle
         return view
     }
 
     func updateUIView(_ uiView: PreviewView, context: Context) {
         uiView.layerView.session = session
+        uiView.rotationAngle = rotationAngle
+        uiView.updateRotation()
     }
 
     final class PreviewView: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
         var layerView: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+        var rotationAngle: CGFloat = 270
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            updateRotation()
+        }
+
+        func updateRotation() {
+            guard let connection = layerView.connection,
+                  connection.isVideoRotationAngleSupported(rotationAngle) else { return }
+            connection.videoRotationAngle = rotationAngle
+        }
     }
 }

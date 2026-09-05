@@ -12,6 +12,7 @@ struct H2DTimelapseView: View {
     @State private var accessCode = ""
     @State private var showConfiguration = true
     @State private var idlePulse = false
+    @State private var showStopOptions = false
 
     var body: some View {
         ZStack {
@@ -49,6 +50,23 @@ struct H2DTimelapseView: View {
         .onChange(of: timelapse.isArmed) { _, armed in
             bluetooth.setH2DTimelapseArmed(armed)
             if !armed { timelapse.preparePreview() }
+        }
+        .confirmationDialog(
+            "Bạn muốn xử lý các ảnh đã chụp thế nào?",
+            isPresented: $showStopOptions,
+            titleVisibility: .visible
+        ) {
+            Button("Ghép \(timelapse.capturedFrameCount) ảnh thành video") {
+                bluetooth.setH2DTimelapseArmed(false)
+                timelapse.finishEarlyAndRender()
+            }
+            Button("Bỏ toàn bộ ảnh", role: .destructive) {
+                bluetooth.setH2DTimelapseArmed(false)
+                timelapse.disarm(deleteFrames: true)
+            }
+            Button("Tiếp tục chụp", role: .cancel) {}
+        } message: {
+            Text("Dừng chụp không dừng máy in H2D.")
         }
     }
 
@@ -151,6 +169,7 @@ struct H2DTimelapseView: View {
                 VStack(spacing: 16) {
                     cameraCard
                     bridgeStatusCard
+                    remoteCameraCard
                     configurationCard
 
                     Button {
@@ -188,8 +207,18 @@ struct H2DTimelapseView: View {
                 Text(timelapse.isPreviewRunning ? "Đang hiển thị" : "Đang mở")
                     .font(.custom("Arial", size: 12).weight(.bold))
                     .foregroundStyle(timelapse.isPreviewRunning ? .green : .yellow)
+                Button {
+                    timelapse.rotateCamera180()
+                } label: {
+                    Label("Xoay 180°", systemImage: "rotate.right")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.bordered)
             }
-            H2DCameraPreview(session: timelapse.previewSession)
+            H2DCameraPreview(
+                session: timelapse.previewSession,
+                rotationAngle: timelapse.cameraRotationAngle
+            )
                 .frame(height: 220)
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .overlay {
@@ -210,6 +239,21 @@ struct H2DTimelapseView: View {
             Text("Đặt iPhone cố định, lấy trọn vùng in. Khi bắt đầu chờ, hình xem trước sẽ tắt hoàn toàn.")
                 .font(.custom("Arial", size: 12))
                 .foregroundStyle(.secondary)
+        }
+        .cardStyle()
+    }
+
+    private var remoteCameraCard: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Label("Camera có sẵn của H2D", systemImage: "video.fill")
+                .font(.custom("Arial", size: 15).weight(.bold))
+            Text("Khi không chụp timelapse bằng SE, bạn có thể xem và điều khiển H2D từ xa bằng Bambu Handy qua tài khoản Bambu Cloud.")
+                .font(.custom("Arial", size: 12))
+                .foregroundStyle(.secondary)
+            Link(destination: URL(string: "https://apps.apple.com/app/bambu-handy/id1625671285")!) {
+                Label("Mở Bambu Handy để xem từ xa", systemImage: "arrow.up.forward.app")
+                    .font(.custom("Arial", size: 13).weight(.bold))
+            }
         }
         .cardStyle()
     }
@@ -330,29 +374,56 @@ struct H2DTimelapseView: View {
     private var activeCaptureView: some View {
         VStack(spacing: 14) {
             Spacer(minLength: 8)
-            ZStack {
-                Circle()
-                    .stroke(.white.opacity(0.08), lineWidth: 7)
-                    .frame(width: 150, height: 150)
-                Circle()
-                    .trim(from: 0, to: min(1, max(0.015,
-                        Double(bluetooth.h2dCurrentLayer) /
-                            Double(max(1, bluetooth.h2dTotalLayers)))))
-                    .stroke(
-                        timelapse.isRendering ? Color.cyan : Color.orange,
-                        style: StrokeStyle(lineWidth: 7, lineCap: .round)
-                    )
-                    .frame(width: 150, height: 150)
-                    .rotationEffect(.degrees(-90))
-                    .animation(.linear(duration: 0.3), value: bluetooth.h2dCurrentLayer)
-                VStack(spacing: 7) {
-                    Image(systemName: timelapse.isRendering ? "film.stack" : "camera.aperture")
-                        .font(.system(size: 30, weight: .semibold))
-                    Text("\(timelapse.capturedFrameCount)")
-                        .font(.custom("Arial", size: 38).monospacedDigit().weight(.bold))
-                    Text("ẢNH ĐÃ CHỤP")
-                        .font(.custom("Arial", size: 11).weight(.bold))
-                        .foregroundStyle(.white.opacity(0.45))
+            if timelapse.isLiveMonitorVisible && !timelapse.isRendering {
+                H2DCameraPreview(
+                    session: timelapse.previewSession,
+                    rotationAngle: timelapse.cameraRotationAngle
+                )
+                .frame(height: 220)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(alignment: .topTrailing) {
+                    HStack(spacing: 8) {
+                        Button {
+                            timelapse.rotateCamera180()
+                        } label: {
+                            Image(systemName: "rotate.right")
+                        }
+                        Button {
+                            timelapse.setLiveMonitorVisible(false)
+                        } label: {
+                            Image(systemName: "xmark")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.black.opacity(0.72))
+                    .padding(10)
+                }
+                .padding(.horizontal, 18)
+            } else {
+                ZStack {
+                    Circle()
+                        .stroke(.white.opacity(0.08), lineWidth: 7)
+                        .frame(width: 150, height: 150)
+                    Circle()
+                        .trim(from: 0, to: min(1, max(0.015,
+                            Double(bluetooth.h2dCurrentLayer) /
+                                Double(max(1, bluetooth.h2dTotalLayers)))))
+                        .stroke(
+                            timelapse.isRendering ? Color.cyan : Color.orange,
+                            style: StrokeStyle(lineWidth: 7, lineCap: .round)
+                        )
+                        .frame(width: 150, height: 150)
+                        .rotationEffect(.degrees(-90))
+                        .animation(.linear(duration: 0.3), value: bluetooth.h2dCurrentLayer)
+                    VStack(spacing: 7) {
+                        Image(systemName: timelapse.isRendering ? "film.stack" : "camera.aperture")
+                            .font(.system(size: 30, weight: .semibold))
+                        Text("\(timelapse.capturedFrameCount)")
+                            .font(.custom("Arial", size: 38).monospacedDigit().weight(.bold))
+                        Text("ẢNH ĐÃ CHỤP")
+                            .font(.custom("Arial", size: 11).weight(.bold))
+                            .foregroundStyle(.white.opacity(0.45))
+                    }
                 }
             }
 
@@ -378,18 +449,20 @@ struct H2DTimelapseView: View {
             if !timelapse.isRendering {
                 HStack(spacing: 12) {
                     Button {
-                        timelapse.captureTestFrame()
+                        timelapse.setLiveMonitorVisible(!timelapse.isLiveMonitorVisible)
                     } label: {
-                        Label("Chụp thử", systemImage: "camera")
+                        Label(
+                            timelapse.isLiveMonitorVisible ? "Tắt hình" : "Xem hình",
+                            systemImage: timelapse.isLiveMonitorVisible ? "eye.slash" : "eye"
+                        )
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
 
                     Button(role: .destructive) {
-                        bluetooth.setH2DTimelapseArmed(false)
-                        timelapse.disarm(deleteFrames: true)
+                        showStopOptions = true
                     } label: {
-                        Label("Dừng", systemImage: "stop.fill")
+                        Label("Dừng quay", systemImage: "stop.fill")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
@@ -398,6 +471,12 @@ struct H2DTimelapseView: View {
                 .padding(.horizontal, 22)
                 .padding(.bottom, 20)
             }
+
+            Text("SE chờ 0,7 giây sau khi đổi lớp. Hãy bật Timelapse Smooth trong Bambu Studio để đầu in về một vị trí cố định trước mỗi ảnh.")
+                .font(.custom("Arial", size: 10))
+                .foregroundStyle(.white.opacity(0.38))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
         }
         .background(Color.black)
     }
