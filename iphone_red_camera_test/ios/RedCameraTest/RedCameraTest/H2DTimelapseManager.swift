@@ -18,7 +18,10 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     @Published private(set) var isCapturing = false
     @Published private(set) var isRendering = false
     @Published private(set) var isLiveMonitorVisible = false
-    @Published private(set) var cameraRotationAngle: CGFloat = 270
+    // The preview is always portrait when the iPhone is mounted vertically.
+    // Capture output keeps its own angle because the sensor image was mounted
+    // upside down in the previous bracket.
+    @Published private(set) var cameraRotationAngle: CGFloat = 90
     @Published private(set) var capturedFrameCount = 0
     @Published private(set) var lastCapturedLayer = 0
     @Published private(set) var recentFramePreviews: [H2DCapturedFramePreview] = []
@@ -114,7 +117,6 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                     ? "Đã dừng và xóa ảnh của lần chụp này"
                     : "Đã dừng chờ H2D"
                 self.restoreDisplay()
-                self.preparePreview()
             }
         }
     }
@@ -196,8 +198,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                connection.isVideoRotationAngleSupported(self.captureRotationAngle) {
                 connection.videoRotationAngle = self.captureRotationAngle
             }
-            let angle = self.captureRotationAngle
-            self.publishOnMain { self.cameraRotationAngle = angle }
+            let previewAngle: CGFloat = self.captureRotationAngle == 270 ? 90 : 270
+            self.publishOnMain { self.cameraRotationAngle = previewAngle }
         }
     }
 
@@ -783,7 +785,7 @@ struct H2DCameraPreview: UIViewRepresentable {
     final class PreviewView: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
         var layerView: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
-        var rotationAngle: CGFloat = 270
+        var rotationAngle: CGFloat = 90
 
         override func layoutSubviews() {
             super.layoutSubviews()

@@ -37,9 +37,23 @@ final class H2DBLEManager: NSObject, ObservableObject {
 
     var isActuallyPrinting: Bool {
         guard h2dPrintState.uppercased() == "RUNNING" else { return false }
-        // Firmware v1.4 did not send stg_cur. Keep its old behavior when the
-        // stage is unknown, while v1.5 can distinguish preparation precisely.
+        // Older firmware did not send stg_cur. Keep its old behavior when the
+        // stage is unknown, while v1.5+ can distinguish preparation precisely.
         return h2dStageCode == -1 || h2dStageCode == 0
+    }
+
+    var isPrintSessionActive: Bool {
+        switch h2dPrintState.uppercased() {
+        case "RUNNING", "PREPARE", "PREPARING", "SLICING", "INIT", "HEATING",
+             "PAUSE", "PAUSED", "FAILED", "ERROR":
+            return true
+        default:
+            return false
+        }
+    }
+
+    var hasActivePrinterAlert: Bool {
+        hasPrinterAlert && isPrintSessionActive
     }
 
     var h2dStageText: String {
@@ -107,7 +121,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         accessCode: String
     ) {
         guard isConnected, isH2DBridge else {
-            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.4 trở lên"
+            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.5 trở lên"
             requestH2DStatus()
             return
         }
@@ -204,7 +218,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     self.sendNextConfigurationCommand()
                 }
             } else {
-                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.4 trở lên")
+                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.5 trở lên")
             }
         }
         configurationTimeoutWorkItem = timeout
@@ -372,7 +386,11 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 h2dStageCode = Int(fields[6]) ?? h2dStageCode
             }
             hasBridgeError = false
-            if !hasPrinterAlert {
+            if !isPrintSessionActive {
+                hasPrinterAlert = false
+                printerAlertText = ""
+            }
+            if !hasActivePrinterAlert {
                 if isActuallyPrinting {
                     h2dBridgeStatus = "H2D đang in lớp \(h2dCurrentLayer)/\(max(1, h2dTotalLayers))"
                 } else if h2dPrintState == "RUNNING" ||
@@ -414,13 +432,14 @@ final class H2DBLEManager: NSObject, ObservableObject {
         case "ALERT":
             guard fields.count >= 3 else { return }
             let active = fields[2] == "1"
-            hasPrinterAlert = active
-            printerAlertText = active
+            let shouldSurface = active && isPrintSessionActive
+            hasPrinterAlert = shouldSurface
+            printerAlertText = shouldSurface
                 ? (fields.count >= 4
                     ? fields.dropFirst(3).joined(separator: " • ")
                     : "Máy in đang có cảnh báo")
                 : ""
-            if active {
+            if shouldSurface {
                 h2dBridgeStatus = printerAlertText
                 h2dTimelapseEvent = H2DTimelapseEvent(
                     kind: .error,
@@ -431,8 +450,10 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 )
             } else {
                 h2dBridgeStatus = isH2DReady
-                    ? "Cảnh báo đã được xử lý • H2D sẵn sàng"
-                    : "Cảnh báo đã được xử lý • đang kết nối H2D"
+                    ? (isPrintSessionActive
+                        ? "Cảnh báo đã được xử lý • H2D sẵn sàng"
+                        : "H2D chưa bắt đầu • đang theo dõi")
+                    : "Đang kết nối H2D"
             }
         case "ERROR":
             let detail = fields.dropFirst(2).joined(separator: " • ")

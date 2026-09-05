@@ -7,7 +7,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE H2D Timelapse Bridge v1.5.0
+// SE H2D Timelapse Bridge v1.6.0
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -284,7 +284,15 @@ bool extractJsonArrayHasItems(const uint8_t *payload, size_t length,
 }
 
 void reportPrinterAlert(bool force = false) {
-  const bool active = hmsAlertActive || printErrorActive;
+  // H2D keeps acknowledged/old HMS entries in some full-state packets even
+  // while the printer is idle. Only surface them during a real print session;
+  // FAILED/ERROR remain visible so a stopped print still reports its cause.
+  const bool printContext =
+      printWasRunning || printState == "RUNNING" || printState == "PREPARE" ||
+      printState == "PREPARING" || printState == "PAUSE" ||
+      printState == "PAUSED" || printState == "FAILED" ||
+      printState == "ERROR";
+  const bool active = printContext && (hmsAlertActive || printErrorActive);
   if (!force && active == lastReportedPrinterAlert &&
       printErrorCode == lastReportedPrintErrorCode) {
     return;
@@ -427,7 +435,9 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
     printErrorActive = incomingPrintError != 0;
   }
   if (hasHms) hmsAlertActive = incomingHmsAlert;
-  if (hasPrintError || hasHms) reportPrinterAlert();
+  // A state transition to IDLE must clear a previously active warning even
+  // when that incremental packet does not contain hms/print_error fields.
+  if (hasPrintError || hasHms || hasState) reportPrinterAlert();
 }
 
 void publishStatusRequest() {
@@ -639,7 +649,7 @@ void updateLed() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE H2D Timelapse Bridge v1.5.0");
+  Serial.println("\nSE H2D Timelapse Bridge v1.6.0");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   loadSettings();
   setupBle();

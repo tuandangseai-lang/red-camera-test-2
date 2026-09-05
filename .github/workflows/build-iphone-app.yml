@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.5 build83 - xem camera va dung thong minh
+name: Tao IPA SE v9.6 build84 - camera H2D trong SE
 
 on:
   workflow_dispatch:
@@ -39,11 +39,13 @@ jobs:
           PLIST="RedCameraTest/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :NSCameraUsageDescription" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :NSBluetoothAlwaysUsageDescription" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :NSLocalNetworkUsageDescription" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :NSPhotoLibraryAddUsageDescription" "$PLIST"
           test -f "RedCameraTest/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
           test -f "RedCameraTest/H2DBLEManager.swift"
           test -f "RedCameraTest/H2DTimelapseManager.swift"
           test -f "RedCameraTest/H2DTimelapseView.swift"
+          test -f "RedCameraTest/H2DPrinterCameraView.swift"
           grep -q 'case "SNAP"' "RedCameraTest/H2DBLEManager.swift"
           grep -q 'case "CFG_ACK"' "RedCameraTest/H2DBLEManager.swift"
           grep -q 'case "ALERT"' "RedCameraTest/H2DBLEManager.swift"
@@ -55,6 +57,8 @@ jobs:
           grep -q "recentFramePreviews" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "finishEarlyAndRender" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "isLiveMonitorVisible" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "VLCKit" "RedCameraTest/H2DPrinterCameraView.swift"
+          grep -q "hasActivePrinterAlert" "RedCameraTest/H2DBLEManager.swift"
           grep -q "H2DTimelapseView" "RedCameraTest/ContentView.swift"
           ! grep -q "CameraController.swift" project.yml
           ! grep -q "path: RedCameraTest/BLEManager.swift" project.yml
@@ -96,19 +100,19 @@ jobs:
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.5"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "83"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.6"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "84"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.5-build83-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.6-build84-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.5-build83-unsigned-ipa
-          path: SE-v9.5-build83-unsigned.ipa
+          name: SE-v9.6-build84-unsigned-ipa
+          path: SE-v9.6-build84-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -145,7 +149,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-H2D-ESP32-v1.5.0
+          name: SE-H2D-ESP32-v1.6.0
           path: ${{ runner.temp }}/SE-H2D-ESP32/*
           if-no-files-found: error
           retention-days: 7

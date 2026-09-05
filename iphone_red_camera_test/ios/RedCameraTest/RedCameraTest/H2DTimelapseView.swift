@@ -13,6 +13,7 @@ struct H2DTimelapseView: View {
     @State private var showConfiguration = true
     @State private var idlePulse = false
     @State private var showStopOptions = false
+    @State private var showPrinterCamera = false
 
     var body: some View {
         ZStack {
@@ -30,6 +31,9 @@ struct H2DTimelapseView: View {
                 .padding(.bottom, 6)
         }
         .onAppear {
+            if accessCode.isEmpty {
+                accessCode = H2DAccessCodeStore.load()
+            }
             withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) {
                 idlePulse = true
             }
@@ -49,7 +53,25 @@ struct H2DTimelapseView: View {
         }
         .onChange(of: timelapse.isArmed) { _, armed in
             bluetooth.setH2DTimelapseArmed(armed)
-            if !armed { timelapse.preparePreview() }
+            if !armed {
+                // Let the capture screen disappear before starting the fairly
+                // expensive AVCapture session again. This removes the visible
+                // hitch when leaving capture mode.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    guard !timelapse.isArmed, !showPrinterCamera else { return }
+                    timelapse.preparePreview()
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $showPrinterCamera) {
+            H2DPrinterCameraView(printerIP: printerIP, accessCode: accessCode)
+        }
+        .onChange(of: showPrinterCamera) { _, showing in
+            if !showing && !timelapse.isArmed {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    timelapse.preparePreview()
+                }
+            }
         }
         .confirmationDialog(
             "Bạn muốn xử lý các ảnh đã chụp thế nào?",
@@ -100,7 +122,7 @@ struct H2DTimelapseView: View {
     }
 
     private var printerIslandState: PrinterIslandState {
-        if bluetooth.hasBridgeError || bluetooth.hasPrinterAlert || !bluetooth.isConnected { return .error }
+        if bluetooth.hasBridgeError || bluetooth.hasActivePrinterAlert || !bluetooth.isConnected { return .error }
         if timelapse.isCapturing { return .capturing }
         if !bluetooth.isH2DReady { return .connecting }
         switch bluetooth.h2dPrintState.uppercased() {
@@ -119,7 +141,7 @@ struct H2DTimelapseView: View {
         case .capturing: return "ĐANG CHỤP LỚP \(max(1, bluetooth.h2dCurrentLayer))"
         case .connecting: return "ESP32 • ĐANG KẾT NỐI H2D"
         case .error:
-            if bluetooth.hasPrinterAlert { return "H2D • CÓ CẢNH BÁO" }
+            if bluetooth.hasActivePrinterAlert { return "H2D • CÓ CẢNH BÁO" }
             return bluetooth.isConnected ? "H2D • CÓ LỖI" : "ESP32 • MẤT KẾT NỐI"
         }
     }
@@ -247,13 +269,34 @@ struct H2DTimelapseView: View {
         VStack(alignment: .leading, spacing: 9) {
             Label("Camera có sẵn của H2D", systemImage: "video.fill")
                 .font(.custom("Arial", size: 15).weight(.bold))
-            Text("Khi không chụp timelapse bằng SE, bạn có thể xem và điều khiển H2D từ xa bằng Bambu Handy qua tài khoản Bambu Cloud.")
+            Text("Xem trực tiếp ngay trong SE bằng camera Live View của H2D. iPhone phải ở cùng mạng Wi-Fi và LAN Only Liveview trên H2D phải bật.")
                 .font(.custom("Arial", size: 12))
                 .foregroundStyle(.secondary)
-            Link(destination: URL(string: "https://apps.apple.com/app/bambu-handy/id1625671285")!) {
-                Label("Mở Bambu Handy để xem từ xa", systemImage: "arrow.up.forward.app")
-                    .font(.custom("Arial", size: 13).weight(.bold))
+
+            if accessCode.isEmpty {
+                SecureField("Nhập Access Code để xem camera", text: $accessCode)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.custom("Arial", size: 13))
+                    .padding(11)
+                    .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
             }
+
+            Button {
+                H2DAccessCodeStore.save(accessCode)
+                timelapse.stopPreview()
+                showPrinterCamera = true
+            } label: {
+                Label("Xem camera H2D trong SE", systemImage: "play.rectangle.fill")
+                    .font(.custom("Arial", size: 13).weight(.bold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .disabled(
+                printerIP.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                accessCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            )
         }
         .cardStyle()
     }
@@ -349,6 +392,7 @@ struct H2DTimelapseView: View {
                 }
 
                 Button {
+                    H2DAccessCodeStore.save(accessCode)
                     bluetooth.configureH2DBridge(
                         wifiSSID: wifiSSID,
                         wifiPassword: wifiPassword,
@@ -447,6 +491,18 @@ struct H2DTimelapseView: View {
             Spacer(minLength: 4)
 
             if !timelapse.isRendering {
+                if !printerIP.isEmpty && !accessCode.isEmpty {
+                    Button {
+                        timelapse.setLiveMonitorVisible(false)
+                        showPrinterCamera = true
+                    } label: {
+                        Label("Xem camera H2D", systemImage: "video.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .padding(.horizontal, 22)
+                }
+
                 HStack(spacing: 12) {
                     Button {
                         timelapse.setLiveMonitorVisible(!timelapse.isLiveMonitorVisible)
