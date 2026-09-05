@@ -7,7 +7,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE H2D Timelapse Bridge v1.7.3
+// SE H2D Timelapse Bridge v1.7.4
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -74,6 +74,7 @@ bool printWasRunning = false;
 bool hmsAlertActive = false;
 bool printErrorActive = false;
 bool lastReportedPrinterAlert = false;
+bool lastReportedPrinterAlertCritical = false;
 uint32_t printErrorCode = 0;
 uint32_t lastReportedPrintErrorCode = 0;
 String printState = "IDLE";
@@ -162,12 +163,37 @@ void loadSettings() {
 
 bool savePendingSettings() {
   if (!pendingSettings.complete()) return false;
-  settings = pendingSettings;
-  preferences.putString("ssid", settings.wifiSsid);
-  preferences.putString("wifiPass", settings.wifiPassword);
-  preferences.putString("printerIp", settings.printerIp);
-  preferences.putString("serial", settings.printerSerial);
-  preferences.putString("access", settings.accessCode);
+  const bool wroteAll =
+      preferences.putString("ssid", pendingSettings.wifiSsid) ==
+          pendingSettings.wifiSsid.length() &&
+      preferences.putString("wifiPass", pendingSettings.wifiPassword) ==
+          pendingSettings.wifiPassword.length() &&
+      preferences.putString("printerIp", pendingSettings.printerIp) ==
+          pendingSettings.printerIp.length() &&
+      preferences.putString("serial", pendingSettings.printerSerial) ==
+          pendingSettings.printerSerial.length() &&
+      preferences.putString("access", pendingSettings.accessCode) ==
+          pendingSettings.accessCode.length();
+  if (!wroteAll) return false;
+
+  // Read every field back before acknowledging SAVE. This prevents the app
+  // from hiding the form when an interrupted/failed NVS write would otherwise
+  // force the user to type the Access Code again after a restart.
+  BridgeSettings verified;
+  verified.wifiSsid = preferences.getString("ssid", "");
+  verified.wifiPassword = preferences.getString("wifiPass", "");
+  verified.printerIp = preferences.getString("printerIp", "");
+  verified.printerSerial = preferences.getString("serial", "");
+  verified.accessCode = preferences.getString("access", "");
+  if (!verified.complete() || verified.wifiSsid != pendingSettings.wifiSsid ||
+      verified.wifiPassword != pendingSettings.wifiPassword ||
+      verified.printerIp != pendingSettings.printerIp ||
+      verified.printerSerial != pendingSettings.printerSerial ||
+      verified.accessCode != pendingSettings.accessCode) {
+    return false;
+  }
+  settings = verified;
+  pendingSettings = verified;
   return true;
 }
 
@@ -331,25 +357,32 @@ void reportPrinterAlert(bool force = false) {
       printState == "PREPARING" || printState == "PAUSE" ||
       printState == "PAUSED" || printState == "SLICING" ||
       printState == "INIT" || printState == "HEATING";
-  const bool active = printContext && (hmsAlertActive || printErrorActive);
+  const bool failedState = printState == "FAILED" || printState == "ERROR";
+  const bool critical = failedState || (printContext && printErrorActive);
+  const bool active = critical || (printContext && hmsAlertActive);
   if (!force && active == lastReportedPrinterAlert &&
+      critical == lastReportedPrinterAlertCritical &&
       printErrorCode == lastReportedPrintErrorCode) {
     return;
   }
   if (active) {
-    if (printErrorActive) {
+    if (critical) {
       char errorCode[11];
       snprintf(errorCode, sizeof(errorCode), "0x%08lX",
                static_cast<unsigned long>(printErrorCode));
-      queuePhoneEvent(String("H2D,ALERT,1,H2D báo lỗi máy in • mã ") +
+      queuePhoneEvent(String("H2D,ALERT,1,ERROR,H2D báo lỗi máy in • mã ") +
                       errorCode + " • xem màn hình H2D");
     } else {
-      queuePhoneEvent("H2D,ALERT,1,H2D có cảnh báo HMS • xem màn hình máy in");
+      // HMS can contain an acknowledged advisory (for example a lens-cleaning
+      // reminder) while H2D is legitimately cleaning the nozzle. Report it as
+      // secondary information; only print_error/FAILED may turn the Island red.
+      queuePhoneEvent("H2D,ALERT,1,WARN,H2D có lưu ý HMS • xem màn hình máy in");
     }
   } else {
     queuePhoneEvent("H2D,ALERT,0,CLEAR");
   }
   lastReportedPrinterAlert = active;
+  lastReportedPrinterAlertCritical = critical;
   lastReportedPrintErrorCode = printErrorCode;
 }
 
@@ -523,7 +556,8 @@ void maintainWiFi() {
   if (!settings.complete()) return;
   if (WiFi.status() == WL_CONNECTED) return;
   const uint32_t now = millis();
-  if (now - lastWifiAttemptAt < Config::WIFI_RETRY_MS) return;
+  if (lastWifiAttemptAt != 0 &&
+      now - lastWifiAttemptAt < Config::WIFI_RETRY_MS) return;
   lastWifiAttemptAt = now;
   reportStatus("WIFI_CONNECTING");
   Serial.printf("[WIFI] connecting to configured SSID (%u chars)\n",
@@ -565,7 +599,8 @@ void maintainMqtt() {
   }
   mqttWasConnected = false;
   const uint32_t now = millis();
-  if (now - lastMqttAttemptAt < Config::MQTT_RETRY_MS) return;
+  if (lastMqttAttemptAt != 0 &&
+      now - lastMqttAttemptAt < Config::MQTT_RETRY_MS) return;
   lastMqttAttemptAt = now;
   reportStatus("MQTT_CONNECTING");
   const uint64_t chip = ESP.getEfuseMac();
@@ -600,7 +635,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.7.3");
+  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.7.4");
   if (!settings.complete()) {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -735,7 +770,7 @@ void updateLed() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE H2D Timelapse Bridge v1.7.3");
+  Serial.println("\nSE H2D Timelapse Bridge v1.7.4");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   loadSettings();
   setupBle();

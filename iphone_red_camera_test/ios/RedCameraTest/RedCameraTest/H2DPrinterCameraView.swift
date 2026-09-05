@@ -93,6 +93,16 @@ private final class H2DVLCCertificateDialogRenderer: NSObject, VLCCustomDialogRe
 enum H2DAccessCodeStore {
     private static let service = "vn.rockettracker.RedCameraTest.h2d"
     private static let account = "lan-access-code"
+    // Sideloaded builds can occasionally receive a new Keychain access group
+    // when they are re-signed. Keep a local recovery copy so an in-place app
+    // update never makes the user type the LAN Access Code again.
+    private static let recoveryKey = "SE.H2D.lanAccessCode.recovery"
+
+    private static func normalize(_ value: String) -> String {
+        value
+            .filter { $0.isNumber || ($0.isASCII && $0.isLetter) }
+            .lowercased()
+    }
 
     static func load() -> String {
         let query: [String: Any] = [
@@ -103,28 +113,37 @@ enum H2DAccessCodeStore {
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
               let data = result as? Data,
-              let value = String(data: data, encoding: .utf8) else { return "" }
-        return value
+              let value = String(data: data, encoding: .utf8) {
+            let normalized = normalize(value)
+            if !normalized.isEmpty {
+                UserDefaults.standard.set(normalized, forKey: recoveryKey)
+                return normalized
+            }
+        }
+        return normalize(UserDefaults.standard.string(forKey: recoveryKey) ?? "")
     }
 
     static func save(_ value: String) {
-        let trimmed = value
-            .filter { $0.isNumber || ($0.isASCII && $0.isLetter) }
-            .lowercased()
+        let trimmed = normalize(value)
         guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return }
+        UserDefaults.standard.set(trimmed, forKey: recoveryKey)
         let identity: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
         let update: [String: Any] = [kSecValueData as String: data]
-        if SecItemUpdate(identity as CFDictionary, update as CFDictionary) == errSecItemNotFound {
+        let updateStatus = SecItemUpdate(identity as CFDictionary, update as CFDictionary)
+        if updateStatus == errSecItemNotFound {
             var item = identity
             item[kSecValueData as String] = data
             item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            SecItemAdd(item as CFDictionary, nil)
+            let addStatus = SecItemAdd(item as CFDictionary, nil)
+            if addStatus == errSecDuplicateItem {
+                _ = SecItemUpdate(identity as CFDictionary, update as CFDictionary)
+            }
         }
     }
 }

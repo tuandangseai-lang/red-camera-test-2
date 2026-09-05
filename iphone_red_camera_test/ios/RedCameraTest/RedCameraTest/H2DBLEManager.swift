@@ -33,7 +33,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var configurationProgress = 0
     @Published private(set) var hasBridgeError = false
     @Published private(set) var hasPrinterAlert = false
+    @Published private(set) var hasCriticalPrinterAlert = false
     @Published private(set) var printerAlertText = ""
+    @Published private(set) var h2dStatusCode = "BOOTING"
 
     var isActuallyPrinting: Bool {
         guard h2dPrintState.uppercased() == "RUNNING" else { return false }
@@ -54,6 +56,12 @@ final class H2DBLEManager: NSObject, ObservableObject {
 
     var hasActivePrinterAlert: Bool {
         hasPrinterAlert && isPrintSessionActive
+    }
+
+    var hasActiveCriticalPrinterAlert: Bool {
+        guard hasCriticalPrinterAlert else { return false }
+        let failedState = ["FAILED", "ERROR"].contains(h2dPrintState.uppercased())
+        return isPrintSessionActive || failedState
     }
 
     var h2dStageText: String {
@@ -122,7 +130,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         accessCode: String
     ) {
         guard isConnected, isH2DBridge else {
-            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.7.3 trở lên"
+            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.7.4 trở lên"
             requestH2DStatus()
             return
         }
@@ -314,6 +322,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
         mqttLossWorkItem?.cancel()
         mqttLossWorkItem = nil
         isH2DReady = false
+        hasPrinterAlert = false
+        hasCriticalPrinterAlert = false
+        printerAlertText = ""
     }
 
     private func beginMqttLossGrace() {
@@ -325,7 +336,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.isH2DReady = false
-            if !self.hasPrinterAlert {
+            if !self.hasActiveCriticalPrinterAlert {
                 self.h2dBridgeStatus = "Mất dữ liệu H2D • ESP32 đang tự kết nối lại"
             }
         }
@@ -347,7 +358,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             let item = DispatchWorkItem { [weak self] in
                 guard let self, self.isConnected, !self.isH2DBridge else { return }
                 self.hasBridgeError = true
-                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.7.3 khi máy rảnh"
+                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.7.4 khi máy rảnh"
             }
             recognitionWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: item)
@@ -374,6 +385,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         case "STATUS":
             guard fields.count >= 3 else { return }
             let status = fields[2].uppercased()
+            h2dStatusCode = status
             let known: [String: String] = [
                 "BOOTING": "ESP32 H2D đang khởi động",
                 "CONFIG_REQUIRED": "Chưa có cấu hình H2D",
@@ -404,7 +416,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 break
             }
             hasBridgeError = status == "BUFFER_ERROR" || status == "MQTT_AUTH_FAILED"
-            if !hasPrinterAlert {
+            if !hasActiveCriticalPrinterAlert {
                 h2dBridgeStatus = status == "BUFFER_ERROR"
                     ? "ESP32 thiếu bộ nhớ nhận gói H2D • hãy khởi động lại"
                     : known[status] ?? fields.dropFirst(2).joined(separator: " • ")
@@ -422,9 +434,10 @@ final class H2DBLEManager: NSObject, ObservableObject {
             hasBridgeError = false
             if !isPrintSessionActive {
                 hasPrinterAlert = false
+                hasCriticalPrinterAlert = false
                 printerAlertText = ""
             }
-            if !hasActivePrinterAlert {
+            if !hasActiveCriticalPrinterAlert {
                 if isActuallyPrinting {
                     h2dBridgeStatus = "H2D đang in lớp \(h2dCurrentLayer)/\(max(1, h2dTotalLayers))"
                 } else if h2dPrintState == "RUNNING" ||
@@ -466,14 +479,20 @@ final class H2DBLEManager: NSObject, ObservableObject {
         case "ALERT":
             guard fields.count >= 3 else { return }
             let active = fields[2] == "1"
-            let shouldSurface = active && isPrintSessionActive
+            let failedState = ["FAILED", "ERROR"].contains(h2dPrintState.uppercased())
+            let shouldSurface = active && (isPrintSessionActive || failedState)
+            let suppliedSeverity = fields.count >= 4 ? fields[3].uppercased() : ""
+            let hasSeverityField = suppliedSeverity == "ERROR" || suppliedSeverity == "WARN"
+            let critical = shouldSurface && suppliedSeverity == "ERROR"
+            let detailStart = hasSeverityField ? 4 : 3
             hasPrinterAlert = shouldSurface
+            hasCriticalPrinterAlert = critical
             printerAlertText = shouldSurface
-                ? (fields.count >= 4
-                    ? fields.dropFirst(3).joined(separator: " • ")
+                ? (fields.count > detailStart
+                    ? fields.dropFirst(detailStart).joined(separator: " • ")
                     : "Máy in đang có cảnh báo")
                 : ""
-            if shouldSurface {
+            if critical {
                 h2dBridgeStatus = printerAlertText
                 h2dTimelapseEvent = H2DTimelapseEvent(
                     kind: .error,
@@ -483,15 +502,17 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     message: printerAlertText
                 )
             } else {
-                // A CLEAR event also clears the transport error left while
-                // the bridge was booting; an idle H2D must not stay red just
-                // because the previous session had an alert.
-                hasBridgeError = false
-                h2dBridgeStatus = isH2DReady
-                    ? (isPrintSessionActive
-                        ? "Cảnh báo đã được xử lý • H2D sẵn sàng"
-                        : "H2D chưa bắt đầu • đang theo dõi")
-                    : "Đang kết nối H2D"
+                // A non-critical HMS advisory remains visible below the main
+                // status, but must not replace "cleaning nozzle"/preparation
+                // or turn the Island red.
+                if !shouldSurface {
+                    hasBridgeError = false
+                    h2dBridgeStatus = isH2DReady
+                        ? (isPrintSessionActive
+                            ? h2dStageText
+                            : "H2D chưa bắt đầu • đang theo dõi")
+                        : "Đang kết nối H2D"
+                }
             }
         case "ERROR":
             let detail = fields.dropFirst(2).joined(separator: " • ")

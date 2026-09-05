@@ -15,6 +15,7 @@ struct H2DTimelapseView: View {
     @State private var idlePulse = false
     @State private var showStopOptions = false
     @State private var showPrinterCamera = false
+    @State private var automaticConfigurationAttempted = false
 
     var body: some View {
         ZStack {
@@ -61,6 +62,9 @@ struct H2DTimelapseView: View {
                 timelapse.preparePreview()
             }
             bluetooth.requestH2DStatus()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                attemptAutomaticConfigurationIfNeeded()
+            }
         }
         .onDisappear {
             if !timelapse.isArmed { timelapse.stopPreview() }
@@ -90,12 +94,23 @@ struct H2DTimelapseView: View {
                 showConfiguration = true
             }
         }
+        .onChange(of: bluetooth.h2dStatusCode) { _, status in
+            if status == "READY" || status == "ARMED" || status == "DISARMED" {
+                configurationSaved = true
+                showConfiguration = false
+                automaticConfigurationAttempted = false
+            } else {
+                attemptAutomaticConfigurationIfNeeded()
+            }
+        }
+        .onChange(of: bluetooth.isH2DBridge) { _, recognized in
+            if recognized { attemptAutomaticConfigurationIfNeeded() }
+        }
         .onChange(of: bluetooth.hasBridgeError) { _, hasError in
             // A bridge/configuration failure means the saved values need to be
             // editable again. Printer HMS alerts use hasActivePrinterAlert and
             // do not reopen this form.
-            if hasError && bluetooth.isH2DBridge {
-                configurationSaved = false
+            if hasError && bluetooth.isH2DBridge && !configurationSaved {
                 showConfiguration = true
             }
         }
@@ -158,7 +173,7 @@ struct H2DTimelapseView: View {
     }
 
     private var printerIslandState: PrinterIslandState {
-        if bluetooth.hasActivePrinterAlert || visibleBridgeError { return .error }
+        if bluetooth.hasActiveCriticalPrinterAlert || visibleBridgeError { return .error }
         if !bluetooth.isConnected { return .connecting }
         if timelapse.isCapturing { return .capturing }
         if !bluetooth.isH2DReady { return .connecting }
@@ -185,7 +200,7 @@ struct H2DTimelapseView: View {
         case .capturing: return "ĐANG CHỤP LỚP \(max(1, bluetooth.h2dCurrentLayer))"
         case .connecting: return "ESP32 • ĐANG KẾT NỐI H2D"
         case .error:
-            if bluetooth.hasActivePrinterAlert { return "H2D • CÓ CẢNH BÁO" }
+            if bluetooth.hasActiveCriticalPrinterAlert { return "H2D • CÓ LỖI" }
             return bluetooth.isConnected ? "H2D • CÓ LỖI" : "ESP32 • MẤT KẾT NỐI"
         }
     }
@@ -390,7 +405,11 @@ struct H2DTimelapseView: View {
                     .fill(
                         visibleBridgeError
                             ? Color.red
-                            : bluetooth.isH2DReady ? .green : .yellow
+                            : bluetooth.hasActiveCriticalPrinterAlert
+                                ? .red
+                                : bluetooth.hasActivePrinterAlert
+                                    ? .orange
+                                    : bluetooth.isH2DReady ? .green : .yellow
                     )
                     .frame(width: 10, height: 10)
                 Text(bluetooth.h2dBridgeStatus)
@@ -415,8 +434,44 @@ struct H2DTimelapseView: View {
                     .font(.custom("Arial", size: 12).monospacedDigit())
                     .foregroundStyle(.secondary)
             }
+            if bluetooth.hasActivePrinterAlert &&
+                !bluetooth.hasActiveCriticalPrinterAlert &&
+                !bluetooth.printerAlertText.isEmpty {
+                Label(bluetooth.printerAlertText, systemImage: "exclamationmark.triangle.fill")
+                    .font(.custom("Arial", size: 11).weight(.semibold))
+                    .foregroundStyle(.orange)
+            }
         }
         .cardStyle()
+    }
+
+    private func attemptAutomaticConfigurationIfNeeded() {
+        let status = bluetooth.h2dStatusCode
+        guard status == "CONFIG_REQUIRED" || status == "MQTT_AUTH_FAILED" else { return }
+        guard configurationSaved,
+              bluetooth.isH2DBridge,
+              !bluetooth.isConfiguring,
+              !automaticConfigurationAttempted,
+              !wifiSSID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !wifiPassword.isEmpty,
+              !printerIP.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !printerSerial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !accessCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            if configurationSaved && !bluetooth.isConfiguring {
+                configurationSaved = false
+                showConfiguration = true
+            }
+            return
+        }
+        automaticConfigurationAttempted = true
+        showConfiguration = false
+        bluetooth.configureH2DBridge(
+            wifiSSID: wifiSSID,
+            wifiPassword: wifiPassword,
+            printerIP: printerIP,
+            printerSerial: printerSerial,
+            accessCode: accessCode
+        )
     }
 
     private var configurationCard: some View {
