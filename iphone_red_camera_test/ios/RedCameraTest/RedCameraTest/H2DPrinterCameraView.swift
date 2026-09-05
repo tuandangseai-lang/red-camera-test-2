@@ -1,4 +1,5 @@
 import Combine
+import Network
 import Security
 import SwiftUI
 import UIKit
@@ -50,6 +51,12 @@ final class H2DPrinterCameraPlayer: NSObject, ObservableObject, VLCMediaPlayerDe
     private weak var drawableView: UIView?
     private var printerIP = ""
     private var accessCode = ""
+    private var preflightConnection: NWConnection?
+    private var preflightTimeoutWorkItem: DispatchWorkItem?
+    private var retryWorkItem: DispatchWorkItem?
+    private var retryCount = 0
+    private var activeAttemptID = UUID()
+    private var isStopping = false
 
     override init() {
         super.init()
@@ -64,12 +71,88 @@ final class H2DPrinterCameraPlayer: NSObject, ObservableObject, VLCMediaPlayerDe
     }
 
     func start() {
-        guard let drawableView else { return }
+        guard drawableView != nil else { return }
         guard let streamURL = makeStreamURL() else {
             statusText = "Thiếu IP hoặc Access Code của H2D"
             hasError = true
             return
         }
+        _ = streamURL // Validate the URL before starting the LAN preflight.
+
+        isStopping = false
+        retryCount = 0
+        retryWorkItem?.cancel()
+        startAttempt()
+    }
+
+    private func startAttempt() {
+        guard drawableView != nil else { return }
+        guard makeStreamURL() != nil else {
+            statusText = "Thiếu IP hoặc Access Code của H2D"
+            hasError = true
+            return
+        }
+
+        let attemptID = UUID()
+        activeAttemptID = attemptID
+        preflightConnection?.cancel()
+        preflightTimeoutWorkItem?.cancel()
+
+        statusText = "Đang kiểm tra camera H2D (cổng 322)…"
+        hasError = false
+        isPlaying = false
+
+        guard let port = NWEndpoint.Port(rawValue: 322) else {
+            handlePreflightFailure(attemptID: attemptID)
+            return
+        }
+        let connection = NWConnection(
+            host: NWEndpoint.Host(printerIP),
+            port: port,
+            using: .tcp
+        )
+        preflightConnection = connection
+        connection.stateUpdateHandler = { [weak self] state in
+            DispatchQueue.main.async {
+                guard let self,
+                      self.activeAttemptID == attemptID,
+                      self.preflightConnection === connection else { return }
+                switch state {
+                case .ready:
+                    self.preflightTimeoutWorkItem?.cancel()
+                    self.preflightConnection = nil
+                    connection.cancel()
+                    self.openVLC()
+                case .waiting:
+                    self.statusText = "Đang chờ mạng LAN của H2D…"
+                case .failed:
+                    self.preflightTimeoutWorkItem?.cancel()
+                    self.preflightConnection = nil
+                    self.handlePreflightFailure(attemptID: attemptID)
+                case .cancelled:
+                    break
+                default:
+                    break
+                }
+            }
+        }
+        connection.start(queue: .main)
+
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.activeAttemptID == attemptID,
+                  self.preflightConnection === connection else { return }
+            connection.cancel()
+            self.preflightConnection = nil
+            self.handlePreflightFailure(attemptID: attemptID)
+        }
+        preflightTimeoutWorkItem = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: timeout)
+    }
+
+    private func openVLC() {
+        guard let drawableView,
+              let streamURL = makeStreamURL() else { return }
 
         mediaPlayer.stop()
         mediaPlayer.drawable = drawableView
@@ -95,13 +178,49 @@ final class H2DPrinterCameraPlayer: NSObject, ObservableObject, VLCMediaPlayerDe
         statusText = "Đang kết nối camera H2D trong mạng LAN..."
         hasError = false
         isPlaying = false
+        isStopping = false
         mediaPlayer.play()
     }
 
     func stop() {
+        isStopping = true
+        activeAttemptID = UUID()
+        retryWorkItem?.cancel()
+        preflightTimeoutWorkItem?.cancel()
+        preflightConnection?.cancel()
+        retryWorkItem = nil
+        preflightTimeoutWorkItem = nil
+        preflightConnection = nil
         mediaPlayer.stop()
         mediaPlayer.drawable = nil
         isPlaying = false
+    }
+
+    private func handlePreflightFailure(attemptID: UUID) {
+        guard activeAttemptID == attemptID, !isStopping else { return }
+        scheduleRetry("Không thấy cổng 322 • kiểm tra cùng Wi-Fi và LAN Only Liveview")
+    }
+
+    private func scheduleRetry(_ message: String) {
+        guard !isStopping else { return }
+        guard retryCount < 2 else {
+            statusText = message
+            hasError = true
+            isPlaying = false
+            return
+        }
+        retryCount += 1
+        statusText = "\(message) • tự thử lại \(retryCount)/2"
+        hasError = false
+        retryWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.startAttempt()
+        }
+        retryWorkItem = item
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Double(retryCount),
+            execute: item
+        )
     }
 
     func mediaPlayerStateChanged(_ newState: VLCMediaPlayerState) {
@@ -119,9 +238,9 @@ final class H2DPrinterCameraPlayer: NSObject, ObservableObject, VLCMediaPlayerDe
                 self.statusText = "Camera H2D đang tạm dừng"
                 self.isPlaying = false
             case .error:
-                self.statusText = "Không mở được camera • kiểm tra LAN Only Liveview và Access Code"
+                guard !self.isStopping else { return }
                 self.isPlaying = false
-                self.hasError = true
+                self.scheduleRetry("Không mở được camera • kiểm tra LAN Only Liveview và Access Code")
             case .stopped, .stopping:
                 self.isPlaying = false
             default:

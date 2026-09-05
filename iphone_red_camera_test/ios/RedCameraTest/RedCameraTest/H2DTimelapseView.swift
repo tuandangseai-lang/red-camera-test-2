@@ -32,7 +32,6 @@ struct H2DTimelapseView: View {
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             printerStatusIsland
-                .padding(.horizontal, 18)
                 .padding(.bottom, 6)
         }
         .onAppear {
@@ -161,7 +160,10 @@ struct H2DTimelapseView: View {
         if timelapse.isCapturing { return .capturing }
         if !bluetooth.isH2DReady { return .connecting }
         switch bluetooth.h2dPrintState.uppercased() {
-        case "FAILED", "ERROR": return .error
+        // A stopped/failed job is no longer an active printer alert. Keep the
+        // Island in its waiting state unless the bridge has a real
+        // connection/configuration error (handled above).
+        case "FAILED", "ERROR": return .idle
         case "RUNNING": return bluetooth.isActuallyPrinting ? .printing : .preparing
         case "PREPARE", "PREPARING", "SLICING", "INIT", "HEATING", "PAUSE", "PAUSED": return .preparing
         default: return .idle
@@ -201,8 +203,6 @@ struct H2DTimelapseView: View {
                 .monospacedDigit()
                 .lineLimit(1)
 
-            Spacer(minLength: 4)
-
             Circle()
                 .fill(printerIslandState.color)
                 .frame(width: 9, height: 9)
@@ -220,6 +220,9 @@ struct H2DTimelapseView: View {
             Capsule()
                 .stroke(printerIslandState.color.opacity(0.42), lineWidth: 1)
         }
+        // Keep the Dynamic Island compact: its width follows the status
+        // content instead of stretching across the entire screen.
+        .fixedSize(horizontal: true, vertical: false)
         .shadow(color: printerIslandState.color.opacity(0.16), radius: 10, y: 3)
         .accessibilityLabel(printerIslandTitle)
     }
@@ -230,7 +233,9 @@ struct H2DTimelapseView: View {
     /// colour and do not continuously redraw the camera preview.
     private var screenEdgeLEDStrip: some View {
         let isPrinting = printerIslandState == .printing
-        let isBlinking = printerIslandState == .idle || printerIslandState == .connecting
+        let isBlinking = printerIslandState == .idle ||
+            printerIslandState == .preparing ||
+            printerIslandState == .connecting
         let progress: Double? = isPrinting ? min(1, max(0, printerProgress)) : nil
 
         return ScreenEdgeLEDStrip(
@@ -309,7 +314,7 @@ struct H2DTimelapseView: View {
                 )
                     // The sensor feed is rotated into a true portrait viewport.
                     .frame(height: 300)
-                    .aspectRatio(3.0 / 4.0, contentMode: .fit)
+                    .aspectRatio(9.0 / 16.0, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay {
                         ZStack {
@@ -328,7 +333,7 @@ struct H2DTimelapseView: View {
                     }
                 Spacer(minLength: 0)
             }
-            Text("Đặt iPhone cố định, lấy trọn vùng in. Khi bắt đầu chờ, hình xem trước sẽ tắt hoàn toàn.")
+            Text("Đặt iPhone dọc 16:9, lấy trọn vùng in. Khi bắt đầu chờ, hình xem trước sẽ tắt hoàn toàn.")
                 .font(.custom("Arial", size: 12))
                 .foregroundStyle(.secondary)
         }
@@ -512,7 +517,7 @@ struct H2DTimelapseView: View {
                         rotationAngle: timelapse.cameraRotationAngle
                     )
                     .frame(height: 300)
-                    .aspectRatio(3.0 / 4.0, contentMode: .fit)
+                    .aspectRatio(9.0 / 16.0, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay(alignment: .topTrailing) {
                         HStack(spacing: 8) {

@@ -286,12 +286,12 @@ bool extractJsonArrayHasItems(const uint8_t *payload, size_t length,
 void reportPrinterAlert(bool force = false) {
   // H2D keeps acknowledged/old HMS entries in some full-state packets even
   // while the printer is idle. Only surface them during a real print session;
-  // FAILED/ERROR remain visible so a stopped print still reports its cause.
+  // a stopped/failed job must return the phone to its waiting state.
   const bool printContext =
       printState == "RUNNING" || printState == "PREPARE" ||
       printState == "PREPARING" || printState == "PAUSE" ||
-      printState == "PAUSED" || printState == "FAILED" ||
-      printState == "ERROR";
+      printState == "PAUSED" || printState == "SLICING" ||
+      printState == "INIT" || printState == "HEATING";
   const bool active = printContext && (hmsAlertActive || printErrorActive);
   if (!force && active == lastReportedPrinterAlert &&
       printErrorCode == lastReportedPrintErrorCode) {
@@ -391,7 +391,11 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
     finishSent = true;
     printWasRunning = false;
     Serial.printf("[PRINT] finished at layer %d\n", finalLayer);
-  } else if (printState == "FAILED" || printState == "IDLE") {
+  } else if (printState == "FAILED" || printState == "ERROR" ||
+             printState == "IDLE" || printState == "STOP" ||
+             printState == "STOPPED" || printState == "CANCELED" ||
+             printState == "CANCELLED" || printState == "FINISH" ||
+             printState == "COMPLETE" || printState == "COMPLETED") {
     printWasRunning = false;
   }
   reportPrintStatus(true);

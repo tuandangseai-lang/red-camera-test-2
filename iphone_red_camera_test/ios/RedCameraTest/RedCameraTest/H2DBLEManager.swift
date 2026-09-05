@@ -45,7 +45,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     var isPrintSessionActive: Bool {
         switch h2dPrintState.uppercased() {
         case "RUNNING", "PREPARE", "PREPARING", "SLICING", "INIT", "HEATING",
-             "PAUSE", "PAUSED", "FAILED", "ERROR":
+             "PAUSE", "PAUSED":
             return true
         default:
             return false
