@@ -23,11 +23,11 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Kết nối ESP32 để nhận tín hiệu từng lớp từ máy in H2D.</string>
+	<string>Kết nối ESP32 để nhận tín hiệu từng lớp từ máy in Bambu.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Chụp từng lớp để tạo timelapse H2D.</string>
+	<string>Chụp từng lớp để tạo timelapse máy in Bambu.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Lưu video timelapse H2D vào ứng dụng Ảnh.</string>
+	<string>Lưu video timelapse máy in Bambu vào ứng dụng Ảnh.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIRequiredDeviceCapabilities</key>

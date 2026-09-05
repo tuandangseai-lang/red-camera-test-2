@@ -19,10 +19,11 @@ struct H2DTimelapseView: View {
     @State private var savedProfiles: [BambuPrinterProfile] = []
 
     private var detectedPrinterKind: BambuPrinterKind {
-        let fromBridge = bluetooth.printerKind
-        if fromBridge != .unknown { return fromBridge }
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
-        return fromSerial == .unknown ? selectedPrinterKind : fromSerial
+        if fromSerial != .unknown { return fromSerial }
+        if !configurationSaved { return selectedPrinterKind }
+        let fromBridge = bluetooth.printerKind
+        return fromBridge == .unknown ? selectedPrinterKind : fromBridge
     }
 
     private var printerName: String { detectedPrinterKind.rawValue }
@@ -207,11 +208,11 @@ struct H2DTimelapseView: View {
         case .idle: return "\(printerName) • CHƯA BẮT ĐẦU"
         case .preparing: return "\(printerName) • \(bluetooth.h2dStageText.uppercased())"
         case .printing: return "\(printerName) • ĐANG IN \(bluetooth.h2dPrintPercent)%"
-        case .capturing: return "ĐANG CHỤP LỚP \(max(1, bluetooth.h2dCurrentLayer))"
-        case .connecting: return "ESP32-C3 • ĐANG KẾT NỐI \(printerName)"
+        case .capturing: return "\(printerName) • CHỤP LỚP \(max(1, bluetooth.h2dCurrentLayer))"
+        case .connecting: return "ESP32 • ĐANG KẾT NỐI \(printerName)"
         case .error:
             if bluetooth.hasActiveCriticalPrinterAlert { return "\(printerName) • CÓ LỖI" }
-            return bluetooth.isConnected ? "\(printerName) • CÓ LỖI" : "ESP32-C3 • MẤT KẾT NỐI"
+            return bluetooth.isConnected ? "\(printerName) • CÓ LỖI" : "ESP32 • MẤT KẾT NỐI"
         }
     }
 
@@ -419,13 +420,17 @@ struct H2DTimelapseView: View {
                     .font(.custom("Arial", size: 12).monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            if !bluetooth.filamentType.isEmpty {
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(filamentColor)
-                        .frame(width: 14, height: 14)
-                        .overlay(Circle().stroke(.white.opacity(0.35), lineWidth: 1))
-                    Text("Đang dùng \(bluetooth.materialDescription)")
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(bluetooth.filamentType.isEmpty ? Color.gray.opacity(0.45) : filamentColor)
+                    .frame(width: 14, height: 14)
+                    .overlay(Circle().stroke(.white.opacity(0.35), lineWidth: 1))
+                if bluetooth.filamentType.isEmpty {
+                    Text("\(printerName) • đang đồng bộ loại nhựa và màu")
+                        .font(.custom("Arial", size: 12).weight(.semibold))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("\(printerName) • \(bluetooth.materialDescription)")
                         .font(.custom("Arial", size: 12).weight(.bold))
                     if !bluetooth.filamentColorHex.isEmpty {
                         Text("#\(String(bluetooth.filamentColorHex.prefix(6)))")
@@ -670,6 +675,20 @@ struct H2DTimelapseView: View {
                     .foregroundStyle(.orange.opacity(0.65))
             }
 
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(bluetooth.filamentType.isEmpty ? Color.gray.opacity(0.45) : filamentColor)
+                    .frame(width: 12, height: 12)
+                    .overlay(Circle().stroke(.white.opacity(0.35), lineWidth: 1))
+                Text(
+                    bluetooth.filamentType.isEmpty
+                        ? "\(printerName) • đang đồng bộ nhựa"
+                        : "\(printerName) • \(bluetooth.materialDescription)"
+                )
+                    .font(.custom("Arial", size: 11).weight(.bold))
+                    .foregroundStyle(bluetooth.filamentType.isEmpty ? .secondary : .primary)
+            }
+
             capturedFramesCard
             Spacer(minLength: 4)
 
@@ -790,6 +809,7 @@ struct H2DTimelapseView: View {
             printerIP = ""
             printerSerial = ""
         }
+        bluetooth.prepareForPrinterProfile(kind, serial: printerSerial)
         accessCode = H2DAccessCodeStore.load(for: kind)
         configurationSaved = false
         automaticConfigurationAttempted = false

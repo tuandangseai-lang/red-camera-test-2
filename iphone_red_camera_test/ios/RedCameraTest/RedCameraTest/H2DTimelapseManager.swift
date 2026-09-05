@@ -25,7 +25,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     @Published private(set) var capturedFrameCount = 0
     @Published private(set) var lastCapturedLayer = 0
     @Published private(set) var recentFramePreviews: [H2DCapturedFramePreview] = []
-    @Published private(set) var statusText = "Căn khung hình rồi bật chờ H2D"
+    @Published private(set) var statusText = "Căn khung hình rồi bật chờ máy in"
     @Published private(set) var lastVideoSaved = false
 
     let previewSession = AVCaptureSession()
@@ -119,7 +119,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                 self.recentFramePreviews = []
                 self.statusText = deleteFrames
                     ? "Đã dừng và xóa ảnh của lần chụp này"
-                    : "Đã dừng chờ H2D"
+                    : "Đã dừng chờ máy in"
                 self.restoreDisplay()
             }
         }
@@ -166,7 +166,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
 
     func captureTestFrame() {
         guard isArmed else {
-            publishStatus("Hãy bật chờ H2D trước khi chụp thử")
+            publishStatus("Hãy bật chờ máy in trước khi chụp thử")
             return
         }
         let layer = max(1, lastCapturedLayer + 1)
@@ -284,7 +284,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         configured = true
         DispatchQueue.main.async {
             self.isCameraReady = true
-            self.statusText = "Camera đã sẵn sàng • căn khung hình rồi bật chờ H2D"
+            self.statusText = "Camera đã sẵn sàng • căn khung hình rồi bật chờ máy in"
         }
     }
 
@@ -304,7 +304,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("SE-H2D-Timelapse", isDirectory: true)
+            .appendingPathComponent("SE-Bambu-Timelapse", isDirectory: true)
             .appendingPathComponent(formatter.string(from: Date()), isDirectory: true)
         do {
             try FileManager.default.createDirectory(
@@ -457,7 +457,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             guard let self, self.isArmed else { return }
             self.finishRequested = true
             if !jobID.isEmpty, jobID != "0" { self.lastJobID = jobID }
-            self.publishStatus("H2D đã in xong • đang hoàn tất ảnh cuối")
+            self.publishStatus("Máy in đã in xong • đang hoàn tất ảnh cuối")
             self.completeRunIfPossible()
         }
     }
@@ -476,7 +476,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             if let emptyDirectory {
                 try? FileManager.default.removeItem(at: emptyDirectory)
             }
-            publishStatus("H2D đã xong nhưng chưa có ảnh để ghép")
+            publishStatus("Máy in đã xong nhưng chưa có ảnh để ghép")
             DispatchQueue.main.async {
                 self.isArmed = false
                 self.isCapturing = false
@@ -518,7 +518,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         let outputWidth = landscape ? 1920 : 1080
         let outputHeight = landscape ? 1080 : 1920
         let videoURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("SE-H2D-\(lastJobID.isEmpty ? UUID().uuidString : lastJobID).mp4")
+            .appendingPathComponent("SE-Bambu-\(lastJobID.isEmpty ? UUID().uuidString : lastJobID).mp4")
         try? FileManager.default.removeItem(at: videoURL)
 
         do {
@@ -674,7 +674,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                     videoURL: videoURL,
                     directory: sourceDirectory,
                     message: success
-                        ? "Đã ghép và lưu timelapse H2D vào Ảnh"
+                        ? "Đã ghép và lưu timelapse vào Ảnh"
                         : "Không lưu được video vào Ảnh"
                 )
             }

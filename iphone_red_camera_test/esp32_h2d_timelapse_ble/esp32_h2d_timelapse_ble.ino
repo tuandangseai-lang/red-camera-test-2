@@ -8,31 +8,32 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.8.1
+// SE Bambu Timelapse Bridge for classic ESP32 v1.8.2
 //
-// H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
+// Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
 // The ESP32 never controls motion or temperature. It only reads print status,
 // converts a completed-layer transition to one SNAP event, and reports FINISH.
 // Credentials are entered once in the SE app and stored in ESP32 Preferences.
 
 namespace Config {
-constexpr char DEVICE_NAME[] = "SE-H2D-Timelapse";
+constexpr char DEVICE_NAME[] = "SE-Bambu-Timelapse";
 constexpr char SERVICE_UUID[] = "7E57A000-8E3A-4D6A-9B2B-13B10A000001";
 constexpr char EVENT_UUID[] = "7E57A001-8E3A-4D6A-9B2B-13B10A000001";
 constexpr char COMMAND_UUID[] = "7E57A002-8E3A-4D6A-9B2B-13B10A000001";
 
 constexpr uint16_t MQTT_PORT = 8883;
-// H2D full-state packets can exceed 32 KB, especially when AMS data and HMS
+// Bambu full-state packets can exceed 32 KB, especially when AMS data and HMS
 // warnings are present. PubSubClient silently drops packets larger than this
 // buffer, which used to hide printer alerts from the iPhone.
-constexpr uint16_t MQTT_BUFFER_BYTES = 40960;
+constexpr uint16_t MQTT_BUFFER_BYTES = 49152;
 constexpr uint32_t WIFI_RETRY_MS = 12000;
 constexpr uint32_t MQTT_RETRY_MS = 10000;
 constexpr uint32_t STATUS_PERIOD_MS = 2000;
 constexpr uint32_t STATUS_REQUEST_RETRY_MS = 3500;
 constexpr uint32_t PRINT_DATA_STALE_MS = 10000;
 constexpr uint32_t DATA_TIMEOUT_MS = 45000;
+constexpr uint8_t MATERIAL_SYNC_RETRY_LIMIT = 5;
 constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
@@ -91,6 +92,7 @@ String activeJob = "0";
 String activeFilamentType = "";
 String activeFilamentColor = "";
 int activeFilamentSlot = -1;
+uint8_t materialSyncRequests = 0;
 int currentLayer = 0;
 int totalLayers = 0;
 int printPercent = 0;
@@ -180,6 +182,14 @@ void reportMaterial() {
                   safeEventField(activeFilamentType) + "," +
                   safeEventField(activeFilamentColor) + "," +
                   activeFilamentSlot);
+}
+
+void clearActiveMaterial(bool notifyPhone = true) {
+  activeFilamentType = "";
+  activeFilamentColor = "";
+  activeFilamentSlot = -1;
+  materialSyncRequests = 0;
+  if (notifyPhone) reportMaterial();
 }
 
 String decodeBase64(const String &encoded) {
@@ -493,19 +503,43 @@ bool extractExternalMaterial(const uint8_t *payload, size_t length,
 }
 
 void updateActiveMaterial(const uint8_t *payload, size_t length) {
-  int trayNow = -1;
-  if (!extractLastJsonInt(payload, length, "tray_now", trayNow)) return;
+  int trayNow = 255;
+  extractLastJsonInt(payload, length, "tray_now", trayNow);
+  if (trayNow == 255 || trayNow < 0) {
+    int trayTarget = 255;
+    if (extractLastJsonInt(payload, length, "tray_tar", trayTarget) &&
+        trayTarget >= 0 && trayTarget != 255) {
+      trayNow = trayTarget;
+    }
+  }
+  if (trayNow == 255 || trayNow < 0) {
+    int trayPrevious = 255;
+    if (extractLastJsonInt(payload, length, "tray_pre", trayPrevious) &&
+        trayPrevious >= 0 && trayPrevious != 255) {
+      trayNow = trayPrevious;
+    }
+  }
+
   String type;
   String color;
-  const bool found = trayNow == 254
+  bool found = trayNow == 254
       ? extractExternalMaterial(payload, length, type, color)
-      : extractMaterialFromTrayIndex(payload, length, trayNow, type, color);
+      : trayNow >= 0 && trayNow < 254 &&
+            extractMaterialFromTrayIndex(payload, length, trayNow, type, color);
+  // A1/P2S without AMS can report tray_now=255 while idle even though the
+  // external virtual tray already contains the selected material. Use that
+  // data as a safe fallback; when printing, tray_now=254 takes precedence.
+  if (!found && (trayNow == 255 || trayNow < 0)) {
+    found = extractExternalMaterial(payload, length, type, color);
+    if (found) trayNow = 254;
+  }
   if (!found) return;
   if (type == activeFilamentType && color == activeFilamentColor &&
       trayNow == activeFilamentSlot) return;
   activeFilamentType = type;
   activeFilamentColor = color;
   activeFilamentSlot = trayNow;
+  materialSyncRequests = Config::MATERIAL_SYNC_RETRY_LIMIT;
   reportMaterial();
   Serial.printf("[MATERIAL] %s #%s slot=%d\n", activeFilamentType.c_str(),
                 activeFilamentColor.c_str(), activeFilamentSlot);
@@ -533,13 +567,17 @@ void reportPrinterAlert(bool force = false) {
       char errorCode[11];
       snprintf(errorCode, sizeof(errorCode), "0x%08lX",
                static_cast<unsigned long>(printErrorCode));
-      queuePhoneEvent(String("H2D,ALERT,1,ERROR,H2D báo lỗi máy in • mã ") +
-                      errorCode + " • xem màn hình H2D");
+      queuePhoneEvent(String("H2D,ALERT,1,ERROR,") +
+                      printerModelFromSerial(settings.printerSerial) +
+                      " báo lỗi máy in • mã " +
+                      errorCode + " • xem màn hình máy in");
     } else {
       // HMS can contain an acknowledged advisory (for example a lens-cleaning
       // reminder) while H2D is legitimately cleaning the nozzle. Report it as
       // secondary information; only print_error/FAILED may turn the Island red.
-      queuePhoneEvent("H2D,ALERT,1,WARN,H2D có lưu ý HMS • xem màn hình máy in");
+      queuePhoneEvent(String("H2D,ALERT,1,WARN,") +
+                      printerModelFromSerial(settings.printerSerial) +
+                      " có lưu ý HMS • xem màn hình máy in");
     }
   } else {
     queuePhoneEvent("H2D,ALERT,0,CLEAR");
@@ -711,6 +749,7 @@ void disconnectNetwork() {
   statusDataSeen = false;
   lastPrintDataAt = 0;
   lastStatusRequestAt = 0;
+  materialSyncRequests = 0;
   lastWifiAttemptAt = 0;
   lastMqttAttemptAt = 0;
 }
@@ -737,6 +776,7 @@ void maintainMqtt() {
       mqttWasConnected = true;
       reportStatus("READY");
       publishStatusRequest();
+      if (activeFilamentType.isEmpty()) ++materialSyncRequests;
     }
     // Some H2D firmware revisions do not immediately answer the first
     // pushall sent right after MQTT subscription. Retry only while no fresh
@@ -745,13 +785,19 @@ void maintainMqtt() {
     const uint32_t now = millis();
     const bool printDataStale =
         lastPrintDataAt == 0 || now - lastPrintDataAt > Config::PRINT_DATA_STALE_MS;
-    if (printDataStale &&
+    const bool materialMissing =
+        activeFilamentType.isEmpty() &&
+        materialSyncRequests < Config::MATERIAL_SYNC_RETRY_LIMIT;
+    if ((printDataStale || materialMissing) &&
         now - lastStatusRequestAt >= Config::STATUS_REQUEST_RETRY_MS) {
       publishStatusRequest();
+      if (materialMissing) ++materialSyncRequests;
     }
     if (!statusDataSeen && lastMqttMessageAt > 0 &&
         millis() - lastMqttMessageAt > Config::DATA_TIMEOUT_MS) {
-      queuePhoneEvent("H2D,ERROR,H2D không trả dữ liệu • bật LAN Only và Developer Mode");
+      queuePhoneEvent(String("H2D,ERROR,") +
+                      printerModelFromSerial(settings.printerSerial) +
+                      " không trả dữ liệu • bật LAN Only và Developer Mode");
       lastMqttMessageAt = millis();
     }
     return;
@@ -768,7 +814,7 @@ void maintainMqtt() {
   reportStatus("MQTT_CONNECTING");
   const uint64_t chip = ESP.getEfuseMac();
   char clientId[32];
-  snprintf(clientId, sizeof(clientId), "SE-H2D-%08lX",
+  snprintf(clientId, sizeof(clientId), "SE-Bambu-%08lX",
            static_cast<unsigned long>(chip & 0xFFFFFFFF));
   Serial.printf("[MQTT] connecting %s -> %s:%u, RSSI=%d, heap=%u, max=%u\n",
                 WiFi.localIP().toString().c_str(), settings.printerIp.c_str(),
@@ -794,11 +840,11 @@ void maintainMqtt() {
   statusDataSeen = false;
   lastPrintDataAt = 0;
   lastStatusRequestAt = 0;
-  Serial.println("[MQTT] connected and subscribed to H2D report topic");
+  Serial.println("[MQTT] connected and subscribed to Bambu report topic");
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_C3_BRIDGE,1.8.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.8.2");
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
   if (!settings.complete()) {
@@ -843,11 +889,14 @@ void handlePhoneCommand(String command) {
     queuePhoneEvent("H2D,CFG_ACK,CODE");
   } else if (head == "H2D_SAVE") {
     if (savePendingSettings()) {
+      // A profile switch (A1/H2D/P2S) must never expose the previous
+      // printer's spool while the new printer is synchronizing.
+      clearActiveMaterial();
       queuePhoneEvent("H2D,CFG_ACK,SAVE");
       reportStatus("CONFIG_SAVED");
       disconnectNetwork();
     } else {
-      queuePhoneEvent("H2D,ERROR,Cấu hình thiếu hoặc IP H2D chưa đúng");
+      queuePhoneEvent("H2D,ERROR,Cấu hình thiếu hoặc IP máy in chưa đúng");
     }
   } else if (head == "H2D_ARM") {
     timelapseArmed = argument == "1";
@@ -977,7 +1026,7 @@ void updateLedStrip() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.1");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.2");
   ledStrip.begin();
   ledStrip.setBrightness(Config::LED_BRIGHTNESS);
   ledStrip.clear();
@@ -985,7 +1034,7 @@ void setup() {
   loadSettings();
   setupBle();
 
-  tlsClient.setInsecure();  // H2D uses a per-device/self-signed LAN certificate.
+  tlsClient.setInsecure();  // Bambu uses a per-device/self-signed LAN certificate.
   mqtt.setServer(settings.printerIp.c_str(), Config::MQTT_PORT);
   mqtt.setCallback(onMqttMessage);
   mqtt.setKeepAlive(60);

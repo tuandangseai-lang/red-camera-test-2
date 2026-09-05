@@ -22,7 +22,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var isConnected = false
     @Published private(set) var isH2DBridge = false
     @Published private(set) var isH2DReady = false
-    @Published private(set) var h2dBridgeStatus = "Chưa nhận dữ liệu H2D"
+    @Published private(set) var h2dBridgeStatus = "Chưa nhận dữ liệu máy in"
     @Published private(set) var h2dPrintState = "IDLE"
     @Published private(set) var h2dCurrentLayer = 0
     @Published private(set) var h2dTotalLayers = 0
@@ -56,8 +56,28 @@ final class H2DBLEManager: NSObject, ObservableObject {
         guard !filamentType.isEmpty else { return "Chưa nhận dữ liệu nhựa" }
         let slot = filamentSlot == 254
             ? "cuộn ngoài"
-            : filamentSlot >= 0 ? "khay \(filamentSlot + 1)" : ""
+            : filamentSlot >= 0
+                ? "AMS \(filamentSlot / 4 + 1) • khay \(filamentSlot % 4 + 1)"
+                : ""
         return slot.isEmpty ? filamentType : "\(filamentType) • \(slot)"
+    }
+
+    func prepareForPrinterProfile(_ kind: BambuPrinterKind, serial: String) {
+        printerModelCode = kind.rawValue
+        printerSerial = serial
+        filamentType = ""
+        filamentColorHex = ""
+        filamentSlot = -1
+        h2dPrintState = "IDLE"
+        h2dCurrentLayer = 0
+        h2dTotalLayers = 0
+        h2dPrintPercent = 0
+        h2dStageCode = -1
+        isH2DReady = false
+        hasPrinterAlert = false
+        hasCriticalPrinterAlert = false
+        printerAlertText = ""
+        h2dBridgeStatus = "Đã chọn \(kind.rawValue) • chờ gửi cấu hình"
     }
 
     var isActuallyPrinting: Bool {
@@ -153,7 +173,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         accessCode: String
     ) {
         guard isConnected, isH2DBridge else {
-            h2dBridgeStatus = "ESP32 chưa chạy firmware Bambu v1.7.4 trở lên"
+            h2dBridgeStatus = "ESP32 chưa chạy firmware Bambu v1.8.2 trở lên"
             requestH2DStatus()
             return
         }
@@ -174,6 +194,12 @@ final class H2DBLEManager: NSObject, ObservableObject {
             h2dBridgeStatus = "Access Code LAN phải có ít nhất 6 ký tự"
             return
         }
+
+        let requestedKind = BambuPrinterKind.detect(serial: values[3])
+        prepareForPrinterProfile(
+            requestedKind == .unknown ? .unknown : requestedKind,
+            serial: values[3]
+        )
 
         configurationTimeoutWorkItem?.cancel()
         configurationCommands = [
@@ -280,7 +306,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     self.sendNextConfigurationCommand()
                 }
             } else {
-                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.7.3 trở lên")
+                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware Bambu v1.8.2 trở lên")
             }
         }
         configurationTimeoutWorkItem = timeout
@@ -318,7 +344,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private func startScanning() {
         guard lifecycleActive, central.state == .poweredOn else { return }
         central.stopScan()
-        connectionText = "Đang tìm ESP32-C3 Bambu..."
+        connectionText = "Đang tìm ESP32 Bambu..."
         central.scanForPeripherals(
             withServices: [serviceUUID],
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
@@ -360,7 +386,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             guard let self else { return }
             self.isH2DReady = false
             if !self.hasActiveCriticalPrinterAlert {
-                self.h2dBridgeStatus = "Mất dữ liệu H2D • ESP32 đang tự kết nối lại"
+                self.h2dBridgeStatus = "Mất dữ liệu \(self.printerDisplayName) • ESP32 đang tự kết nối lại"
             }
         }
         mqttLossWorkItem = item
@@ -375,13 +401,13 @@ final class H2DBLEManager: NSObject, ObservableObject {
               eventCharacteristic?.isNotifying == true else { return }
         let firstActivation = !isConnected
         isConnected = true
-        connectionText = "Đã kết nối ESP32-C3 • đang kiểm tra máy in"
+        connectionText = "Đã kết nối ESP32 • đang kiểm tra máy in"
         if firstActivation {
             recognitionWorkItem?.cancel()
             let item = DispatchWorkItem { [weak self] in
                 guard let self, self.isConnected, !self.isH2DBridge else { return }
                 self.hasBridgeError = true
-                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản Bambu C3 khi máy rảnh"
+                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản Bambu v1.8.2"
             }
             recognitionWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: item)
@@ -396,7 +422,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         guard fields.count >= 2, fields[0].uppercased() == "H2D" else { return }
         recognitionWorkItem?.cancel()
         isH2DBridge = true
-        connectionText = "Đã kết nối ESP32-C3 • cầu nối Bambu"
+        connectionText = "Đã kết nối ESP32 • cầu nối Bambu"
 
         switch fields[1].uppercased() {
         case "ESP32":
@@ -405,11 +431,14 @@ final class H2DBLEManager: NSObject, ObservableObject {
             guard fields.count >= 4 else { return }
             printerModelCode = fields[2]
             printerSerial = fields[3]
-            connectionText = "Đã kết nối ESP32-C3 • \(printerDisplayName)"
+            connectionText = "Đã kết nối ESP32 • \(printerDisplayName)"
         case "MATERIAL":
             guard fields.count >= 5 else { return }
-            filamentType = fields[2]
+            filamentType = fields[2].trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
             filamentColorHex = fields[3]
+                .replacingOccurrences(of: "#", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .uppercased()
             filamentSlot = Int(fields[4]) ?? -1
         case "CFG_ACK":
             guard fields.count >= 3 else { return }
@@ -420,7 +449,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             let status = fields[2].uppercased()
             h2dStatusCode = status
             let known: [String: String] = [
-                "BOOTING": "ESP32-C3 đang khởi động",
+                "BOOTING": "ESP32 đang khởi động",
                 "CONFIG_REQUIRED": "Chưa có cấu hình máy in",
                 "CONFIG_SAVED": "Đã lưu cấu hình • đang kết nối lại",
                 "WIFI_CONNECTING": "ESP32 đang kết nối Wi-Fi",
@@ -451,7 +480,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             hasBridgeError = status == "BUFFER_ERROR" || status == "MQTT_AUTH_FAILED"
             if !hasActiveCriticalPrinterAlert {
                 h2dBridgeStatus = status == "BUFFER_ERROR"
-                    ? "ESP32 thiếu bộ nhớ nhận gói H2D • hãy khởi động lại"
+                    ? "ESP32 thiếu bộ nhớ nhận gói \(printerDisplayName) • hãy khởi động lại"
                     : known[status] ?? fields.dropFirst(2).joined(separator: " • ")
             }
         case "PRINT":
@@ -554,7 +583,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             }
         case "ERROR":
             let detail = fields.dropFirst(2).joined(separator: " • ")
-            h2dBridgeStatus = detail.isEmpty ? "Cầu nối H2D gặp lỗi" : detail
+            h2dBridgeStatus = detail.isEmpty ? "Cầu nối Bambu gặp lỗi" : detail
             hasBridgeError = true
             h2dTimelapseEvent = H2DTimelapseEvent(
                 kind: .error,
@@ -604,7 +633,7 @@ extension H2DBLEManager: CBCentralManagerDelegate {
         isH2DBridge = false
         markH2DUnavailable()
         hasBridgeError = true
-        connectionText = "Đã nối BLE • đang mở kênh H2D..."
+        connectionText = "Đã nối BLE • đang mở kênh Bambu..."
         peripheral.discoverServices([serviceUUID])
     }
 
@@ -662,7 +691,7 @@ extension H2DBLEManager: CBPeripheralDelegate {
         error: Error?
     ) {
         guard error == nil else {
-            connectionText = "Không đọc được kênh điều khiển H2D"
+            connectionText = "Không đọc được kênh điều khiển Bambu"
             return
         }
         for characteristic in service.characteristics ?? [] {

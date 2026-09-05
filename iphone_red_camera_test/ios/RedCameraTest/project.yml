@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "9.17"
-    CURRENT_PROJECT_VERSION: "96"
+    MARKETING_VERSION: "9.18"
+    CURRENT_PROJECT_VERSION: "97"
 targets:
   RedCameraTest:
     type: application
@@ -28,9 +28,9 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
-        NSBluetoothAlwaysUsageDescription: Kết nối ESP32 để nhận tín hiệu từng lớp từ máy in H2D.
-        NSCameraUsageDescription: Chụp từng lớp để tạo timelapse H2D.
-        NSPhotoLibraryAddUsageDescription: Lưu video timelapse H2D vào ứng dụng Ảnh.
+        NSBluetoothAlwaysUsageDescription: Kết nối ESP32 để nhận tín hiệu từng lớp từ máy in Bambu.
+        NSCameraUsageDescription: Chụp từng lớp để tạo timelapse máy in Bambu.
+        NSPhotoLibraryAddUsageDescription: Lưu video timelapse máy in Bambu vào ứng dụng Ảnh.
         UILaunchScreen: {}
         UIRequiredDeviceCapabilities:
           - arm64
@@ -39,8 +39,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: vn.rockettracker.RedCameraTest
-        MARKETING_VERSION: "9.17"
-        CURRENT_PROJECT_VERSION: "96"
+        MARKETING_VERSION: "9.18"
+        CURRENT_PROJECT_VERSION: "97"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"
