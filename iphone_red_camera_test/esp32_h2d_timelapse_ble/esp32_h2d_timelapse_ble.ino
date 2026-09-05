@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Adafruit_NeoPixel.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <PubSubClient.h>
@@ -7,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE H2D Timelapse Bridge v1.7.4
+// SE Bambu Timelapse Bridge for ESP32-C3 Mini v1.8.0
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -35,7 +36,13 @@ constexpr uint32_t DATA_TIMEOUT_MS = 45000;
 constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
-constexpr uint8_t STATUS_LED_PIN = 25;
+// External WS2812/NeoPixel strip. DATA -> GPIO4 through a 330-ohm resistor;
+// strip 5V/GND uses a separate 5V supply and MUST share GND with ESP32-C3.
+// Change only these two values if a different free pin/count is wired.
+constexpr uint8_t LED_STRIP_PIN = 4;
+constexpr uint16_t LED_STRIP_COUNT = 24;
+constexpr uint8_t LED_BRIGHTNESS = 52;
+constexpr uint32_t LED_REFRESH_MS = 35;
 }  // namespace Config
 
 struct BridgeSettings {
@@ -58,6 +65,8 @@ BridgeSettings settings;
 BridgeSettings pendingSettings;
 WiFiClientSecure tlsClient;
 PubSubClient mqtt(tlsClient);
+Adafruit_NeoPixel ledStrip(
+    Config::LED_STRIP_COUNT, Config::LED_STRIP_PIN, NEO_GRB + NEO_KHZ800);
 NimBLECharacteristic *eventCharacteristic = nullptr;
 
 portMUX_TYPE eventMux = portMUX_INITIALIZER_UNLOCKED;
@@ -79,6 +88,9 @@ uint32_t printErrorCode = 0;
 uint32_t lastReportedPrintErrorCode = 0;
 String printState = "IDLE";
 String activeJob = "0";
+String activeFilamentType = "";
+String activeFilamentColor = "";
+int activeFilamentSlot = -1;
 int currentLayer = 0;
 int totalLayers = 0;
 int printPercent = 0;
@@ -95,6 +107,8 @@ uint32_t lastPrintDataAt = 0;
 uint32_t lastStatusRequestAt = 0;
 uint32_t lastBleNotifyAt = 0;
 uint32_t sequenceId = 0;
+uint32_t captureFlashUntil = 0;
+uint32_t lastLedRefreshAt = 0;
 
 void queuePhoneEvent(const String &event) {
   portENTER_CRITICAL(&eventMux);
@@ -135,6 +149,37 @@ void reportPrintStatus(bool force = false) {
   lastStatusNotifyAt = now;
   queuePhoneEvent(String("H2D,PRINT,") + printState + "," + currentLayer +
                   "," + totalLayers + "," + printPercent + "," + currentStage);
+}
+
+String printerModelFromSerial(const String &serial) {
+  String normalized = serial;
+  normalized.trim();
+  normalized.toUpperCase();
+  if (normalized.startsWith("039") || normalized.startsWith("030")) return "A1";
+  if (normalized.startsWith("094")) return "H2D";
+  if (normalized.startsWith("22E")) return "P2S";
+  return "Bambu";
+}
+
+String safeEventField(String value) {
+  value.replace(",", " ");
+  value.replace("\r", " ");
+  value.replace("\n", " ");
+  value.trim();
+  return value;
+}
+
+void reportPrinterIdentity() {
+  queuePhoneEvent(String("H2D,PRINTER,") +
+                  printerModelFromSerial(settings.printerSerial) + "," +
+                  safeEventField(settings.printerSerial));
+}
+
+void reportMaterial() {
+  queuePhoneEvent(String("H2D,MATERIAL,") +
+                  safeEventField(activeFilamentType) + "," +
+                  safeEventField(activeFilamentColor) + "," +
+                  activeFilamentSlot);
 }
 
 String decodeBase64(const String &encoded) {
@@ -348,6 +393,124 @@ bool extractJsonArrayHasItems(const uint8_t *payload, size_t length,
   return true;
 }
 
+bool findObjectRangeAfterKey(const uint8_t *payload, size_t length,
+                             const char *key, size_t &start, size_t &end) {
+  size_t searchFrom = 0;
+  size_t valuePosition = 0;
+  while (findKey(payload, length, key, searchFrom, valuePosition)) {
+    size_t cursor = valuePosition;
+    while (cursor < length &&
+           (payload[cursor] == ' ' || payload[cursor] == '\t' ||
+            payload[cursor] == '\r' || payload[cursor] == '\n')) ++cursor;
+    if (cursor < length && payload[cursor] == '{') {
+      int depth = 0;
+      bool inString = false;
+      bool escaped = false;
+      for (size_t i = cursor; i < length; ++i) {
+        const char c = static_cast<char>(payload[i]);
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (c == '\\') escaped = true;
+          else if (c == '"') inString = false;
+          continue;
+        }
+        if (c == '"') inString = true;
+        else if (c == '{') ++depth;
+        else if (c == '}' && --depth == 0) {
+          start = cursor;
+          end = i + 1;
+          return true;
+        }
+      }
+      return false;
+    }
+    searchFrom = valuePosition;
+  }
+  return false;
+}
+
+String normalizedFilamentColor(String color) {
+  color.trim();
+  color.replace("#", "");
+  color.toUpperCase();
+  if (color.length() > 8) color = color.substring(0, 8);
+  return color;
+}
+
+bool extractMaterialFromTrayIndex(const uint8_t *payload, size_t length,
+                                  int trayIndex, String &type, String &color) {
+  if (trayIndex < 0) return false;
+  size_t amsStart = 0;
+  size_t amsEnd = 0;
+  if (!findObjectRangeAfterKey(payload, length, "ams", amsStart, amsEnd)) return false;
+
+  const uint8_t *ams = payload + amsStart;
+  const size_t amsLength = amsEnd - amsStart;
+  size_t searchFrom = 0;
+  size_t valuePosition = 0;
+  int seen = 0;
+  while (findKey(ams, amsLength, "tray_type", searchFrom, valuePosition)) {
+    if (seen == trayIndex) {
+      String parsedType;
+      String parsedColor;
+      const size_t typeStart = valuePosition >= 12 ? valuePosition - 12 : 0;
+      if (!extractJsonString(ams + typeStart,
+                             amsLength - typeStart,
+                             "tray_type", parsedType)) return false;
+      const size_t localStart = valuePosition > 16 ? valuePosition - 16 : 0;
+      const size_t remaining = amsLength - localStart;
+      const size_t localLength = remaining < 768 ? remaining : 768;
+      extractJsonString(ams + localStart, localLength, "tray_color", parsedColor);
+      if (parsedColor.length() < 6) {
+        extractJsonString(ams + localStart, localLength, "cols", parsedColor);
+      }
+      parsedType.trim();
+      if (parsedType.isEmpty()) return false;
+      type = parsedType;
+      color = normalizedFilamentColor(parsedColor);
+      return true;
+    }
+    ++seen;
+    searchFrom = valuePosition;
+  }
+  return false;
+}
+
+bool extractExternalMaterial(const uint8_t *payload, size_t length,
+                             String &type, String &color) {
+  size_t start = 0;
+  size_t end = 0;
+  if (!findObjectRangeAfterKey(payload, length, "vt_tray", start, end)) return false;
+  String parsedType;
+  String parsedColor;
+  if (!extractJsonString(payload + start, end - start, "tray_type", parsedType)) return false;
+  extractJsonString(payload + start, end - start, "tray_color", parsedColor);
+  parsedType.trim();
+  if (parsedType.isEmpty()) return false;
+  type = parsedType;
+  color = normalizedFilamentColor(parsedColor);
+  return true;
+}
+
+void updateActiveMaterial(const uint8_t *payload, size_t length) {
+  int trayNow = -1;
+  if (!extractLastJsonInt(payload, length, "tray_now", trayNow)) return;
+  String type;
+  String color;
+  const bool found = trayNow == 254
+      ? extractExternalMaterial(payload, length, type, color)
+      : extractMaterialFromTrayIndex(payload, length, trayNow, type, color);
+  if (!found) return;
+  if (type == activeFilamentType && color == activeFilamentColor &&
+      trayNow == activeFilamentSlot) return;
+  activeFilamentType = type;
+  activeFilamentColor = color;
+  activeFilamentSlot = trayNow;
+  reportMaterial();
+  Serial.printf("[MATERIAL] %s #%s slot=%d\n", activeFilamentType.c_str(),
+                activeFilamentColor.c_str(), activeFilamentSlot);
+}
+
 void reportPrinterAlert(bool force = false) {
   // H2D keeps acknowledged/old HMS entries in some full-state packets even
   // while the printer is idle. Only surface them during a real print session;
@@ -406,6 +569,7 @@ String safeJobID(const String &source) {
 void sendSnapshot(int layer) {
   if (!timelapseArmed || layer <= 0 || layer <= lastSnapLayer) return;
   lastSnapLayer = layer;
+  captureFlashUntil = millis() + 650;
   queuePhoneEvent(String("H2D,SNAP,") + layer + "," +
                   max(layer, totalLayers) + "," + activeJob);
   Serial.printf("[SNAP] completed layer %d/%d\n", layer, totalLayers);
@@ -415,7 +579,10 @@ void resetForNewPrint(const String &job, int layer) {
   activeJob = job;
   currentLayer = max(0, layer);
   lastObservedLayer = currentLayer;
-  lastSnapLayer = 0;
+  // A bridge restart in the middle of a job must establish a baseline, not
+  // replay layers 1...N to the iPhone. The current layer becomes eligible
+  // only when the printer advances to the next one.
+  lastSnapLayer = max(0, currentLayer - 1);
   finishSent = false;
   printWasRunning = true;
   Serial.printf("[PRINT] new job %s, starting observation at layer %d\n",
@@ -445,11 +612,6 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
   if (actualLayerPrinting) {
     if (!wasRunning || (jobToken != "0" && jobToken != activeJob)) {
       resetForNewPrint(jobToken, currentLayer);
-      // Smooth Timelapse needs a keyframe at the real start of printing. H2D
-      // commonly reports layer_num=0 in the first RUNNING packet, so this
-      // must be unconditional; otherwise the first seconds are empty until
-      // the next layer transition arrives.
-      sendSnapshot(1);
     } else if (currentLayer > lastObservedLayer) {
       // When H2D announces layer N, layer N-1 has completed. This avoids taking
       // a picture while the reported layer is still being printed. If a
@@ -525,6 +687,7 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
     printErrorActive = incomingPrintError != 0;
   }
   if (hasHms) hmsAlertActive = incomingHmsAlert;
+  updateActiveMaterial(payload, length);
   // A state transition to IDLE must clear a previously active warning even
   // when that incremental packet does not contain hms/print_error fields.
   if (hasPrintError || hasHms || hasState) reportPrinterAlert();
@@ -635,7 +798,9 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.7.4");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_C3_BRIDGE,1.8.0");
+  reportPrinterIdentity();
+  if (!activeFilamentType.isEmpty()) reportMaterial();
   if (!settings.complete()) {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -690,7 +855,9 @@ void handlePhoneCommand(String command) {
       // Arm at the current layer so reconnecting in the middle of a print does
       // not invent frames for layers that the iPhone never observed.
       lastObservedLayer = currentLayer;
-      lastSnapLayer = 0;
+      // Resume from the layer currently being printed. On the next transition
+      // only that just-finished layer is emitted; old layers are never filled.
+      lastSnapLayer = max(0, currentLayer - 1);
       finishSent = false;
       reportStatus("ARMED");
     } else {
@@ -752,26 +919,69 @@ void setupBle() {
   advertising->start();
 }
 
-void updateLed() {
-  const uint32_t now = millis();
-  bool on = false;
-  if (!settings.complete()) {
-    on = (now % 1400) < 100;
-  } else if (WiFi.status() != WL_CONNECTED || !mqtt.connected()) {
-    on = (now % 700) < 110;
-  } else if (timelapseArmed) {
-    on = (now % 2200) < 1750;
-  } else {
-    on = true;
+uint32_t scaledLedColor(uint8_t red, uint8_t green, uint8_t blue,
+                        uint8_t scale) {
+  return ledStrip.Color(
+      static_cast<uint16_t>(red) * scale / 255,
+      static_cast<uint16_t>(green) * scale / 255,
+      static_cast<uint16_t>(blue) * scale / 255);
+}
+
+void fillLedStrip(uint32_t color) {
+  for (uint16_t i = 0; i < Config::LED_STRIP_COUNT; ++i) {
+    ledStrip.setPixelColor(i, color);
   }
-  digitalWrite(Config::STATUS_LED_PIN, on ? HIGH : LOW);
+}
+
+void updateLedStrip() {
+  const uint32_t now = millis();
+  if (now - lastLedRefreshAt < Config::LED_REFRESH_MS) return;
+  lastLedRefreshAt = now;
+  ledStrip.clear();
+
+  const bool criticalError = printErrorActive || printState == "FAILED" ||
+                             printState == "ERROR";
+  if (criticalError) {
+    fillLedStrip(ledStrip.Color(255, 0, 0));
+  } else if (static_cast<int32_t>(captureFlashUntil - now) > 0) {
+    // Same meaning as the blue border on iPhone: one layer photo was ordered.
+    fillLedStrip(ledStrip.Color(0, 105, 255));
+  } else if (printState == "RUNNING" &&
+             (currentStage == 0 || currentStage == -1)) {
+    // LED 0 is the 12 o'clock point. Install the strip clockwise so the
+    // physical progress follows the iPhone border in the same direction.
+    uint16_t lit = printPercent >= 100
+        ? Config::LED_STRIP_COUNT
+        : (Config::LED_STRIP_COUNT * printPercent + 99) / 100;
+    if (lit < 1) lit = 1;
+    for (uint16_t i = 0; i < lit; ++i) {
+      uint8_t scale = 150;
+      if (i + 1 == lit) scale = 255;
+      else if (i + 2 == lit) scale = 215;
+      ledStrip.setPixelColor(i, scaledLedColor(0, 255, 65, scale));
+    }
+    for (uint16_t i = lit; i < Config::LED_STRIP_COUNT; ++i) {
+      ledStrip.setPixelColor(i, ledStrip.Color(0, 9, 2));
+    }
+  } else {
+    // Waiting, connecting and every preparation/cleaning/calibration stage:
+    // breathe yellow on a two-second cycle exactly like the iPhone UI.
+    const uint16_t phase = now % 2000;
+    const uint16_t ramp = phase < 1000 ? phase : 2000 - phase;
+    const uint8_t scale = 35 + static_cast<uint32_t>(ramp) * 220 / 1000;
+    fillLedStrip(scaledLedColor(255, 190, 0, scale));
+  }
+  ledStrip.show();
 }
 
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE H2D Timelapse Bridge v1.7.4");
-  pinMode(Config::STATUS_LED_PIN, OUTPUT);
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32-C3 Mini v1.8.0");
+  ledStrip.begin();
+  ledStrip.setBrightness(Config::LED_BRIGHTNESS);
+  ledStrip.clear();
+  ledStrip.show();
   loadSettings();
   setupBle();
 
@@ -800,6 +1010,6 @@ void loop() {
   if (mqtt.connected()) mqtt.loop();
   reportPrintStatus(false);
   flushPhoneEvents();
-  updateLed();
+  updateLedStrip();
   delay(2);
 }

@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.15 build93 - H2D trang thai va tu khoi phuc cau hinh
+name: Tao IPA SE v9.16 build94 - 3 may Bambu, camera truc tiep va LED C3
 
 on:
   workflow_dispatch:
@@ -45,7 +45,9 @@ jobs:
           test -f "RedCameraTest/H2DBLEManager.swift"
           test -f "RedCameraTest/H2DTimelapseManager.swift"
           test -f "RedCameraTest/H2DTimelapseView.swift"
+          test -f "RedCameraTest/BambuPrinterProfile.swift"
           test -f "RedCameraTest/H2DPrinterCameraView.swift"
+          test -f "RedCameraTest/H2DNativeRTSPPlayer.swift"
           grep -q 'case "SNAP"' "RedCameraTest/H2DBLEManager.swift"
           grep -q 'case "CFG_ACK"' "RedCameraTest/H2DBLEManager.swift"
           grep -q 'case "ALERT"' "RedCameraTest/H2DBLEManager.swift"
@@ -64,6 +66,12 @@ jobs:
           grep -q "NWConnection" "RedCameraTest/H2DPrinterCameraView.swift"
           grep -q "startAttempt" "RedCameraTest/H2DPrinterCameraView.swift"
           grep -q "action = 2" "RedCameraTest/H2DPrinterCameraView.swift"
+          grep -q "H2DNativeRTSPPlayer" "RedCameraTest/H2DPrinterCameraView.swift"
+          grep -q "CMVideoFormatDescriptionCreateFromH264ParameterSets" "RedCameraTest/H2DNativeRTSPPlayer.swift"
+          grep -q "BambuJPEGCameraPlayer" "RedCameraTest/H2DNativeRTSPPlayer.swift"
+          grep -q 'case "PRINTER"' "RedCameraTest/H2DBLEManager.swift"
+          grep -q 'case "MATERIAL"' "RedCameraTest/H2DBLEManager.swift"
+          grep -q 'hasPrefix("22E")' "RedCameraTest/BambuPrinterProfile.swift"
           grep -q "hasActivePrinterAlert" "RedCameraTest/H2DBLEManager.swift"
           grep -q "hasActiveCriticalPrinterAlert" "RedCameraTest/H2DBLEManager.swift"
           grep -q "attemptAutomaticConfigurationIfNeeded" "RedCameraTest/H2DTimelapseView.swift"
@@ -114,24 +122,24 @@ jobs:
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.15"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "93"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.16"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "94"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.15-build93-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.16-build94-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.15-build93-unsigned-ipa
-          path: SE-v9.15-build93-unsigned.ipa
+          name: SE-v9.16-build94-unsigned-ipa
+          path: SE-v9.16-build94-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
   build-h2d-esp32:
-    name: Build ESP32 H2D Bridge
+    name: Build ESP32-C3 Bambu Bridge
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -142,7 +150,7 @@ jobs:
       - name: Cai Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
-      - name: Cai ESP32, MQTT va NimBLE
+      - name: Cai ESP32-C3, MQTT, NimBLE va NeoPixel
         run: |
           set -euo pipefail
           arduino-cli config init
@@ -150,20 +158,21 @@ jobs:
           arduino-cli core install esp32:esp32
           arduino-cli lib install PubSubClient
           arduino-cli lib install NimBLE-Arduino@2.5.1
+          arduino-cli lib install "Adafruit NeoPixel"
 
       - name: Bien dich firmware cau noi H2D
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/SE-H2D-ESP32"
+          mkdir -p "$RUNNER_TEMP/SE-Bambu-ESP32-C3"
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
-            --output-dir "$RUNNER_TEMP/SE-H2D-ESP32" \
+            --fqbn esp32:esp32:esp32c3:PartitionScheme=huge_app \
+            --output-dir "$RUNNER_TEMP/SE-Bambu-ESP32-C3" \
             iphone_red_camera_test/esp32_h2d_timelapse_ble
 
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-H2D-ESP32-v1.7.4
-          path: ${{ runner.temp }}/SE-H2D-ESP32/*
+          name: SE-Bambu-ESP32-C3-v1.8.0
+          path: ${{ runner.temp }}/SE-Bambu-ESP32-C3/*
           if-no-files-found: error
           retention-days: 7

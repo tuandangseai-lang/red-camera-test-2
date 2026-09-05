@@ -92,11 +92,19 @@ private final class H2DVLCCertificateDialogRenderer: NSObject, VLCCustomDialogRe
 
 enum H2DAccessCodeStore {
     private static let service = "vn.rockettracker.RedCameraTest.h2d"
-    private static let account = "lan-access-code"
+    private static let legacyAccount = "lan-access-code"
     // Sideloaded builds can occasionally receive a new Keychain access group
     // when they are re-signed. Keep a local recovery copy so an in-place app
     // update never makes the user type the LAN Access Code again.
-    private static let recoveryKey = "SE.H2D.lanAccessCode.recovery"
+    private static let legacyRecoveryKey = "SE.H2D.lanAccessCode.recovery"
+
+    private static func account(for kind: BambuPrinterKind) -> String {
+        "lan-access-code-\(kind.rawValue.lowercased())"
+    }
+
+    private static func recoveryKey(for kind: BambuPrinterKind) -> String {
+        "SE.Bambu.\(kind.rawValue).lanAccessCode.recovery"
+    }
 
     private static func normalize(_ value: String) -> String {
         value
@@ -104,11 +112,12 @@ enum H2DAccessCodeStore {
             .lowercased()
     }
 
-    static func load() -> String {
+    static func load(for kind: BambuPrinterKind = .h2d) -> String {
+        let profileAccount = account(for: kind)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
+            kSecAttrAccount as String: profileAccount,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
@@ -118,21 +127,45 @@ enum H2DAccessCodeStore {
               let value = String(data: data, encoding: .utf8) {
             let normalized = normalize(value)
             if !normalized.isEmpty {
-                UserDefaults.standard.set(normalized, forKey: recoveryKey)
+                UserDefaults.standard.set(normalized, forKey: recoveryKey(for: kind))
                 return normalized
             }
         }
-        return normalize(UserDefaults.standard.string(forKey: recoveryKey) ?? "")
+        let recovered = normalize(UserDefaults.standard.string(forKey: recoveryKey(for: kind)) ?? "")
+        if !recovered.isEmpty { return recovered }
+
+        // Migrate the single-printer store used by older SE builds into the
+        // H2D profile. Other models never inherit H2D's credential.
+        guard kind == .h2d else { return "" }
+        let legacyQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: legacyAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var legacyResult: CFTypeRef?
+        var legacy = ""
+        if SecItemCopyMatching(legacyQuery as CFDictionary, &legacyResult) == errSecSuccess,
+           let data = legacyResult as? Data,
+           let value = String(data: data, encoding: .utf8) {
+            legacy = normalize(value)
+        }
+        if legacy.isEmpty {
+            legacy = normalize(UserDefaults.standard.string(forKey: legacyRecoveryKey) ?? "")
+        }
+        if !legacy.isEmpty { save(legacy, for: kind) }
+        return legacy
     }
 
-    static func save(_ value: String) {
+    static func save(_ value: String, for kind: BambuPrinterKind = .h2d) {
         let trimmed = normalize(value)
         guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return }
-        UserDefaults.standard.set(trimmed, forKey: recoveryKey)
+        UserDefaults.standard.set(trimmed, forKey: recoveryKey(for: kind))
         let identity: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account
+            kSecAttrAccount as String: account(for: kind)
         ]
         let update: [String: Any] = [kSecValueData as String: data]
         let updateStatus = SecItemUpdate(identity as CFDictionary, update as CFDictionary)
@@ -440,29 +473,69 @@ private struct H2DPrinterVideoSurface: UIViewRepresentable {
     }
 }
 
-struct H2DPrinterCameraView: View {
+private struct H2DDirectVideoSurface: UIViewRepresentable {
+    @ObservedObject var player: H2DNativeRTSPPlayer
     let printerIP: String
     let accessCode: String
 
+    func makeUIView(context: Context) -> H2DDecodedVideoView {
+        let view = H2DDecodedVideoView()
+        DispatchQueue.main.async {
+            player.attach(to: view, printerIP: printerIP, accessCode: accessCode)
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: H2DDecodedVideoView, context: Context) {}
+}
+
+struct H2DPrinterCameraView: View {
+    let printerIP: String
+    let accessCode: String
+    let printerKind: BambuPrinterKind
+
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var player = H2DPrinterCameraPlayer()
+    @StateObject private var h2dPlayer = H2DNativeRTSPPlayer()
+    @StateObject private var jpegPlayer = BambuJPEGCameraPlayer()
+
+    private var statusText: String {
+        printerKind == .h2d || printerKind == .unknown
+            ? h2dPlayer.statusText : jpegPlayer.statusText
+    }
+
+    private var isPlaying: Bool {
+        printerKind == .h2d || printerKind == .unknown
+            ? h2dPlayer.isPlaying : jpegPlayer.isPlaying
+    }
+
+    private var hasError: Bool {
+        printerKind == .h2d || printerKind == .unknown
+            ? h2dPlayer.hasError : jpegPlayer.hasError
+    }
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            H2DPrinterVideoSurface(
-                player: player,
-                printerIP: printerIP,
-                accessCode: accessCode
-            )
-            .ignoresSafeArea()
+            if printerKind == .h2d || printerKind == .unknown {
+                H2DDirectVideoSurface(
+                    player: h2dPlayer,
+                    printerIP: printerIP,
+                    accessCode: accessCode
+                )
+                .ignoresSafeArea()
+            } else if let image = jpegPlayer.image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .ignoresSafeArea()
+            }
 
             VStack {
                 HStack(spacing: 10) {
                     Circle()
-                        .fill(player.hasError ? Color.red : player.isPlaying ? .green : .yellow)
+                        .fill(hasError ? Color.red : isPlaying ? .green : .yellow)
                         .frame(width: 9, height: 9)
-                    Text(player.statusText)
+                    Text(statusText)
                         .font(.custom("Arial", size: 12).weight(.bold))
                         .lineLimit(2)
                     Spacer()
@@ -475,7 +548,15 @@ struct H2DPrinterCameraView: View {
 
                 HStack(spacing: 14) {
                     Button {
-                        player.start()
+                        if printerKind == .h2d || printerKind == .unknown {
+                            h2dPlayer.start()
+                        } else {
+                            jpegPlayer.start(
+                                printerIP: printerIP,
+                                accessCode: accessCode,
+                                model: printerKind
+                            )
+                        }
                     } label: {
                         Label("Kết nối lại", systemImage: "arrow.clockwise")
                     }
@@ -493,6 +574,18 @@ struct H2DPrinterCameraView: View {
             .padding(16)
         }
         .preferredColorScheme(.dark)
-        .onDisappear { player.stop() }
+        .onAppear {
+            if printerKind != .h2d && printerKind != .unknown {
+                jpegPlayer.start(
+                    printerIP: printerIP,
+                    accessCode: accessCode,
+                    model: printerKind
+                )
+            }
+        }
+        .onDisappear {
+            h2dPlayer.stop()
+            jpegPlayer.stop()
+        }
     }
 }

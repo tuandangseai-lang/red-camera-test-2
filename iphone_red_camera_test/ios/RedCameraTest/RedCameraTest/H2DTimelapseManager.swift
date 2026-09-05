@@ -53,7 +53,11 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private var lastJobID = ""
     private var monitorPreviewRequested = false
     private var captureRotationAngle: CGFloat = 270
-    private let smoothPositionDelay: TimeInterval = 0.70
+    private var minimumAcceptedLayer = 1
+    // The MQTT layer transition already arrives while Smooth Timelapse has
+    // parked the toolhead. Waiting another 0.7 s moved the photo into the next
+    // layer, so capture starts immediately and only gives AE a tiny settle.
+    private let captureSettleDelay: TimeInterval = 0.04
 
     func preparePreview() {
         requestCameraPermission { [weak self] granted in
@@ -77,7 +81,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         }
     }
 
-    func arm() {
+    func arm(startingAtLayer: Int = 0) {
         guard !isArmed, !isRendering else { return }
         requestCameraPermission { [weak self] granted in
             guard let self else { return }
@@ -88,7 +92,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.sessionQueue.async {
                 self.configureIfNeeded()
                 guard self.configured else { return }
-                self.beginNewRun()
+                self.beginNewRun(startingAtLayer: startingAtLayer)
             }
         }
     }
@@ -284,7 +288,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         }
     }
 
-    private func beginNewRun() {
+    private func beginNewRun(startingAtLayer: Int) {
         cameraStopWorkItem?.cancel()
         pendingRequests.removeAll()
         currentRequest = nil
@@ -295,6 +299,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         finishRequested = false
         lastVideoSaved = false
         lastJobID = ""
+        minimumAcceptedLayer = max(1, startingAtLayer)
 
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
@@ -328,24 +333,27 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
 
     private func enqueueSnapshot(layer: Int, totalLayers: Int, jobID: String) {
         sessionQueue.async { [weak self] in
-            guard let self, self.isArmed, layer > 0,
+            guard let self, self.isArmed, layer >= self.minimumAcceptedLayer,
                   !self.capturedLayers.contains(layer),
                   self.currentRequest?.layer != layer,
                   !self.pendingRequests.contains(where: { $0.layer == layer }) else { return }
             if !jobID.isEmpty, jobID != "0", jobID != "TEST" {
                 self.lastJobID = jobID
             }
-            self.pendingRequests.append(
-                CaptureRequest(layer: layer, totalLayers: totalLayers, jobID: jobID)
-            )
-            self.pendingRequests.sort { $0.layer < $1.layer }
+            let request = CaptureRequest(layer: layer, totalLayers: totalLayers, jobID: jobID)
+            // Never build a catch-up queue after a reconnect. If several old
+            // notifications arrive together, retain only the newest eligible
+            // layer; normal prints still deliver one event per layer.
+            if let current = self.currentRequest {
+                guard layer > current.layer else { return }
+                self.pendingRequests = [request]
+            } else {
+                self.pendingRequests = [request]
+            }
             if jobID != "TEST" {
-                self.publishStatus("Lớp \(layer) đã xong • chờ đầu in vào vị trí chụp")
+                self.publishStatus("Lớp \(layer) đã xong • chụp ngay tại vị trí Smooth")
             }
-            let delay = jobID == "TEST" ? 0 : self.smoothPositionDelay
-            self.sessionQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.captureNextIfNeeded()
-            }
+            self.captureNextIfNeeded()
         }
     }
 
@@ -363,8 +371,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.statusText = "Đang chụp lớp \(request.layer)/\(max(request.layer, request.totalLayers))"
         }
 
-        // A short warm-up lets exposure settle after the low-heat camera sleep.
-        sessionQueue.asyncAfter(deadline: .now() + 0.38) { [weak self] in
+        sessionQueue.asyncAfter(deadline: .now() + captureSettleDelay) { [weak self] in
             guard let self, self.currentRequest == request,
                   self.previewSession.isRunning else {
                 self?.finishCurrentCapture(success: false)

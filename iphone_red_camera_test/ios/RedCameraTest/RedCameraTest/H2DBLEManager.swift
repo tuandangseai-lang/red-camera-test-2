@@ -36,6 +36,29 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var hasCriticalPrinterAlert = false
     @Published private(set) var printerAlertText = ""
     @Published private(set) var h2dStatusCode = "BOOTING"
+    @Published private(set) var printerModelCode = "Bambu"
+    @Published private(set) var printerSerial = ""
+    @Published private(set) var filamentType = ""
+    @Published private(set) var filamentColorHex = ""
+    @Published private(set) var filamentSlot = -1
+
+    var printerKind: BambuPrinterKind {
+        let reported = BambuPrinterKind(rawValue: printerModelCode)
+        return reported ?? BambuPrinterKind.detect(serial: printerSerial)
+    }
+
+    var printerDisplayName: String {
+        let kind = printerKind
+        return kind == .unknown ? "Bambu" : kind.rawValue
+    }
+
+    var materialDescription: String {
+        guard !filamentType.isEmpty else { return "Chưa nhận dữ liệu nhựa" }
+        let slot = filamentSlot == 254
+            ? "cuộn ngoài"
+            : filamentSlot >= 0 ? "khay \(filamentSlot + 1)" : ""
+        return slot.isEmpty ? filamentType : "\(filamentType) • \(slot)"
+    }
 
     var isActuallyPrinting: Bool {
         guard h2dPrintState.uppercased() == "RUNNING" else { return false }
@@ -130,7 +153,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         accessCode: String
     ) {
         guard isConnected, isH2DBridge else {
-            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.7.4 trở lên"
+            h2dBridgeStatus = "ESP32 chưa chạy firmware Bambu v1.7.4 trở lên"
             requestH2DStatus()
             return
         }
@@ -156,8 +179,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
         configurationCommands = [
             ConfigurationCommand(payload: "H2D_WIFI_SSID,\(base64(values[0]))", acknowledgement: "SSID", label: "tên Wi-Fi"),
             ConfigurationCommand(payload: "H2D_WIFI_PASS,\(base64(values[1]))", acknowledgement: "PASS", label: "mật khẩu Wi-Fi"),
-            ConfigurationCommand(payload: "H2D_IP,\(values[2])", acknowledgement: "IP", label: "địa chỉ H2D"),
-            ConfigurationCommand(payload: "H2D_SERIAL,\(values[3])", acknowledgement: "SERIAL", label: "serial H2D"),
+            ConfigurationCommand(payload: "H2D_IP,\(values[2])", acknowledgement: "IP", label: "địa chỉ máy in"),
+            ConfigurationCommand(payload: "H2D_SERIAL,\(values[3])", acknowledgement: "SERIAL", label: "serial máy in"),
             ConfigurationCommand(payload: "H2D_CODE,\(base64(values[4]))", acknowledgement: "CODE", label: "Access Code"),
             ConfigurationCommand(payload: "H2D_SAVE", acknowledgement: "SAVE", label: "lưu cấu hình")
         ]
@@ -171,7 +194,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     func setH2DTimelapseArmed(_ armed: Bool) {
         send(armed ? "H2D_ARM,1" : "H2D_ARM,0")
         h2dBridgeStatus = armed
-            ? "Đã bật chụp theo lớp • đang chờ H2D"
+            ? "Đã bật chụp theo lớp • đang chờ \(printerDisplayName)"
             : "Đã dừng chụp theo lớp"
     }
 
@@ -295,7 +318,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private func startScanning() {
         guard lifecycleActive, central.state == .poweredOn else { return }
         central.stopScan()
-        connectionText = "Đang tìm ESP32 H2D..."
+        connectionText = "Đang tìm ESP32-C3 Bambu..."
         central.scanForPeripherals(
             withServices: [serviceUUID],
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
@@ -352,13 +375,13 @@ final class H2DBLEManager: NSObject, ObservableObject {
               eventCharacteristic?.isNotifying == true else { return }
         let firstActivation = !isConnected
         isConnected = true
-        connectionText = "Đã kết nối ESP32 • đang kiểm tra H2D"
+        connectionText = "Đã kết nối ESP32-C3 • đang kiểm tra máy in"
         if firstActivation {
             recognitionWorkItem?.cancel()
             let item = DispatchWorkItem { [weak self] in
                 guard let self, self.isConnected, !self.isH2DBridge else { return }
                 self.hasBridgeError = true
-                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.7.4 khi máy rảnh"
+                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản Bambu C3 khi máy rảnh"
             }
             recognitionWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: item)
@@ -373,11 +396,21 @@ final class H2DBLEManager: NSObject, ObservableObject {
         guard fields.count >= 2, fields[0].uppercased() == "H2D" else { return }
         recognitionWorkItem?.cancel()
         isH2DBridge = true
-        connectionText = "Đã kết nối ESP32 • cầu nối H2D"
+        connectionText = "Đã kết nối ESP32-C3 • cầu nối Bambu"
 
         switch fields[1].uppercased() {
         case "ESP32":
             hasBridgeError = false
+        case "PRINTER":
+            guard fields.count >= 4 else { return }
+            printerModelCode = fields[2]
+            printerSerial = fields[3]
+            connectionText = "Đã kết nối ESP32-C3 • \(printerDisplayName)"
+        case "MATERIAL":
+            guard fields.count >= 5 else { return }
+            filamentType = fields[2]
+            filamentColorHex = fields[3]
+            filamentSlot = Int(fields[4]) ?? -1
         case "CFG_ACK":
             guard fields.count >= 3 else { return }
             hasBridgeError = false
@@ -387,16 +420,16 @@ final class H2DBLEManager: NSObject, ObservableObject {
             let status = fields[2].uppercased()
             h2dStatusCode = status
             let known: [String: String] = [
-                "BOOTING": "ESP32 H2D đang khởi động",
-                "CONFIG_REQUIRED": "Chưa có cấu hình H2D",
+                "BOOTING": "ESP32-C3 đang khởi động",
+                "CONFIG_REQUIRED": "Chưa có cấu hình máy in",
                 "CONFIG_SAVED": "Đã lưu cấu hình • đang kết nối lại",
                 "WIFI_CONNECTING": "ESP32 đang kết nối Wi-Fi",
-                "WIFI_OK": "Wi-Fi đã kết nối • đang tìm H2D",
-                "MQTT_CONNECTING": "Đang xác thực H2D LAN bằng Access Code",
-                "MQTT_AUTH_FAILED": "Không xác thực được H2D • kiểm tra Access Code LAN",
-                "MQTT_RETRY": "Mạng đã thấy H2D • đang thử kết nối lại",
-                "SYNCING": "Đang đồng bộ trạng thái hiện tại từ H2D",
-                "READY": "H2D đã sẵn sàng gửi dữ liệu lớp",
+                "WIFI_OK": "Wi-Fi đã kết nối • đang tìm máy in",
+                "MQTT_CONNECTING": "Đang xác thực \(printerDisplayName) LAN bằng Access Code",
+                "MQTT_AUTH_FAILED": "Không xác thực được \(printerDisplayName) • kiểm tra Access Code LAN",
+                "MQTT_RETRY": "Mạng đã thấy máy in • đang thử kết nối lại",
+                "SYNCING": "Đang đồng bộ trạng thái hiện tại từ \(printerDisplayName)",
+                "READY": "\(printerDisplayName) đã sẵn sàng gửi dữ liệu lớp",
                 "ARMED": "Đã bật chụp theo lớp • đang chờ máy in",
                 "DISARMED": "Đã dừng chụp theo lớp"
             ]
@@ -439,12 +472,12 @@ final class H2DBLEManager: NSObject, ObservableObject {
             }
             if !hasActiveCriticalPrinterAlert {
                 if isActuallyPrinting {
-                    h2dBridgeStatus = "H2D đang in lớp \(h2dCurrentLayer)/\(max(1, h2dTotalLayers))"
+                    h2dBridgeStatus = "\(printerDisplayName) đang in lớp \(h2dCurrentLayer)/\(max(1, h2dTotalLayers))"
                 } else if h2dPrintState == "RUNNING" ||
                             (h2dStageCode > 0 && h2dStageCode != 255) {
                     h2dBridgeStatus = h2dStageText
                 } else {
-                    h2dBridgeStatus = "Trạng thái H2D: \(h2dPrintState)"
+                    h2dBridgeStatus = "Trạng thái \(printerDisplayName): \(h2dPrintState)"
                 }
             }
         case "SNAP":
@@ -474,7 +507,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 layer: layer,
                 totalLayers: total,
                 jobID: fields[4],
-                message: "H2D đã in xong"
+                message: "\(printerDisplayName) đã in xong"
             )
         case "ALERT":
             guard fields.count >= 3 else { return }
@@ -515,8 +548,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     h2dBridgeStatus = isH2DReady
                         ? (isPrintSessionActive
                             ? h2dStageText
-                            : "H2D chưa bắt đầu • đang theo dõi")
-                        : "Đang kết nối H2D"
+                            : "\(printerDisplayName) chưa bắt đầu • đang theo dõi")
+                        : "Đang kết nối \(printerDisplayName)"
                 }
             }
         case "ERROR":

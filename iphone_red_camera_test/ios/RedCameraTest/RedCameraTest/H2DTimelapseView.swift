@@ -16,6 +16,17 @@ struct H2DTimelapseView: View {
     @State private var showStopOptions = false
     @State private var showPrinterCamera = false
     @State private var automaticConfigurationAttempted = false
+    @State private var selectedPrinterKind: BambuPrinterKind = .h2d
+    @State private var savedProfiles: [BambuPrinterProfile] = []
+
+    private var detectedPrinterKind: BambuPrinterKind {
+        let fromBridge = bluetooth.printerKind
+        if fromBridge != .unknown { return fromBridge }
+        let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
+        return fromSerial == .unknown ? selectedPrinterKind : fromSerial
+    }
+
+    private var printerName: String { detectedPrinterKind.rawValue }
 
     var body: some View {
         ZStack {
@@ -36,8 +47,11 @@ struct H2DTimelapseView: View {
                 .padding(.bottom, 6)
         }
         .onAppear {
+            savedProfiles = BambuPrinterProfileStore.load()
+            let storedKind = BambuPrinterKind.detect(serial: printerSerial)
+            if storedKind != .unknown { selectedPrinterKind = storedKind }
             if accessCode.isEmpty {
-                accessCode = H2DAccessCodeStore.load()
+                accessCode = H2DAccessCodeStore.load(for: selectedPrinterKind)
             }
             if wifiPassword.isEmpty {
                 wifiPassword = H2DWiFiPasswordStore.load()
@@ -89,6 +103,7 @@ struct H2DTimelapseView: View {
             if bluetooth.configurationProgress >= 6 && !bluetooth.hasBridgeError {
                 configurationSaved = true
                 showConfiguration = false
+                persistActiveProfile()
             } else if bluetooth.hasBridgeError {
                 configurationSaved = false
                 showConfiguration = true
@@ -106,6 +121,12 @@ struct H2DTimelapseView: View {
         .onChange(of: bluetooth.isH2DBridge) { _, recognized in
             if recognized { attemptAutomaticConfigurationIfNeeded() }
         }
+        .onChange(of: printerSerial) { _, serial in
+            let detected = BambuPrinterKind.detect(serial: serial)
+            guard detected != .unknown, detected != selectedPrinterKind else { return }
+            selectedPrinterKind = detected
+            accessCode = H2DAccessCodeStore.load(for: detected)
+        }
         .onChange(of: bluetooth.hasBridgeError) { _, hasError in
             // A bridge/configuration failure means the saved values need to be
             // editable again. Printer HMS alerts use hasActivePrinterAlert and
@@ -115,7 +136,11 @@ struct H2DTimelapseView: View {
             }
         }
         .fullScreenCover(isPresented: $showPrinterCamera) {
-            H2DPrinterCameraView(printerIP: printerIP, accessCode: accessCode)
+            H2DPrinterCameraView(
+                printerIP: printerIP,
+                accessCode: accessCode,
+                printerKind: detectedPrinterKind
+            )
         }
         .onChange(of: showPrinterCamera) { _, showing in
             if !showing && !timelapse.isArmed {
@@ -139,7 +164,7 @@ struct H2DTimelapseView: View {
             }
             Button("Tiếp tục chụp", role: .cancel) {}
         } message: {
-            Text("Dừng chụp không dừng máy in H2D.")
+            Text("Dừng chụp không dừng máy in \(printerName).")
         }
     }
 
@@ -194,14 +219,14 @@ struct H2DTimelapseView: View {
 
     private var printerIslandTitle: String {
         switch printerIslandState {
-        case .idle: return "H2D • CHƯA BẮT ĐẦU"
-        case .preparing: return "H2D • \(bluetooth.h2dStageText.uppercased())"
-        case .printing: return "H2D • ĐANG IN \(bluetooth.h2dPrintPercent)%"
+        case .idle: return "\(printerName) • CHƯA BẮT ĐẦU"
+        case .preparing: return "\(printerName) • \(bluetooth.h2dStageText.uppercased())"
+        case .printing: return "\(printerName) • ĐANG IN \(bluetooth.h2dPrintPercent)%"
         case .capturing: return "ĐANG CHỤP LỚP \(max(1, bluetooth.h2dCurrentLayer))"
-        case .connecting: return "ESP32 • ĐANG KẾT NỐI H2D"
+        case .connecting: return "ESP32-C3 • ĐANG KẾT NỐI \(printerName)"
         case .error:
-            if bluetooth.hasActiveCriticalPrinterAlert { return "H2D • CÓ LỖI" }
-            return bluetooth.isConnected ? "H2D • CÓ LỖI" : "ESP32 • MẤT KẾT NỐI"
+            if bluetooth.hasActiveCriticalPrinterAlert { return "\(printerName) • CÓ LỖI" }
+            return bluetooth.isConnected ? "\(printerName) • CÓ LỖI" : "ESP32-C3 • MẤT KẾT NỐI"
         }
     }
 
@@ -277,6 +302,16 @@ struct H2DTimelapseView: View {
         return 0
     }
 
+    private var filamentColor: Color {
+        let raw = String(bluetooth.filamentColorHex.prefix(6))
+        guard raw.count == 6, let value = UInt64(raw, radix: 16) else { return .gray }
+        return Color(
+            red: Double((value >> 16) & 0xFF) / 255,
+            green: Double((value >> 8) & 0xFF) / 255,
+            blue: Double(value & 0xFF) / 255
+        )
+    }
+
     private var setupView: some View {
         NavigationStack {
             ScrollView {
@@ -287,9 +322,9 @@ struct H2DTimelapseView: View {
                     configurationCard
 
                     Button {
-                        timelapse.arm()
+                        timelapse.arm(startingAtLayer: bluetooth.h2dCurrentLayer)
                     } label: {
-                        Label("Bật chờ H2D và làm tối màn hình", systemImage: "camera.aperture")
+                        Label("Bật chờ \(printerName) và làm tối màn hình", systemImage: "camera.aperture")
                             .font(.custom("Arial", size: 16).weight(.bold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 15)
@@ -307,7 +342,7 @@ struct H2DTimelapseView: View {
                 .padding(16)
             }
             .background(Color.black)
-            .navigationTitle("Timelapse H2D")
+            .navigationTitle("Timelapse \(printerName)")
             .navigationBarTitleDisplayMode(.inline)
         }
     }
@@ -366,9 +401,9 @@ struct H2DTimelapseView: View {
 
     private var remoteCameraCard: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Label("Camera có sẵn của H2D", systemImage: "video.fill")
+            Label("Camera có sẵn của \(printerName)", systemImage: "video.fill")
                 .font(.custom("Arial", size: 15).weight(.bold))
-            Text("Xem trực tiếp ngay trong SE bằng camera Live View của H2D. iPhone phải ở cùng mạng Wi-Fi và LAN Only Liveview trên H2D phải bật.")
+            Text("\(detectedPrinterKind.cameraDescription). iPhone phải ở cùng Wi‑Fi và Liveview LAN trên máy in phải được bật.")
                 .font(.custom("Arial", size: 12))
                 .foregroundStyle(.secondary)
 
@@ -380,11 +415,11 @@ struct H2DTimelapseView: View {
                 .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
 
             Button {
-                H2DAccessCodeStore.save(accessCode)
+                H2DAccessCodeStore.save(accessCode, for: detectedPrinterKind)
                 timelapse.stopPreview()
                 showPrinterCamera = true
             } label: {
-                Label("Xem camera H2D trong SE", systemImage: "play.rectangle.fill")
+                Label("Xem camera \(printerName) trong SE", systemImage: "play.rectangle.fill")
                     .font(.custom("Arial", size: 13).weight(.bold))
                     .frame(maxWidth: .infinity)
             }
@@ -434,6 +469,21 @@ struct H2DTimelapseView: View {
                     .font(.custom("Arial", size: 12).monospacedDigit())
                     .foregroundStyle(.secondary)
             }
+            if !bluetooth.filamentType.isEmpty {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(filamentColor)
+                        .frame(width: 14, height: 14)
+                        .overlay(Circle().stroke(.white.opacity(0.35), lineWidth: 1))
+                    Text("Đang dùng \(bluetooth.materialDescription)")
+                        .font(.custom("Arial", size: 12).weight(.bold))
+                    if !bluetooth.filamentColorHex.isEmpty {
+                        Text("#\(String(bluetooth.filamentColorHex.prefix(6)))")
+                            .font(.custom("Arial", size: 10).monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
             if bluetooth.hasActivePrinterAlert &&
                 !bluetooth.hasActiveCriticalPrinterAlert &&
                 !bluetooth.printerAlertText.isEmpty {
@@ -480,7 +530,7 @@ struct H2DTimelapseView: View {
                 withAnimation(.easeInOut(duration: 0.2)) { showConfiguration.toggle() }
             } label: {
                 HStack {
-                    Label("Cấu hình mạng H2D", systemImage: "network")
+                    Label("Cấu hình máy in Bambu", systemImage: "network")
                         .font(.custom("Arial", size: 15).weight(.bold))
                     Spacer()
                     Image(systemName: showConfiguration ? "chevron.up" : "chevron.down")
@@ -489,9 +539,28 @@ struct H2DTimelapseView: View {
             .buttonStyle(.plain)
 
             if showConfiguration {
-                Label("Bắt buộc: LAN Only và Developer Mode trên H2D đều phải bật màu xanh.", systemImage: "exclamationmark.shield.fill")
+                Label("Chọn hồ sơ; SE còn tự kiểm tra đầu serial để nhận đúng A1 / H2D / P2S.", systemImage: "sparkles")
                     .font(.custom("Arial", size: 12).weight(.bold))
                     .foregroundStyle(.orange)
+
+                HStack(spacing: 8) {
+                    ForEach([BambuPrinterKind.a1, .h2d, .p2s]) { kind in
+                        Button {
+                            activateProfile(kind)
+                        } label: {
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(savedProfiles.contains(where: { $0.kind == kind }) ? Color.green : Color.gray)
+                                    .frame(width: 7, height: 7)
+                                Text(kind.rawValue)
+                            }
+                            .font(.custom("Arial", size: 12).weight(.bold))
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(selectedPrinterKind == kind ? .blue : .gray.opacity(0.34))
+                    }
+                }
 
                 VStack(alignment: .leading, spacing: 12) {
                     configurationLabel("Tên Wi-Fi", detail: "Mạng mà ESP32 sẽ kết nối")
@@ -500,16 +569,26 @@ struct H2DTimelapseView: View {
                     configurationLabel("Mật khẩu Wi-Fi")
                     SecureField("Nhập mật khẩu Wi-Fi", text: $wifiPassword)
 
-                    configurationLabel("IP của H2D")
+                    configurationLabel("IP của \(printerName)")
                     TextField("Ví dụ: 192.168.100.210", text: $printerIP)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.numbersAndPunctuation)
 
-                    configurationLabel("Serial H2D")
-                    TextField("Nhập số serial trên màn hình H2D", text: $printerSerial)
+                    configurationLabel("Serial máy in")
+                    TextField("Ví dụ: 039… / 094… / 22E…", text: $printerSerial)
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled()
+
+                    Label(
+                        BambuPrinterKind.detect(serial: printerSerial) == .unknown
+                            ? "Chưa nhận được loại máy từ serial"
+                            : "Đã tự nhận: \(BambuPrinterKind.detect(serial: printerSerial).rawValue)",
+                        systemImage: BambuPrinterKind.detect(serial: printerSerial) == .unknown
+                            ? "questionmark.circle" : "checkmark.seal.fill"
+                    )
+                    .font(.custom("Arial", size: 12).weight(.bold))
+                    .foregroundStyle(BambuPrinterKind.detect(serial: printerSerial) == .unknown ? .yellow : .green)
 
                     configurationLabel("Access Code")
                     SecureField("Nhập mã trong mục LAN Only", text: $accessCode)
@@ -526,7 +605,7 @@ struct H2DTimelapseView: View {
                 }
 
                 Button {
-                    H2DAccessCodeStore.save(accessCode)
+                    persistActiveProfile()
                     H2DWiFiPasswordStore.save(wifiPassword)
                     bluetooth.configureH2DBridge(
                         wifiSSID: wifiSSID,
@@ -547,7 +626,7 @@ struct H2DTimelapseView: View {
                 .disabled(!bluetooth.isH2DBridge || bluetooth.isConfiguring)
             } else if configurationSaved {
                 VStack(alignment: .leading, spacing: 7) {
-                    Label("Cấu hình H2D đã lưu", systemImage: "checkmark.shield.fill")
+                    Label("Hồ sơ \(printerName) đã lưu", systemImage: "checkmark.shield.fill")
                         .font(.custom("Arial", size: 14).weight(.bold))
                         .foregroundStyle(.green)
                     Text("Wi‑Fi: \(wifiSSID)  •  IP: \(printerIP)  •  Serial: \(printerSerial)")
@@ -634,8 +713,8 @@ struct H2DTimelapseView: View {
             if bluetooth.h2dTotalLayers > 0 {
                 Text(
                     bluetooth.isActuallyPrinting
-                        ? "H2D • đang in lớp \(bluetooth.h2dCurrentLayer)/\(bluetooth.h2dTotalLayers)"
-                        : "H2D • \(bluetooth.h2dStageText.lowercased())"
+                        ? "\(printerName) • đang in lớp \(bluetooth.h2dCurrentLayer)/\(bluetooth.h2dTotalLayers)"
+                        : "\(printerName) • \(bluetooth.h2dStageText.lowercased())"
                 )
                     .font(.custom("Arial", size: 13).monospacedDigit().weight(.bold))
                     .foregroundStyle(.orange.opacity(0.65))
@@ -650,7 +729,7 @@ struct H2DTimelapseView: View {
                         timelapse.setLiveMonitorVisible(false)
                         showPrinterCamera = true
                     } label: {
-                        Label("Xem camera H2D", systemImage: "video.fill")
+                        Label("Xem camera \(printerName)", systemImage: "video.fill")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
@@ -682,7 +761,7 @@ struct H2DTimelapseView: View {
                 .padding(.bottom, 20)
             }
 
-            Text("Smooth Timelapse: mỗi lớp chỉ tạo 1 ảnh khi H2D báo đã chuyển lớp; ảnh đầu phiên cũng được giữ lại. SE chờ 0,7 giây để đầu in về vị trí cố định, không dùng hẹn giờ lặp.")
+            Text("Smooth Timelapse: chụp ngay khi \(printerName) báo lớp vừa hoàn tất; không còn chờ 0,7 giây. Khi vào lại giữa bản in, SE bắt đầu từ lớp hiện tại và không chụp bù lớp cũ.")
                 .font(.custom("Arial", size: 10))
                 .foregroundStyle(.white.opacity(0.38))
                 .multilineTextAlignment(.center)
@@ -762,6 +841,32 @@ struct H2DTimelapseView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func activateProfile(_ kind: BambuPrinterKind) {
+        selectedPrinterKind = kind
+        if let profile = BambuPrinterProfileStore.profile(for: kind) {
+            printerIP = profile.ip
+            printerSerial = profile.serial
+        } else {
+            printerIP = ""
+            printerSerial = ""
+        }
+        accessCode = H2DAccessCodeStore.load(for: kind)
+        configurationSaved = false
+        automaticConfigurationAttempted = false
+    }
+
+    private func persistActiveProfile() {
+        let detected = BambuPrinterKind.detect(serial: printerSerial)
+        let kind = detected == .unknown ? selectedPrinterKind : detected
+        guard kind != .unknown else { return }
+        selectedPrinterKind = kind
+        BambuPrinterProfileStore.save(
+            BambuPrinterProfile(kind: kind, ip: printerIP, serial: printerSerial)
+        )
+        H2DAccessCodeStore.save(accessCode, for: kind)
+        savedProfiles = BambuPrinterProfileStore.load()
     }
 }
 
