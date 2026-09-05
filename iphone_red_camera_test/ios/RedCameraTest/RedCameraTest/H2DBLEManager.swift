@@ -27,12 +27,48 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var h2dCurrentLayer = 0
     @Published private(set) var h2dTotalLayers = 0
     @Published private(set) var h2dPrintPercent = 0
+    @Published private(set) var h2dStageCode = -1
     @Published private(set) var h2dTimelapseEvent: H2DTimelapseEvent?
     @Published private(set) var isConfiguring = false
     @Published private(set) var configurationProgress = 0
     @Published private(set) var hasBridgeError = false
     @Published private(set) var hasPrinterAlert = false
     @Published private(set) var printerAlertText = ""
+
+    var isActuallyPrinting: Bool {
+        guard h2dPrintState.uppercased() == "RUNNING" else { return false }
+        // Firmware v1.4 did not send stg_cur. Keep its old behavior when the
+        // stage is unknown, while v1.5 can distinguish preparation precisely.
+        return h2dStageCode == -1 || h2dStageCode == 0
+    }
+
+    var h2dStageText: String {
+        switch h2dStageCode {
+        case 0: return "Đang in lớp"
+        case 1, 40, 47, 48: return "Đang cân bàn"
+        case 2: return "Đang làm nóng bàn in"
+        case 3: return "Đang kiểm tra chuyển động"
+        case 4, 22, 24, 52, 77: return "Đang chuẩn bị vật liệu"
+        case 7, 41, 62, 64: return "Đang chuẩn bị đầu phun"
+        case 8, 19, 51: return "Đang hiệu chỉnh dòng nhựa"
+        case 9, 10, 11, 73, 74, 75: return "Đang kiểm tra bàn in"
+        case 12, 18, 43, 57: return "Đang hiệu chỉnh cảm biến"
+        case 13: return "Đang đưa đầu in về gốc"
+        case 14, 65, 69: return "Đang làm sạch đầu phun"
+        case 15, 49, 50, 54, 63: return "Đang ổn định nhiệt độ"
+        case 25, 31: return "Đang hiệu chỉnh động cơ"
+        case 29, 66: return "Đang điều hòa buồng in"
+        case 36, 37, 38, 39, 42, 44, 45, 46, 53, 56, 60, 61, 67, 71, 72:
+            return "Đang hiệu chỉnh máy in"
+        case 55, 58, 59, 68, 70, 76: return "Đang chuẩn bị in"
+        default:
+            switch h2dPrintState.uppercased() {
+            case "RUNNING": return "Đang chuẩn bị in"
+            case "PAUSE", "PAUSED": return "Đang tạm dừng"
+            default: return "Đang chuẩn bị"
+            }
+        }
+    }
 
     private let serviceUUID = CBUUID(string: "7E57A000-8E3A-4D6A-9B2B-13B10A000001")
     private let eventUUID = CBUUID(string: "7E57A001-8E3A-4D6A-9B2B-13B10A000001")
@@ -71,7 +107,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         accessCode: String
     ) {
         guard isConnected, isH2DBridge else {
-            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.4 • hãy nạp lại ESP32"
+            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.4 trở lên"
             requestH2DStatus()
             return
         }
@@ -168,7 +204,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     self.sendNextConfigurationCommand()
                 }
             } else {
-                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.4")
+                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.4 trở lên")
             }
         }
         configurationTimeoutWorkItem = timeout
@@ -267,7 +303,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             let item = DispatchWorkItem { [weak self] in
                 guard let self, self.isConnected, !self.isH2DBridge else { return }
                 self.hasBridgeError = true
-                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.4"
+                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.5 khi máy rảnh"
             }
             recognitionWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: item)
@@ -332,11 +368,18 @@ final class H2DBLEManager: NSObject, ObservableObject {
             h2dCurrentLayer = max(0, Int(fields[3]) ?? h2dCurrentLayer)
             h2dTotalLayers = max(0, Int(fields[4]) ?? h2dTotalLayers)
             h2dPrintPercent = min(100, max(0, Int(fields[5]) ?? h2dPrintPercent))
+            if fields.count >= 7 {
+                h2dStageCode = Int(fields[6]) ?? h2dStageCode
+            }
             hasBridgeError = false
             if !hasPrinterAlert {
-                h2dBridgeStatus = h2dPrintState == "RUNNING"
-                    ? "H2D đang in lớp \(h2dCurrentLayer)/\(max(1, h2dTotalLayers))"
-                    : "Trạng thái H2D: \(h2dPrintState)"
+                if isActuallyPrinting {
+                    h2dBridgeStatus = "H2D đang in lớp \(h2dCurrentLayer)/\(max(1, h2dTotalLayers))"
+                } else if h2dPrintState == "RUNNING" || h2dStageCode > 0 {
+                    h2dBridgeStatus = h2dStageText
+                } else {
+                    h2dBridgeStatus = "Trạng thái H2D: \(h2dPrintState)"
+                }
             }
         case "SNAP":
             guard fields.count >= 5 else { return }

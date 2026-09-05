@@ -1,7 +1,15 @@
 import AVFoundation
+import ImageIO
 import Photos
 import SwiftUI
 import UIKit
+
+struct H2DCapturedFramePreview: Identifiable {
+    let layer: Int
+    let image: UIImage
+
+    var id: Int { layer }
+}
 
 final class H2DTimelapseManager: NSObject, ObservableObject {
     @Published private(set) var isCameraReady = false
@@ -11,6 +19,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     @Published private(set) var isRendering = false
     @Published private(set) var capturedFrameCount = 0
     @Published private(set) var lastCapturedLayer = 0
+    @Published private(set) var recentFramePreviews: [H2DCapturedFramePreview] = []
     @Published private(set) var statusText = "Căn khung hình rồi bật chờ H2D"
     @Published private(set) var lastVideoSaved = false
 
@@ -93,6 +102,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 self.isArmed = false
                 self.isCapturing = false
+                self.recentFramePreviews = []
                 self.statusText = deleteFrames
                     ? "Đã dừng và xóa ảnh của lần chụp này"
                     : "Đã dừng chờ H2D"
@@ -241,6 +251,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
 
         DispatchQueue.main.async {
             self.isArmed = true
+            self.recentFramePreviews = []
             self.statusText = "Màn hình tối • đang chờ lớp in đầu tiên"
             self.setDimmedDisplay()
             UIApplication.shared.isIdleTimerDisabled = true
@@ -309,15 +320,24 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         }
     }
 
-    private func finishCurrentCapture(success: Bool) {
+    private func finishCurrentCapture(
+        success: Bool,
+        preview: H2DCapturedFramePreview? = nil
+    ) {
         let finishedLayer = currentRequest?.layer ?? 0
+        let storedFrameCount = capturedLayers.count
         currentRequest = nil
         publishOnMain {
             self.isCapturing = false
             if success {
-                self.capturedFrameCount = self.capturedLayers.count
+                self.capturedFrameCount = storedFrameCount
                 self.lastCapturedLayer = max(self.lastCapturedLayer, finishedLayer)
                 self.statusText = "Đã chụp lớp \(finishedLayer) • camera đang nghỉ"
+                if let preview {
+                    self.recentFramePreviews.removeAll { $0.layer == preview.layer }
+                    self.recentFramePreviews.insert(preview, at: 0)
+                    self.recentFramePreviews = Array(self.recentFramePreviews.prefix(8))
+                }
             } else {
                 self.statusText = "Chụp lớp \(finishedLayer) lỗi • chờ tín hiệu tiếp theo"
             }
@@ -327,6 +347,20 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             scheduleCameraSleep(after: 0.9)
         }
         captureNextIfNeeded()
+    }
+
+    private func makePreview(from data: Data, layer: Int) -> H2DCapturedFramePreview? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 320,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return H2DCapturedFramePreview(layer: layer, image: UIImage(cgImage: thumbnail))
     }
 
     private func scheduleCameraSleep(after seconds: TimeInterval) {
@@ -635,7 +669,8 @@ extension H2DTimelapseManager: AVCapturePhotoCaptureDelegate {
             do {
                 try data.write(to: self.frameURL(for: request.layer, in: directory), options: .atomic)
                 self.capturedLayers.insert(request.layer)
-                self.finishCurrentCapture(success: true)
+                let preview = self.makePreview(from: data, layer: request.layer)
+                self.finishCurrentCapture(success: true, preview: preview)
             } catch {
                 self.finishCurrentCapture(success: false)
             }

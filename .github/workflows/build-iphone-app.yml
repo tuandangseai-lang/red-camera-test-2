@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.3 build81 - H2D HMS va ket noi on dinh
+name: Tao IPA SE v9.4 build82 - H2D giai doan va anh da chup
 
 on:
   workflow_dispatch:
@@ -48,9 +48,11 @@ jobs:
           grep -q 'case "CFG_ACK"' "RedCameraTest/H2DBLEManager.swift"
           grep -q 'case "ALERT"' "RedCameraTest/H2DBLEManager.swift"
           grep -q "beginMqttLossGrace" "RedCameraTest/H2DBLEManager.swift"
+          grep -q "stg_cur\|h2dStageCode" "RedCameraTest/H2DBLEManager.swift"
           grep -q "configurationTimeoutWorkItem" "RedCameraTest/H2DBLEManager.swift"
           grep -q "AVAssetWriter" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "isIdleTimerDisabled" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "recentFramePreviews" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "H2DTimelapseView" "RedCameraTest/ContentView.swift"
           ! grep -q "CameraController.swift" project.yml
           ! grep -q "path: RedCameraTest/BLEManager.swift" project.yml
@@ -92,19 +94,19 @@ jobs:
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.3"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "81"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.4"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "82"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.3-build81-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.4-build82-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.3-build81-unsigned-ipa
-          path: SE-v9.3-build81-unsigned.ipa
+          name: SE-v9.4-build82-unsigned-ipa
+          path: SE-v9.4-build82-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -141,7 +143,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-H2D-ESP32-v1.4.0
+          name: SE-H2D-ESP32-v1.5.0
           path: ${{ runner.temp }}/SE-H2D-ESP32/*
           if-no-files-found: error
           retention-days: 7

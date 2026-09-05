@@ -7,7 +7,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE H2D Timelapse Bridge v1.4.0
+// SE H2D Timelapse Bridge v1.5.0
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -79,6 +79,9 @@ String activeJob = "0";
 int currentLayer = 0;
 int totalLayers = 0;
 int printPercent = 0;
+// Bambu print.stg_cur: 0 means real layer printing, >0 is a preparation or
+// maintenance stage, and -1/255 means idle or unavailable.
+int currentStage = -1;
 int lastObservedLayer = 0;
 int lastSnapLayer = 0;
 uint32_t lastWifiAttemptAt = 0;
@@ -126,7 +129,7 @@ void reportPrintStatus(bool force = false) {
   if (!force && now - lastStatusNotifyAt < Config::STATUS_PERIOD_MS) return;
   lastStatusNotifyAt = now;
   queuePhoneEvent(String("H2D,PRINT,") + printState + "," + currentLayer +
-                  "," + totalLayers + "," + printPercent);
+                  "," + totalLayers + "," + printPercent + "," + currentStage);
 }
 
 String decodeBase64(const String &encoded) {
@@ -340,7 +343,8 @@ void resetForNewPrint(const String &job, int layer) {
 }
 
 void processPrintUpdate(const String &newState, int newLayer, int newTotal,
-                        int newPercent, const String &jobToken) {
+                        int newPercent, int newStage,
+                        const String &jobToken) {
   const String previousState = printState;
   const bool wasRunning = printWasRunning;
   if (!newState.isEmpty()) {
@@ -350,12 +354,15 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
   if (newLayer >= 0) currentLayer = newLayer;
   if (newTotal >= 0) totalLayers = newTotal;
   if (newPercent >= 0) printPercent = constrain(newPercent, 0, 100);
+  if (newStage != -999) currentStage = newStage;
 
   // PREPARE may already report layer 0/1 while the bed is heating. Baseline
   // only on the first real RUNNING packet, otherwise layer 1 is photographed
   // before it has actually finished.
-  const bool running = printState == "RUNNING";
-  if (running) {
+  const bool stateRunning = printState == "RUNNING";
+  const bool actualLayerPrinting =
+      stateRunning && (currentStage == 0 || currentStage == -1);
+  if (actualLayerPrinting) {
     if (!wasRunning || (jobToken != "0" && jobToken != activeJob)) {
       resetForNewPrint(jobToken, currentLayer);
     } else if (currentLayer > lastObservedLayer) {
@@ -387,6 +394,7 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   int layer = -1;
   int total = -1;
   int percent = -1;
+  int stage = -999;
   uint32_t incomingPrintError = 0;
   bool incomingHmsAlert = false;
   String state;
@@ -395,6 +403,7 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   const bool hasTotal =
       extractLastJsonInt(payload, length, "total_layer_num", total);
   const bool hasPercent = extractLastJsonInt(payload, length, "mc_percent", percent);
+  const bool hasStage = extractLastJsonInt(payload, length, "stg_cur", stage);
   const bool hasPrintError =
       extractLastJsonUInt32(payload, length, "print_error", incomingPrintError);
   const bool hasHms =
@@ -403,12 +412,14 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   bool hasJob = extractJsonString(payload, length, "job_id", job);
   if (!hasJob) hasJob = extractJsonString(payload, length, "subtask_id", job);
 
-  if (hasLayer || hasTotal || hasPercent || hasState || hasPrintError || hasHms) {
+  if (hasLayer || hasTotal || hasPercent || hasStage || hasState ||
+      hasPrintError || hasHms) {
     statusDataSeen = true;
   }
-  if (hasLayer || hasTotal || hasPercent || hasState) {
+  if (hasLayer || hasTotal || hasPercent || hasStage || hasState) {
     processPrintUpdate(hasState ? state : "", hasLayer ? layer : -1,
                        hasTotal ? total : -1, hasPercent ? percent : -1,
+                       hasStage ? stage : -999,
                        hasJob ? safeJobID(job) : activeJob);
   }
   if (hasPrintError) {
@@ -499,7 +510,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.4.0");
+  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.5.0");
   if (!settings.complete()) {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -628,7 +639,7 @@ void updateLed() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE H2D Timelapse Bridge v1.4.0");
+  Serial.println("\nSE H2D Timelapse Bridge v1.5.0");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   loadSettings();
   setupBle();

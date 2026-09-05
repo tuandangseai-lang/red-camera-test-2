@@ -87,7 +87,7 @@ struct H2DTimelapseView: View {
         if !bluetooth.isH2DReady { return .connecting }
         switch bluetooth.h2dPrintState.uppercased() {
         case "FAILED", "ERROR": return .error
-        case "RUNNING": return .printing
+        case "RUNNING": return bluetooth.isActuallyPrinting ? .printing : .preparing
         case "PREPARE", "PREPARING", "SLICING", "INIT", "HEATING", "PAUSE", "PAUSED": return .preparing
         default: return .idle
         }
@@ -96,7 +96,7 @@ struct H2DTimelapseView: View {
     private var printerIslandTitle: String {
         switch printerIslandState {
         case .idle: return "H2D • CHƯA BẮT ĐẦU"
-        case .preparing: return "H2D • ĐANG CHUẨN BỊ"
+        case .preparing: return "H2D • \(bluetooth.h2dStageText.uppercased())"
         case .printing: return "H2D • ĐANG IN \(bluetooth.h2dPrintPercent)%"
         case .capturing: return "ĐANG CHỤP LỚP \(max(1, bluetooth.h2dCurrentLayer))"
         case .connecting: return "ESP32 • ĐANG KẾT NỐI H2D"
@@ -241,7 +241,11 @@ struct H2DTimelapseView: View {
                     total: Double(max(1, bluetooth.h2dTotalLayers))
                 )
                 .tint(.orange)
-                Text("\(bluetooth.h2dPrintState) • lớp \(bluetooth.h2dCurrentLayer)/\(bluetooth.h2dTotalLayers) • \(bluetooth.h2dPrintPercent)%")
+                Text(
+                    bluetooth.isActuallyPrinting
+                        ? "ĐANG IN • lớp \(bluetooth.h2dCurrentLayer)/\(bluetooth.h2dTotalLayers) • \(bluetooth.h2dPrintPercent)%"
+                        : "\(bluetooth.h2dStageText) • \(bluetooth.h2dPrintPercent)%"
+                )
                     .font(.custom("Arial", size: 12).monospacedDigit())
                     .foregroundStyle(.secondary)
             }
@@ -324,12 +328,12 @@ struct H2DTimelapseView: View {
     }
 
     private var activeCaptureView: some View {
-        VStack(spacing: 22) {
-            Spacer()
+        VStack(spacing: 14) {
+            Spacer(minLength: 8)
             ZStack {
                 Circle()
                     .stroke(.white.opacity(0.08), lineWidth: 7)
-                    .frame(width: 176, height: 176)
+                    .frame(width: 150, height: 150)
                 Circle()
                     .trim(from: 0, to: min(1, max(0.015,
                         Double(bluetooth.h2dCurrentLayer) /
@@ -338,7 +342,7 @@ struct H2DTimelapseView: View {
                         timelapse.isRendering ? Color.cyan : Color.orange,
                         style: StrokeStyle(lineWidth: 7, lineCap: .round)
                     )
-                    .frame(width: 176, height: 176)
+                    .frame(width: 150, height: 150)
                     .rotationEffect(.degrees(-90))
                     .animation(.linear(duration: 0.3), value: bluetooth.h2dCurrentLayer)
                 VStack(spacing: 7) {
@@ -359,11 +363,17 @@ struct H2DTimelapseView: View {
                 .padding(.horizontal, 28)
 
             if bluetooth.h2dTotalLayers > 0 {
-                Text("H2D • lớp \(bluetooth.h2dCurrentLayer)/\(bluetooth.h2dTotalLayers)")
+                Text(
+                    bluetooth.isActuallyPrinting
+                        ? "H2D • đang in lớp \(bluetooth.h2dCurrentLayer)/\(bluetooth.h2dTotalLayers)"
+                        : "H2D • \(bluetooth.h2dStageText.lowercased())"
+                )
                     .font(.custom("Arial", size: 13).monospacedDigit().weight(.bold))
                     .foregroundStyle(.orange.opacity(0.65))
             }
-            Spacer()
+
+            capturedFramesCard
+            Spacer(minLength: 4)
 
             if !timelapse.isRendering {
                 HStack(spacing: 12) {
@@ -390,6 +400,66 @@ struct H2DTimelapseView: View {
             }
         }
         .background(Color.black)
+    }
+
+    private var capturedFramesCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 9) {
+                Image(systemName: timelapse.isCapturing ? "camera.fill" : "camera.badge.clock")
+                    .foregroundStyle(timelapse.isCapturing ? Color.blue : Color.green)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(timelapse.isCapturing ? "iPhone đang chụp ảnh lớp" : "Chế độ chụp đang hoạt động")
+                        .font(.custom("Arial", size: 13).weight(.bold))
+                    Text("Đã lưu \(timelapse.capturedFrameCount) ảnh trong phiên này")
+                        .font(.custom("Arial", size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if timelapse.isCapturing {
+                    ProgressView()
+                        .tint(.blue)
+                }
+            }
+
+            if timelapse.recentFramePreviews.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "photo.on.rectangle.angled")
+                    Text("Ảnh vừa chụp sẽ hiện tại đây")
+                }
+                .font(.custom("Arial", size: 12).weight(.semibold))
+                .foregroundStyle(.white.opacity(0.38))
+                .frame(maxWidth: .infinity, minHeight: 58)
+                .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(timelapse.recentFramePreviews) { frame in
+                            Image(uiImage: frame.image)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 82, height: 58)
+                                .clipped()
+                                .overlay(alignment: .bottomLeading) {
+                                    Text("Lớp \(frame.layer)")
+                                        .font(.custom("Arial", size: 9).weight(.bold))
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 3)
+                                        .background(.black.opacity(0.72), in: Capsule())
+                                        .padding(5)
+                                }
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(.white.opacity(0.09), lineWidth: 1)
+        }
+        .padding(.horizontal, 18)
     }
 
     private func configurationLabel(_ title: String, detail: String? = nil) -> some View {
