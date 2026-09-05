@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.8.2
+// SE Bambu Timelapse Bridge for classic ESP32 v1.8.3
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -30,6 +30,7 @@ constexpr uint16_t MQTT_BUFFER_BYTES = 49152;
 constexpr uint32_t WIFI_RETRY_MS = 12000;
 constexpr uint32_t MQTT_RETRY_MS = 10000;
 constexpr uint32_t STATUS_PERIOD_MS = 2000;
+constexpr uint32_t TELEMETRY_PERIOD_MS = 1000;
 constexpr uint32_t STATUS_REQUEST_RETRY_MS = 3500;
 constexpr uint32_t PRINT_DATA_STALE_MS = 10000;
 constexpr uint32_t DATA_TIMEOUT_MS = 45000;
@@ -93,6 +94,15 @@ String activeFilamentType = "";
 String activeFilamentColor = "";
 int activeFilamentSlot = -1;
 uint8_t materialSyncRequests = 0;
+int nozzleTemperature = -1;
+int nozzleTargetTemperature = -1;
+int bedTemperature = -1;
+int bedTargetTemperature = -1;
+int partFanPercent = -1;
+int auxiliaryFanPercent = -1;
+int chamberFanPercent = -1;
+int heatbreakFanPercent = -1;
+bool telemetryDirty = false;
 int currentLayer = 0;
 int totalLayers = 0;
 int printPercent = 0;
@@ -104,6 +114,7 @@ int lastSnapLayer = 0;
 uint32_t lastWifiAttemptAt = 0;
 uint32_t lastMqttAttemptAt = 0;
 uint32_t lastStatusNotifyAt = 0;
+uint32_t lastTelemetryNotifyAt = 0;
 uint32_t lastMqttMessageAt = 0;
 uint32_t lastPrintDataAt = 0;
 uint32_t lastStatusRequestAt = 0;
@@ -184,12 +195,71 @@ void reportMaterial() {
                   activeFilamentSlot);
 }
 
+void reportTelemetry(bool force = false) {
+  const bool hasData = nozzleTemperature >= 0 || nozzleTargetTemperature >= 0 ||
+                       bedTemperature >= 0 || bedTargetTemperature >= 0 ||
+                       partFanPercent >= 0 || auxiliaryFanPercent >= 0 ||
+                       chamberFanPercent >= 0 || heatbreakFanPercent >= 0;
+  if (!hasData) return;
+  const uint32_t now = millis();
+  if (!force && (!telemetryDirty ||
+                 now - lastTelemetryNotifyAt < Config::TELEMETRY_PERIOD_MS)) {
+    return;
+  }
+  lastTelemetryNotifyAt = now;
+  telemetryDirty = false;
+  queuePhoneEvent(String("H2D,TELEMETRY,") + nozzleTemperature + "," +
+                  nozzleTargetTemperature + "," + bedTemperature + "," +
+                  bedTargetTemperature + "," + partFanPercent + "," +
+                  auxiliaryFanPercent + "," + chamberFanPercent + "," +
+                  heatbreakFanPercent);
+}
+
 void clearActiveMaterial(bool notifyPhone = true) {
   activeFilamentType = "";
   activeFilamentColor = "";
   activeFilamentSlot = -1;
   materialSyncRequests = 0;
   if (notifyPhone) reportMaterial();
+}
+
+void clearPhoneEventQueue() {
+  portENTER_CRITICAL(&eventMux);
+  eventHead = eventTail = 0;
+  portEXIT_CRITICAL(&eventMux);
+}
+
+void resetPrinterRuntimeForProfileSwitch() {
+  statusDataSeen = false;
+  finishSent = false;
+  printWasRunning = false;
+  hmsAlertActive = false;
+  printErrorActive = false;
+  lastReportedPrinterAlert = false;
+  lastReportedPrinterAlertCritical = false;
+  printErrorCode = 0;
+  lastReportedPrintErrorCode = 0;
+  printState = "IDLE";
+  activeJob = "0";
+  currentLayer = 0;
+  totalLayers = 0;
+  printPercent = 0;
+  currentStage = -1;
+  lastObservedLayer = 0;
+  lastSnapLayer = 0;
+  lastStatusNotifyAt = 0;
+  lastPrintDataAt = 0;
+  clearActiveMaterial(false);
+  nozzleTemperature = -1;
+  nozzleTargetTemperature = -1;
+  bedTemperature = -1;
+  bedTargetTemperature = -1;
+  partFanPercent = -1;
+  auxiliaryFanPercent = -1;
+  chamberFanPercent = -1;
+  heatbreakFanPercent = -1;
+  telemetryDirty = false;
+  lastTelemetryNotifyAt = 0;
 }
 
 String decodeBase64(const String &encoded) {
@@ -330,6 +400,45 @@ bool extractLastJsonUInt32(const uint8_t *payload, size_t length,
   return found;
 }
 
+int normalizeFanPercent(int raw) {
+  if (raw < 0) return -1;
+  // Bambu normally reports fan gears in the 0...15 range. Keep compatibility
+  // with firmware variants that expose either 0...100 or raw PWM 0...255.
+  if (raw <= 15) return min(100, (raw * 100 + 7) / 15);
+  if (raw <= 100) return raw;
+  return min(100, (raw * 100 + 127) / 255);
+}
+
+bool updateIntIfPresent(const uint8_t *payload, size_t length,
+                        const char *key, int &stored,
+                        bool normalizeFan = false) {
+  int incoming = -1;
+  if (!extractLastJsonInt(payload, length, key, incoming)) return false;
+  if (normalizeFan) incoming = normalizeFanPercent(incoming);
+  if (incoming == stored) return false;
+  stored = incoming;
+  return true;
+}
+
+void updatePrinterTelemetry(const uint8_t *payload, size_t length) {
+  bool changed = false;
+  changed |= updateIntIfPresent(payload, length, "nozzle_temper", nozzleTemperature);
+  changed |= updateIntIfPresent(payload, length, "nozzle_target_temper",
+                                nozzleTargetTemperature);
+  changed |= updateIntIfPresent(payload, length, "bed_temper", bedTemperature);
+  changed |= updateIntIfPresent(payload, length, "bed_target_temper",
+                                bedTargetTemperature);
+  changed |= updateIntIfPresent(payload, length, "cooling_fan_speed",
+                                partFanPercent, true);
+  changed |= updateIntIfPresent(payload, length, "big_fan1_speed",
+                                auxiliaryFanPercent, true);
+  changed |= updateIntIfPresent(payload, length, "big_fan2_speed",
+                                chamberFanPercent, true);
+  changed |= updateIntIfPresent(payload, length, "heatbreak_fan_speed",
+                                heatbreakFanPercent, true);
+  if (changed) telemetryDirty = true;
+}
+
 bool extractJsonString(const uint8_t *payload, size_t length, const char *key,
                        String &output) {
   size_t valuePosition = 0;
@@ -466,7 +575,10 @@ bool extractMaterialFromTrayIndex(const uint8_t *payload, size_t length,
       const size_t typeStart = valuePosition >= 12 ? valuePosition - 12 : 0;
       if (!extractJsonString(ams + typeStart,
                              amsLength - typeStart,
-                             "tray_type", parsedType)) return false;
+                             "tray_type", parsedType)) {
+        extractJsonString(ams + typeStart, amsLength - typeStart,
+                          "tray_sub_brands", parsedType);
+      }
       const size_t localStart = valuePosition > 16 ? valuePosition - 16 : 0;
       const size_t remaining = amsLength - localStart;
       const size_t localLength = remaining < 768 ? remaining : 768;
@@ -475,6 +587,11 @@ bool extractMaterialFromTrayIndex(const uint8_t *payload, size_t length,
         extractJsonString(ams + localStart, localLength, "cols", parsedColor);
       }
       parsedType.trim();
+      if (parsedType.isEmpty()) {
+        extractJsonString(ams + localStart, localLength,
+                          "tray_info_idx", parsedType);
+        parsedType.trim();
+      }
       if (parsedType.isEmpty()) return false;
       type = parsedType;
       color = normalizedFilamentColor(parsedColor);
@@ -493,8 +610,16 @@ bool extractExternalMaterial(const uint8_t *payload, size_t length,
   if (!findObjectRangeAfterKey(payload, length, "vt_tray", start, end)) return false;
   String parsedType;
   String parsedColor;
-  if (!extractJsonString(payload + start, end - start, "tray_type", parsedType)) return false;
+  if (!extractJsonString(payload + start, end - start, "tray_type", parsedType)) {
+    extractJsonString(payload + start, end - start, "tray_sub_brands", parsedType);
+  }
+  if (parsedType.isEmpty()) {
+    extractJsonString(payload + start, end - start, "tray_info_idx", parsedType);
+  }
   extractJsonString(payload + start, end - start, "tray_color", parsedColor);
+  if (parsedColor.length() < 6) {
+    extractJsonString(payload + start, end - start, "cols", parsedColor);
+  }
   parsedType.trim();
   if (parsedType.isEmpty()) return false;
   type = parsedType;
@@ -726,6 +851,7 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   }
   if (hasHms) hmsAlertActive = incomingHmsAlert;
   updateActiveMaterial(payload, length);
+  updatePrinterTelemetry(payload, length);
   // A state transition to IDLE must clear a previously active warning even
   // when that incremental packet does not contain hms/print_error fields.
   if (hasPrintError || hasHms || hasState) reportPrinterAlert();
@@ -844,9 +970,10 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.8.2");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.8.3");
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
+  reportTelemetry(true);
   if (!settings.complete()) {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -889,9 +1016,10 @@ void handlePhoneCommand(String command) {
     queuePhoneEvent("H2D,CFG_ACK,CODE");
   } else if (head == "H2D_SAVE") {
     if (savePendingSettings()) {
-      // A profile switch (A1/H2D/P2S) must never expose the previous
-      // printer's spool while the new printer is synchronizing.
-      clearActiveMaterial();
+      // A profile switch (A1/H2D/P2S) must never expose queued status,
+      // material, temperature or fan data from the previous printer.
+      resetPrinterRuntimeForProfileSwitch();
+      clearPhoneEventQueue();
       queuePhoneEvent("H2D,CFG_ACK,SAVE");
       reportStatus("CONFIG_SAVED");
       disconnectNetwork();
@@ -1026,7 +1154,7 @@ void updateLedStrip() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.2");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.3");
   ledStrip.begin();
   ledStrip.setBrightness(Config::LED_BRIGHTNESS);
   ledStrip.clear();
@@ -1058,6 +1186,7 @@ void loop() {
   maintainMqtt();
   if (mqtt.connected()) mqtt.loop();
   reportPrintStatus(false);
+  reportTelemetry(false);
   flushPhoneEvents();
   updateLedStrip();
   delay(2);

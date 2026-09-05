@@ -41,6 +41,17 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var filamentType = ""
     @Published private(set) var filamentColorHex = ""
     @Published private(set) var filamentSlot = -1
+    @Published private(set) var nozzleTemperature = -1
+    @Published private(set) var nozzleTargetTemperature = -1
+    @Published private(set) var bedTemperature = -1
+    @Published private(set) var bedTargetTemperature = -1
+    @Published private(set) var partFanPercent = -1
+    @Published private(set) var auxiliaryFanPercent = -1
+    @Published private(set) var chamberFanPercent = -1
+    @Published private(set) var heatbreakFanPercent = -1
+    @Published private(set) var isSwitchingPrinter = false
+
+    private var expectedPrinterSerial = ""
 
     var printerKind: BambuPrinterKind {
         let reported = BambuPrinterKind(rawValue: printerModelCode)
@@ -62,12 +73,31 @@ final class H2DBLEManager: NSObject, ObservableObject {
         return slot.isEmpty ? filamentType : "\(filamentType) • \(slot)"
     }
 
+    var hasTemperatureTelemetry: Bool {
+        nozzleTemperature >= 0 || bedTemperature >= 0
+    }
+
+    var hasFanTelemetry: Bool {
+        [partFanPercent, auxiliaryFanPercent, chamberFanPercent, heatbreakFanPercent]
+            .contains(where: { $0 >= 0 })
+    }
+
     func prepareForPrinterProfile(_ kind: BambuPrinterKind, serial: String) {
+        expectedPrinterSerial = normalizeSerial(serial)
+        isSwitchingPrinter = !expectedPrinterSerial.isEmpty
         printerModelCode = kind.rawValue
-        printerSerial = serial
+        printerSerial = serial.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         filamentType = ""
         filamentColorHex = ""
         filamentSlot = -1
+        nozzleTemperature = -1
+        nozzleTargetTemperature = -1
+        bedTemperature = -1
+        bedTargetTemperature = -1
+        partFanPercent = -1
+        auxiliaryFanPercent = -1
+        chamberFanPercent = -1
+        heatbreakFanPercent = -1
         h2dPrintState = "IDLE"
         h2dCurrentLayer = 0
         h2dTotalLayers = 0
@@ -77,7 +107,14 @@ final class H2DBLEManager: NSObject, ObservableObject {
         hasPrinterAlert = false
         hasCriticalPrinterAlert = false
         printerAlertText = ""
-        h2dBridgeStatus = "Đã chọn \(kind.rawValue) • chờ gửi cấu hình"
+        h2dStatusCode = isSwitchingPrinter ? "SWITCHING" : "BOOTING"
+        h2dBridgeStatus = isSwitchingPrinter
+            ? "Đang chuyển ESP32 sang \(kind.rawValue)…"
+            : "Đã chọn \(kind.rawValue) • chờ gửi cấu hình"
+    }
+
+    private func normalizeSerial(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
     }
 
     var isActuallyPrinting: Bool {
@@ -173,7 +210,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         accessCode: String
     ) {
         guard isConnected, isH2DBridge else {
-            h2dBridgeStatus = "ESP32 chưa chạy firmware Bambu v1.8.2 trở lên"
+            h2dBridgeStatus = "ESP32 chưa chạy firmware Bambu v1.8.3 trở lên"
             requestH2DStatus()
             return
         }
@@ -306,7 +343,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     self.sendNextConfigurationCommand()
                 }
             } else {
-                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware Bambu v1.8.2 trở lên")
+                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware Bambu v1.8.3 trở lên")
             }
         }
         configurationTimeoutWorkItem = timeout
@@ -323,6 +360,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
         if configurationIndex == configurationCommands.count {
             isConfiguring = false
             h2dBridgeStatus = "Đã lưu cấu hình • ESP32 đang kết nối Wi-Fi"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.requestH2DStatus()
+            }
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
                 self?.sendNextConfigurationCommand()
@@ -407,7 +447,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             let item = DispatchWorkItem { [weak self] in
                 guard let self, self.isConnected, !self.isH2DBridge else { return }
                 self.hasBridgeError = true
-                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản Bambu v1.8.2"
+                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản Bambu v1.8.3"
             }
             recognitionWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: item)
@@ -429,10 +469,21 @@ final class H2DBLEManager: NSObject, ObservableObject {
             hasBridgeError = false
         case "PRINTER":
             guard fields.count >= 4 else { return }
+            let reportedSerial = normalizeSerial(fields[3])
+            if isSwitchingPrinter && !expectedPrinterSerial.isEmpty &&
+                reportedSerial != expectedPrinterSerial {
+                h2dBridgeStatus = "Đang chuyển ESP32 sang \(printerModelCode)…"
+                return
+            }
             printerModelCode = fields[2]
-            printerSerial = fields[3]
+            printerSerial = reportedSerial
+            if isSwitchingPrinter {
+                isSwitchingPrinter = false
+                expectedPrinterSerial = ""
+            }
             connectionText = "Đã kết nối ESP32 • \(printerDisplayName)"
         case "MATERIAL":
+            guard !isSwitchingPrinter else { return }
             guard fields.count >= 5 else { return }
             filamentType = fields[2].trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
             filamentColorHex = fields[3]
@@ -440,6 +491,16 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .uppercased()
             filamentSlot = Int(fields[4]) ?? -1
+        case "TELEMETRY":
+            guard !isSwitchingPrinter, fields.count >= 10 else { return }
+            nozzleTemperature = Int(fields[2]) ?? nozzleTemperature
+            nozzleTargetTemperature = Int(fields[3]) ?? nozzleTargetTemperature
+            bedTemperature = Int(fields[4]) ?? bedTemperature
+            bedTargetTemperature = Int(fields[5]) ?? bedTargetTemperature
+            partFanPercent = Int(fields[6]) ?? partFanPercent
+            auxiliaryFanPercent = Int(fields[7]) ?? auxiliaryFanPercent
+            chamberFanPercent = Int(fields[8]) ?? chamberFanPercent
+            heatbreakFanPercent = Int(fields[9]) ?? heatbreakFanPercent
         case "CFG_ACK":
             guard fields.count >= 3 else { return }
             hasBridgeError = false
@@ -447,6 +508,16 @@ final class H2DBLEManager: NSObject, ObservableObject {
         case "STATUS":
             guard fields.count >= 3 else { return }
             let status = fields[2].uppercased()
+            if isSwitchingPrinter {
+                if status == "CONFIG_SAVED", isConfiguring {
+                    configurationTimeoutWorkItem?.cancel()
+                    configurationProgress = configurationCommands.count
+                    isConfiguring = false
+                }
+                h2dStatusCode = "SWITCHING"
+                h2dBridgeStatus = "Đang chuyển ESP32 sang \(printerModelCode)…"
+                return
+            }
             h2dStatusCode = status
             let known: [String: String] = [
                 "BOOTING": "ESP32 đang khởi động",
@@ -484,6 +555,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     : known[status] ?? fields.dropFirst(2).joined(separator: " • ")
             }
         case "PRINT":
+            guard !isSwitchingPrinter else { return }
             guard fields.count >= 6 else { return }
             confirmH2DReady()
             h2dPrintState = fields[2].uppercased()
@@ -510,6 +582,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 }
             }
         case "SNAP":
+            guard !isSwitchingPrinter else { return }
             guard fields.count >= 5 else { return }
             confirmH2DReady()
             let layer = max(1, Int(fields[2]) ?? 1)
@@ -524,6 +597,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 message: "Chụp lớp \(layer)"
             )
         case "DONE":
+            guard !isSwitchingPrinter else { return }
             guard fields.count >= 5 else { return }
             confirmH2DReady()
             let layer = max(0, Int(fields[2]) ?? h2dCurrentLayer)
@@ -539,6 +613,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 message: "\(printerDisplayName) đã in xong"
             )
         case "ALERT":
+            guard !isSwitchingPrinter else { return }
             guard fields.count >= 3 else { return }
             let active = fields[2] == "1"
             let failedState = ["FAILED", "ERROR"].contains(h2dPrintState.uppercased())

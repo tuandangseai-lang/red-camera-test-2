@@ -17,6 +17,7 @@ struct H2DTimelapseView: View {
     @State private var automaticConfigurationAttempted = false
     @State private var selectedPrinterKind: BambuPrinterKind = .h2d
     @State private var savedProfiles: [BambuPrinterProfile] = []
+    @State private var pendingProfileSwitch = false
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -77,10 +78,12 @@ struct H2DTimelapseView: View {
             }
             bluetooth.requestH2DStatus()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                reconcileBridgeWithSelectedProfile()
                 attemptAutomaticConfigurationIfNeeded()
             }
         }
         .onDisappear {
+            timelapse.restoreDisplayWhenLeaving()
             if !timelapse.isArmed { timelapse.stopPreview() }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -110,7 +113,8 @@ struct H2DTimelapseView: View {
             }
         }
         .onChange(of: bluetooth.h2dStatusCode) { _, status in
-            if status == "READY" || status == "ARMED" || status == "DISARMED" {
+            if !bluetooth.isSwitchingPrinter &&
+                (status == "READY" || status == "ARMED" || status == "DISARMED") {
                 configurationSaved = true
                 showConfiguration = false
                 automaticConfigurationAttempted = false
@@ -119,7 +123,14 @@ struct H2DTimelapseView: View {
             }
         }
         .onChange(of: bluetooth.isH2DBridge) { _, recognized in
-            if recognized { attemptAutomaticConfigurationIfNeeded() }
+            if recognized {
+                reconcileBridgeWithSelectedProfile()
+                switchToSelectedProfileIfPossible()
+                attemptAutomaticConfigurationIfNeeded()
+            }
+        }
+        .onChange(of: bluetooth.printerSerial) { _, _ in
+            reconcileBridgeWithSelectedProfile()
         }
         .onChange(of: printerSerial) { _, serial in
             let detected = BambuPrinterKind.detect(serial: serial)
@@ -171,16 +182,6 @@ struct H2DTimelapseView: View {
             }
         }
 
-        var icon: String {
-            switch self {
-            case .idle: return "clock"
-            case .preparing: return "hourglass"
-            case .printing: return "printer.fill"
-            case .capturing: return "camera.fill"
-            case .connecting: return "wifi.exclamationmark"
-            case .error: return "exclamationmark.triangle.fill"
-            }
-        }
     }
 
     private var printerIslandState: PrinterIslandState {
@@ -218,15 +219,6 @@ struct H2DTimelapseView: View {
 
     private var printerStatusIsland: some View {
         HStack(spacing: 10) {
-            ZStack {
-                Circle()
-                    .fill(printerIslandState.color.opacity(0.20))
-                    .frame(width: 29, height: 29)
-                Image(systemName: printerIslandState.icon)
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(printerIslandState.color)
-            }
-
             Text(printerIslandTitle)
                 .font(.custom("Arial", size: 12).weight(.bold))
                 .monospacedDigit()
@@ -438,6 +430,30 @@ struct H2DTimelapseView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+            }
+            if bluetooth.hasTemperatureTelemetry || bluetooth.hasFanTelemetry {
+                VStack(alignment: .leading, spacing: 6) {
+                    if bluetooth.hasTemperatureTelemetry {
+                        HStack(spacing: 14) {
+                            telemetryValue(
+                                "Đầu in",
+                                current: bluetooth.nozzleTemperature,
+                                target: bluetooth.nozzleTargetTemperature
+                            )
+                            telemetryValue(
+                                "Bàn in",
+                                current: bluetooth.bedTemperature,
+                                target: bluetooth.bedTargetTemperature
+                            )
+                        }
+                    }
+                    if bluetooth.hasFanTelemetry {
+                        Label(fanTelemetryText, systemImage: "fan.fill")
+                            .font(.custom("Arial", size: 11).monospacedDigit().weight(.semibold))
+                            .foregroundStyle(.cyan.opacity(0.85))
+                    }
+                }
+                .padding(.top, 2)
             }
             if bluetooth.hasActivePrinterAlert &&
                 !bluetooth.hasActiveCriticalPrinterAlert &&
@@ -689,6 +705,30 @@ struct H2DTimelapseView: View {
                     .foregroundStyle(bluetooth.filamentType.isEmpty ? .secondary : .primary)
             }
 
+            if bluetooth.hasTemperatureTelemetry || bluetooth.hasFanTelemetry {
+                VStack(spacing: 4) {
+                    if bluetooth.hasTemperatureTelemetry {
+                        HStack(spacing: 12) {
+                            telemetryValue(
+                                "Đầu in",
+                                current: bluetooth.nozzleTemperature,
+                                target: bluetooth.nozzleTargetTemperature
+                            )
+                            telemetryValue(
+                                "Bàn in",
+                                current: bluetooth.bedTemperature,
+                                target: bluetooth.bedTargetTemperature
+                            )
+                        }
+                    }
+                    if bluetooth.hasFanTelemetry {
+                        Label(fanTelemetryText, systemImage: "fan.fill")
+                            .font(.custom("Arial", size: 10).monospacedDigit().weight(.semibold))
+                            .foregroundStyle(.cyan.opacity(0.78))
+                    }
+                }
+            }
+
             capturedFramesCard
             Spacer(minLength: 4)
 
@@ -811,8 +851,67 @@ struct H2DTimelapseView: View {
         }
         bluetooth.prepareForPrinterProfile(kind, serial: printerSerial)
         accessCode = H2DAccessCodeStore.load(for: kind)
-        configurationSaved = false
         automaticConfigurationAttempted = false
+        let complete = hasCompleteSelectedProfile
+        configurationSaved = complete
+        showConfiguration = !complete
+        pendingProfileSwitch = complete
+        switchToSelectedProfileIfPossible()
+    }
+
+    private var hasCompleteSelectedProfile: Bool {
+        !wifiSSID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !wifiPassword.isEmpty &&
+            !printerIP.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !printerSerial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !accessCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func switchToSelectedProfileIfPossible() {
+        guard pendingProfileSwitch, hasCompleteSelectedProfile,
+              bluetooth.isH2DBridge, !bluetooth.isConfiguring else { return }
+        pendingProfileSwitch = false
+        automaticConfigurationAttempted = true
+        configurationSaved = true
+        showConfiguration = false
+        bluetooth.configureH2DBridge(
+            wifiSSID: wifiSSID,
+            wifiPassword: wifiPassword,
+            printerIP: printerIP,
+            printerSerial: printerSerial,
+            accessCode: accessCode
+        )
+    }
+
+    private func reconcileBridgeWithSelectedProfile() {
+        guard configurationSaved, hasCompleteSelectedProfile,
+              bluetooth.isH2DBridge, !bluetooth.isConfiguring,
+              !bluetooth.isSwitchingPrinter else { return }
+        let desired = printerSerial.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let reported = bluetooth.printerSerial
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+        guard !desired.isEmpty, !reported.isEmpty, desired != reported else { return }
+        bluetooth.prepareForPrinterProfile(selectedPrinterKind, serial: desired)
+        pendingProfileSwitch = true
+        switchToSelectedProfileIfPossible()
+    }
+
+    private func telemetryValue(_ label: String, current: Int, target: Int) -> some View {
+        let currentText = current >= 0 ? "\(current)" : "–"
+        let targetText = target >= 0 ? "\(target)" : "–"
+        return Label("\(label) \(currentText)/\(targetText)°C", systemImage: "thermometer.medium")
+            .font(.custom("Arial", size: 11).monospacedDigit().weight(.semibold))
+            .foregroundStyle(.orange.opacity(0.88))
+    }
+
+    private var fanTelemetryText: String {
+        var values: [String] = []
+        if bluetooth.partFanPercent >= 0 { values.append("mẫu \(bluetooth.partFanPercent)%") }
+        if bluetooth.auxiliaryFanPercent >= 0 { values.append("phụ \(bluetooth.auxiliaryFanPercent)%") }
+        if bluetooth.chamberFanPercent >= 0 { values.append("buồng \(bluetooth.chamberFanPercent)%") }
+        if bluetooth.heatbreakFanPercent >= 0 { values.append("đầu \(bluetooth.heatbreakFanPercent)%") }
+        return "Quạt: " + values.joined(separator: " • ")
     }
 
     private func persistActiveProfile() {

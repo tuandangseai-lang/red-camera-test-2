@@ -154,6 +154,10 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             if isArmed {
                 publishStatus("SE phải mở ở màn hình trước để iPhone được phép chụp")
             }
+            // Never leave the user's iPhone dim after switching apps or
+            // leaving this screen. Re-entering an armed session will dim it
+            // again from the same restored level.
+            DispatchQueue.main.async { [weak self] in self?.restoreDisplay() }
             sessionQueue.async { [weak self] in
                 guard let self, self.previewSession.isRunning else { return }
                 self.previewSession.stopRunning()
@@ -216,9 +220,14 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.publishOnMain {
                 self.isLiveMonitorVisible = false
                 self.statusText = "Đã dừng chụp • đang ghép các ảnh đã có"
+                self.restoreDisplay()
             }
             self.completeRunIfPossible()
         }
+    }
+
+    func restoreDisplayWhenLeaving() {
+        DispatchQueue.main.async { [weak self] in self?.restoreDisplay() }
     }
 
     private func requestCameraPermission(_ completion: @escaping (Bool) -> Void) {
