@@ -251,10 +251,15 @@ struct H2DTimelapseView: View {
     }
 
     private var printerProgress: Double {
+        // mc_percent is H2D's actual job progress. Layer ratio is only a
+        // fallback for older firmware that did not report a percentage.
+        if bluetooth.h2dPrintPercent > 0 {
+            return Double(bluetooth.h2dPrintPercent) / 100.0
+        }
         if bluetooth.h2dTotalLayers > 0 {
             return Double(bluetooth.h2dCurrentLayer) / Double(max(1, bluetooth.h2dTotalLayers))
         }
-        return Double(bluetooth.h2dPrintPercent) / 100.0
+        return 0
     }
 
     private var setupView: some View {
@@ -400,10 +405,7 @@ struct H2DTimelapseView: View {
             }
 
             if bluetooth.h2dTotalLayers > 0 {
-                ProgressView(
-                    value: Double(bluetooth.h2dCurrentLayer),
-                    total: Double(max(1, bluetooth.h2dTotalLayers))
-                )
+                ProgressView(value: printerProgress)
                 .tint(.orange)
                 Text(
                     bluetooth.isActuallyPrinting
@@ -548,8 +550,7 @@ struct H2DTimelapseView: View {
                         .frame(width: 150, height: 150)
                     Circle()
                         .trim(from: 0, to: min(1, max(0.015,
-                            Double(bluetooth.h2dCurrentLayer) /
-                                Double(max(1, bluetooth.h2dTotalLayers)))))
+                            printerProgress)))
                         .stroke(
                             timelapse.isRendering ? Color.cyan : Color.orange,
                             style: StrokeStyle(lineWidth: 7, lineCap: .round)

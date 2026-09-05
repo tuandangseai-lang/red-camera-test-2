@@ -7,7 +7,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE H2D Timelapse Bridge v1.7.1
+// SE H2D Timelapse Bridge v1.7.2
 //
 // H2D --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -262,6 +262,41 @@ bool extractJsonString(const uint8_t *payload, size_t length, const char *key,
   return cursor < length;
 }
 
+// A pushall response may contain the same key in cached/nested objects and in
+// the current print object. Keep the last valid string so a mid-job reconnect
+// cannot turn a RUNNING print into a stale IDLE state.
+bool extractLastJsonString(const uint8_t *payload, size_t length,
+                           const char *key, String &output) {
+  bool found = false;
+  size_t searchFrom = 0;
+  size_t valuePosition = 0;
+  while (findKey(payload, length, key, searchFrom, valuePosition)) {
+    size_t cursor = valuePosition;
+    while (cursor < length &&
+           (payload[cursor] == ' ' || payload[cursor] == '\t' ||
+            payload[cursor] == '\r' || payload[cursor] == '\n')) {
+      ++cursor;
+    }
+    if (cursor >= length || payload[cursor] != '"') {
+      searchFrom = valuePosition;
+      continue;
+    }
+    ++cursor;
+    String value;
+    while (cursor < length && payload[cursor] != '"') {
+      if (payload[cursor] == '\\' && cursor + 1 < length) ++cursor;
+      if (value.length() < 64) value += static_cast<char>(payload[cursor]);
+      ++cursor;
+    }
+    if (cursor < length) {
+      output = value;
+      found = true;
+    }
+    searchFrom = valuePosition;
+  }
+  return found;
+}
+
 bool extractJsonArrayHasItems(const uint8_t *payload, size_t length,
                               const char *key, bool &hasItems) {
   size_t valuePosition = 0;
@@ -432,7 +467,8 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
       extractLastJsonUInt32(payload, length, "print_error", incomingPrintError);
   const bool hasHms =
       extractJsonArrayHasItems(payload, length, "hms", incomingHmsAlert);
-  const bool hasState = extractJsonString(payload, length, "gcode_state", state);
+  const bool hasState =
+      extractLastJsonString(payload, length, "gcode_state", state);
   bool hasJob = extractJsonString(payload, length, "job_id", job);
   if (!hasJob) hasJob = extractJsonString(payload, length, "subtask_id", job);
 
@@ -543,7 +579,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.7.1");
+  queuePhoneEvent("H2D,ESP32,SE_H2D_BRIDGE,1.7.2");
   if (!settings.complete()) {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -672,7 +708,7 @@ void updateLed() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE H2D Timelapse Bridge v1.7.1");
+  Serial.println("\nSE H2D Timelapse Bridge v1.7.2");
   pinMode(Config::STATUS_LED_PIN, OUTPUT);
   loadSettings();
   setupBle();

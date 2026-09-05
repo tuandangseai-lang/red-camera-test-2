@@ -94,6 +94,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private var commandCharacteristic: CBCharacteristic?
     private var reconnectWorkItem: DispatchWorkItem?
     private var recognitionWorkItem: DispatchWorkItem?
+    private var statusRefreshWorkItems: [DispatchWorkItem] = []
     private var configurationTimeoutWorkItem: DispatchWorkItem?
     private var mqttLossWorkItem: DispatchWorkItem?
     private var lifecycleActive = true
@@ -121,7 +122,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         accessCode: String
     ) {
         guard isConnected, isH2DBridge else {
-            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.7.1 trở lên"
+            h2dBridgeStatus = "ESP32 chưa chạy firmware H2D v1.7.2 trở lên"
             requestH2DStatus()
             return
         }
@@ -167,7 +168,25 @@ final class H2DBLEManager: NSObject, ObservableObject {
     }
 
     func requestH2DStatus() {
-        send("H2D_STATUS")
+        guard send("H2D_STATUS") else { return }
+        // When the app opens during an active print, the first BLE status can
+        // arrive before ESP32 has completed its MQTT reconnect. Ask again at
+        // short intervals so the current RUNNING/layer/% state is recovered
+        // without requiring the user to reopen the screen.
+        cancelStatusRefreshes()
+        for delay in [1.2, 3.0, 6.0] {
+            let item = DispatchWorkItem { [weak self] in
+                guard let self, self.lifecycleActive, self.isConnected else { return }
+                _ = self.send("H2D_STATUS")
+            }
+            statusRefreshWorkItems.append(item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        }
+    }
+
+    private func cancelStatusRefreshes() {
+        statusRefreshWorkItems.forEach { $0.cancel() }
+        statusRefreshWorkItems.removeAll()
     }
 
     func acknowledgeH2DFrame(layer: Int, success: Bool) {
@@ -177,6 +196,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     func suspendForBackground() {
         lifecycleActive = false
         reconnectWorkItem?.cancel()
+        cancelStatusRefreshes()
         central.stopScan()
     }
 
@@ -229,7 +249,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     self.sendNextConfigurationCommand()
                 }
             } else {
-                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.7.1 trở lên")
+                self.failConfiguration("ESP32 không xác nhận dữ liệu • cần firmware H2D v1.7.2 trở lên")
             }
         }
         configurationTimeoutWorkItem = timeout
@@ -323,16 +343,16 @@ final class H2DBLEManager: NSObject, ObservableObject {
         isConnected = true
         connectionText = "Đã kết nối ESP32 • đang kiểm tra H2D"
         if firstActivation {
-            send("H2D_STATUS")
             recognitionWorkItem?.cancel()
             let item = DispatchWorkItem { [weak self] in
                 guard let self, self.isConnected, !self.isH2DBridge else { return }
                 self.hasBridgeError = true
-                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.7.1 khi máy rảnh"
+                self.h2dBridgeStatus = "ESP32 đang chạy firmware cũ • hãy nạp bản H2D v1.7.2 khi máy rảnh"
             }
             recognitionWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: item)
         }
+        requestH2DStatus()
     }
 
     private func parseEvent(_ event: String) {
@@ -534,6 +554,7 @@ extension H2DBLEManager: CBCentralManagerDelegate {
         error: Error?
     ) {
         recognitionWorkItem?.cancel()
+        cancelStatusRefreshes()
         if isConfiguring { failConfiguration("Kết nối ESP32 bị gián đoạn • hãy thử lại") }
         isConnected = false
         isH2DBridge = false
@@ -550,6 +571,7 @@ extension H2DBLEManager: CBCentralManagerDelegate {
         error: Error?
     ) {
         recognitionWorkItem?.cancel()
+        cancelStatusRefreshes()
         if isConfiguring { failConfiguration("ESP32 đã ngắt • đang kết nối lại") }
         isConnected = false
         isH2DBridge = false

@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.12 build90 - H2D auth diagnostics va Smooth theo lop
+name: Tao IPA SE v9.13 build91 - H2D sync tien trinh giua chung
 
 on:
   workflow_dispatch:
@@ -109,19 +109,19 @@ jobs:
           test -d "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.12"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "90"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.13"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "91"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.12-build90-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.13-build91-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.12-build90-unsigned-ipa
-          path: SE-v9.12-build90-unsigned.ipa
+          name: SE-v9.13-build91-unsigned-ipa
+          path: SE-v9.13-build91-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -158,7 +158,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-H2D-ESP32-v1.7.1
+          name: SE-H2D-ESP32-v1.7.2
           path: ${{ runner.temp }}/SE-H2D-ESP32/*
           if-no-files-found: error
           retention-days: 7
