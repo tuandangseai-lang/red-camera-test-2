@@ -43,12 +43,13 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var filamentSlot = -1
     @Published private(set) var nozzleTemperature = -1
     @Published private(set) var nozzleTargetTemperature = -1
+    @Published private(set) var leftNozzleTemperature = -1
+    @Published private(set) var leftNozzleTargetTemperature = -1
     @Published private(set) var bedTemperature = -1
     @Published private(set) var bedTargetTemperature = -1
     @Published private(set) var partFanPercent = -1
     @Published private(set) var auxiliaryFanPercent = -1
-    @Published private(set) var chamberFanPercent = -1
-    @Published private(set) var heatbreakFanPercent = -1
+    @Published private(set) var exhaustFanPercent = -1
     @Published private(set) var isSwitchingPrinter = false
 
     private var expectedPrinterSerial = ""
@@ -74,11 +75,11 @@ final class H2DBLEManager: NSObject, ObservableObject {
     }
 
     var hasTemperatureTelemetry: Bool {
-        nozzleTemperature >= 0 || bedTemperature >= 0
+        nozzleTemperature >= 0 || leftNozzleTemperature >= 0 || bedTemperature >= 0
     }
 
     var hasFanTelemetry: Bool {
-        [partFanPercent, auxiliaryFanPercent, chamberFanPercent, heatbreakFanPercent]
+        [partFanPercent, auxiliaryFanPercent, exhaustFanPercent]
             .contains(where: { $0 >= 0 })
     }
 
@@ -92,12 +93,13 @@ final class H2DBLEManager: NSObject, ObservableObject {
         filamentSlot = -1
         nozzleTemperature = -1
         nozzleTargetTemperature = -1
+        leftNozzleTemperature = -1
+        leftNozzleTargetTemperature = -1
         bedTemperature = -1
         bedTargetTemperature = -1
         partFanPercent = -1
         auxiliaryFanPercent = -1
-        chamberFanPercent = -1
-        heatbreakFanPercent = -1
+        exhaustFanPercent = -1
         h2dPrintState = "IDLE"
         h2dCurrentLayer = 0
         h2dTotalLayers = 0
@@ -495,12 +497,24 @@ final class H2DBLEManager: NSObject, ObservableObject {
             guard !isSwitchingPrinter, fields.count >= 10 else { return }
             nozzleTemperature = Int(fields[2]) ?? nozzleTemperature
             nozzleTargetTemperature = Int(fields[3]) ?? nozzleTargetTemperature
-            bedTemperature = Int(fields[4]) ?? bedTemperature
-            bedTargetTemperature = Int(fields[5]) ?? bedTargetTemperature
-            partFanPercent = Int(fields[6]) ?? partFanPercent
-            auxiliaryFanPercent = Int(fields[7]) ?? auxiliaryFanPercent
-            chamberFanPercent = Int(fields[8]) ?? chamberFanPercent
-            heatbreakFanPercent = Int(fields[9]) ?? heatbreakFanPercent
+            if fields.count >= 11 {
+                // v1.8.4+: right nozzle, right target, left nozzle, left target,
+                // bed, bed target, then exactly Part/Aux/Exhaust.
+                leftNozzleTemperature = Int(fields[4]) ?? leftNozzleTemperature
+                leftNozzleTargetTemperature = Int(fields[5]) ?? leftNozzleTargetTemperature
+                bedTemperature = Int(fields[6]) ?? bedTemperature
+                bedTargetTemperature = Int(fields[7]) ?? bedTargetTemperature
+                partFanPercent = Int(fields[8]) ?? partFanPercent
+                auxiliaryFanPercent = Int(fields[9]) ?? auxiliaryFanPercent
+                exhaustFanPercent = Int(fields[10]) ?? exhaustFanPercent
+            } else {
+                // Compatibility with the currently installed v1.8.3 firmware.
+                bedTemperature = Int(fields[4]) ?? bedTemperature
+                bedTargetTemperature = Int(fields[5]) ?? bedTargetTemperature
+                partFanPercent = Int(fields[6]) ?? partFanPercent
+                auxiliaryFanPercent = Int(fields[7]) ?? auxiliaryFanPercent
+                exhaustFanPercent = Int(fields[8]) ?? exhaustFanPercent
+            }
         case "CFG_ACK":
             guard fields.count >= 3 else { return }
             hasBridgeError = false

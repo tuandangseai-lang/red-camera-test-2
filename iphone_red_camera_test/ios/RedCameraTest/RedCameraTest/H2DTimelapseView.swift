@@ -3,12 +3,14 @@ import SwiftUI
 struct H2DTimelapseView: View {
     @ObservedObject var bluetooth: H2DBLEManager
     @ObservedObject var timelapse: H2DTimelapseManager
+    @StateObject private var printerAlarm = PrinterAlarmPlayer()
     @Environment(\.scenePhase) private var scenePhase
 
     @AppStorage("SE.H2D.wifiSSID") private var wifiSSID = ""
     @AppStorage("SE.H2D.printerIP") private var printerIP = ""
     @AppStorage("SE.H2D.printerSerial") private var printerSerial = ""
     @AppStorage("SE.H2D.configurationSaved") private var configurationSaved = false
+    @AppStorage("SE.H2D.setupCameraEnabled") private var setupCameraEnabled = false
     @State private var wifiPassword = ""
     @State private var accessCode = ""
     @State private var showConfiguration = true
@@ -18,6 +20,8 @@ struct H2DTimelapseView: View {
     @State private var selectedPrinterKind: BambuPrinterKind = .h2d
     @State private var savedProfiles: [BambuPrinterProfile] = []
     @State private var pendingProfileSwitch = false
+    @State private var showCriticalPrinterAlarm = false
+    @State private var acknowledgedAlarmID = ""
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -74,12 +78,17 @@ struct H2DTimelapseView: View {
                 bluetooth.acknowledgeH2DFrame(layer: layer, success: success)
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                timelapse.preparePreview()
+                if setupCameraEnabled {
+                    timelapse.preparePreview()
+                } else {
+                    timelapse.stopPreview()
+                }
             }
             bluetooth.requestH2DStatus()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 reconcileBridgeWithSelectedProfile()
                 attemptAutomaticConfigurationIfNeeded()
+                synchronizePrinterAlarm()
             }
         }
         .onDisappear {
@@ -87,7 +96,7 @@ struct H2DTimelapseView: View {
             if !timelapse.isArmed { timelapse.stopPreview() }
         }
         .onChange(of: scenePhase) { _, phase in
-            timelapse.handleScenePhase(phase)
+            timelapse.handleScenePhase(phase, allowSetupPreview: setupCameraEnabled)
         }
         .onChange(of: timelapse.isArmed) { _, armed in
             bluetooth.setH2DTimelapseArmed(armed)
@@ -97,8 +106,20 @@ struct H2DTimelapseView: View {
                 // hitch when leaving capture mode.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                     guard !timelapse.isArmed else { return }
-                    timelapse.preparePreview()
+                    if setupCameraEnabled {
+                        timelapse.preparePreview()
+                    } else {
+                        timelapse.stopPreview()
+                    }
                 }
+            }
+        }
+        .onChange(of: setupCameraEnabled) { _, enabled in
+            guard !timelapse.isArmed else { return }
+            if enabled {
+                timelapse.preparePreview()
+            } else {
+                timelapse.stopPreview()
             }
         }
         .onChange(of: bluetooth.isConfiguring) { wasConfiguring, configuring in
@@ -145,6 +166,22 @@ struct H2DTimelapseView: View {
             if hasError && bluetooth.isH2DBridge && !configurationSaved {
                 showConfiguration = true
             }
+        }
+        .onChange(of: bluetooth.hasActiveCriticalPrinterAlert) { _, _ in
+            synchronizePrinterAlarm()
+        }
+        .onChange(of: bluetooth.printerAlertText) { _, _ in
+            synchronizePrinterAlarm()
+        }
+        .alert("\(printerName) đang có lỗi", isPresented: $showCriticalPrinterAlarm) {
+            Button("OK") {
+                acknowledgedAlarmID = currentAlarmID
+                printerAlarm.stop()
+            }
+        } message: {
+            Text(bluetooth.printerAlertText.isEmpty
+                ? "Hãy kiểm tra màn hình máy in. Âm báo sẽ tự tắt khi lỗi được xử lý."
+                : bluetooth.printerAlertText)
         }
         .confirmationDialog(
             "Bạn muốn xử lý các ảnh đã chụp thế nào?",
@@ -308,8 +345,8 @@ struct H2DTimelapseView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.orange)
-                    .disabled(!timelapse.isPreviewRunning || !bluetooth.isH2DReady)
-                    .opacity(timelapse.isPreviewRunning && bluetooth.isH2DReady ? 1 : 0.42)
+                    .disabled(!bluetooth.isH2DReady)
+                    .opacity(bluetooth.isH2DReady ? 1 : 0.42)
 
                     Text("Khi đã bật: giữ SE ở màn hình trước, có thể hạ sáng xuống mức thấp nhất nhưng không khóa iPhone. Camera chỉ thức dậy khi ESP32 báo một lớp vừa hoàn tất.")
                         .font(.custom("Arial", size: 12))
@@ -330,46 +367,83 @@ struct H2DTimelapseView: View {
                 Label("Khung hình iPhone", systemImage: "iphone.gen3")
                     .font(.custom("Arial", size: 15).weight(.bold))
                 Spacer()
-                Text(timelapse.isPreviewRunning ? "Đang hiển thị" : "Đang mở")
+                Text(
+                    setupCameraEnabled
+                        ? (timelapse.isPreviewRunning ? "Đang hiển thị" : "Đang mở")
+                        : "Đã tắt"
+                )
                     .font(.custom("Arial", size: 12).weight(.bold))
-                    .foregroundStyle(timelapse.isPreviewRunning ? .green : .yellow)
+                    .foregroundStyle(
+                        !setupCameraEnabled ? Color.secondary :
+                            (timelapse.isPreviewRunning ? .green : .yellow)
+                    )
+                if setupCameraEnabled {
+                    Button {
+                        timelapse.rotateCamera180()
+                    } label: {
+                        Label("Xoay 180°", systemImage: "rotate.right")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.bordered)
+                }
                 Button {
-                    timelapse.rotateCamera180()
+                    setupCameraEnabled.toggle()
                 } label: {
-                    Label("Xoay 180°", systemImage: "rotate.right")
+                    Label(
+                        setupCameraEnabled ? "Tắt camera" : "Bật camera",
+                        systemImage: setupCameraEnabled ? "video.slash.fill" : "video.fill"
+                    )
                         .labelStyle(.iconOnly)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
+                .tint(setupCameraEnabled ? .gray : .blue)
             }
             HStack {
                 Spacer(minLength: 0)
-                H2DCameraPreview(
-                    session: timelapse.previewSession,
-                    rotationAngle: timelapse.cameraRotationAngle
-                )
-                     // Give the portrait viewport an explicit 9.0 / 16.0 size.  Leaving
-                    // only an aspect-ratio constraint inside an HStack with
-                    // Spacers can collapse the width to a thin strip.
-                    .frame(width: 180, height: 320)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .overlay {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .stroke(.white.opacity(0.14), lineWidth: 1)
-                            if !timelapse.isPreviewRunning {
-                                VStack(spacing: 9) {
-                                    ProgressView()
-                                        .tint(.orange)
-                                    Text("Đang khởi động lại camera iPhone...")
-                                        .font(.custom("Arial", size: 12).weight(.semibold))
-                                        .foregroundStyle(.secondary)
+                Group {
+                    if setupCameraEnabled {
+                        H2DCameraPreview(
+                            session: timelapse.previewSession,
+                            rotationAngle: timelapse.cameraRotationAngle
+                        )
+                        .overlay {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                    .stroke(.white.opacity(0.14), lineWidth: 1)
+                                if !timelapse.isPreviewRunning {
+                                    VStack(spacing: 9) {
+                                        ProgressView()
+                                            .tint(.orange)
+                                        Text("Đang mở camera iPhone…")
+                                            .font(.custom("Arial", size: 12).weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                         }
+                    } else {
+                        ZStack {
+                            Color.white.opacity(0.035)
+                            VStack(spacing: 10) {
+                                Image(systemName: "video.slash.fill")
+                                    .font(.system(size: 30, weight: .semibold))
+                                Text("Camera xem trước đang tắt")
+                                    .font(.custom("Arial", size: 12).weight(.semibold))
+                            }
+                            .foregroundStyle(.secondary)
+                        }
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .stroke(.white.opacity(0.10), lineWidth: 1)
+                        }
                     }
+                }
+                // Give the portrait viewport an explicit 9.0 / 16.0 size.
+                .frame(width: 180, height: 320)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 Spacer(minLength: 0)
             }
-            Text("Đặt iPhone dọc 16:9, lấy trọn vùng in. Khi bắt đầu chờ, hình xem trước sẽ tắt hoàn toàn.")
+            Text("Bạn có thể tắt camera khi không cần căn khung. Khi bật chờ chụp, camera vẫn tự hoạt động theo từng lớp.")
                 .font(.custom("Arial", size: 12))
                 .foregroundStyle(.secondary)
         }
@@ -433,20 +507,7 @@ struct H2DTimelapseView: View {
             }
             if bluetooth.hasTemperatureTelemetry || bluetooth.hasFanTelemetry {
                 VStack(alignment: .leading, spacing: 6) {
-                    if bluetooth.hasTemperatureTelemetry {
-                        HStack(spacing: 14) {
-                            telemetryValue(
-                                "Đầu in",
-                                current: bluetooth.nozzleTemperature,
-                                target: bluetooth.nozzleTargetTemperature
-                            )
-                            telemetryValue(
-                                "Bàn in",
-                                current: bluetooth.bedTemperature,
-                                target: bluetooth.bedTargetTemperature
-                            )
-                        }
-                    }
+                    if bluetooth.hasTemperatureTelemetry { temperatureTelemetryRows }
                     if bluetooth.hasFanTelemetry {
                         Label(fanTelemetryText, systemImage: "fan.fill")
                             .font(.custom("Arial", size: 11).monospacedDigit().weight(.semibold))
@@ -707,20 +768,7 @@ struct H2DTimelapseView: View {
 
             if bluetooth.hasTemperatureTelemetry || bluetooth.hasFanTelemetry {
                 VStack(spacing: 4) {
-                    if bluetooth.hasTemperatureTelemetry {
-                        HStack(spacing: 12) {
-                            telemetryValue(
-                                "Đầu in",
-                                current: bluetooth.nozzleTemperature,
-                                target: bluetooth.nozzleTargetTemperature
-                            )
-                            telemetryValue(
-                                "Bàn in",
-                                current: bluetooth.bedTemperature,
-                                target: bluetooth.bedTargetTemperature
-                            )
-                        }
-                    }
+                    if bluetooth.hasTemperatureTelemetry { temperatureTelemetryRows }
                     if bluetooth.hasFanTelemetry {
                         Label(fanTelemetryText, systemImage: "fan.fill")
                             .font(.custom("Arial", size: 10).monospacedDigit().weight(.semibold))
@@ -758,7 +806,7 @@ struct H2DTimelapseView: View {
                 .padding(.bottom, 20)
             }
 
-            Text("Smooth Timelapse: chụp ngay khi \(printerName) báo lớp vừa hoàn tất; không còn chờ 0,7 giây. Khi vào lại giữa bản in, SE bắt đầu từ lớp hiện tại và không chụp bù lớp cũ.")
+            Text("Smooth Timelapse: camera được giữ sẵn sàng và chụp ngay trong khoảng tháp Smooth, trước khi máy chuyển sang lớp kế tiếp. Khi vào lại giữa bản in, SE bắt đầu từ lớp hiện tại và không chụp bù lớp cũ.")
                 .font(.custom("Arial", size: 10))
                 .foregroundStyle(.white.opacity(0.38))
                 .multilineTextAlignment(.center)
@@ -905,13 +953,68 @@ struct H2DTimelapseView: View {
             .foregroundStyle(.orange.opacity(0.88))
     }
 
+    @ViewBuilder
+    private var temperatureTelemetryRows: some View {
+        if detectedPrinterKind == .h2d {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 12) {
+                    telemetryValue(
+                        "Đầu phải",
+                        current: bluetooth.nozzleTemperature,
+                        target: bluetooth.nozzleTargetTemperature
+                    )
+                    telemetryValue(
+                        "Đầu trái",
+                        current: bluetooth.leftNozzleTemperature,
+                        target: bluetooth.leftNozzleTargetTemperature
+                    )
+                }
+                telemetryValue(
+                    "Bàn in",
+                    current: bluetooth.bedTemperature,
+                    target: bluetooth.bedTargetTemperature
+                )
+            }
+        } else {
+            HStack(spacing: 12) {
+                telemetryValue(
+                    "Đầu in",
+                    current: bluetooth.nozzleTemperature,
+                    target: bluetooth.nozzleTargetTemperature
+                )
+                telemetryValue(
+                    "Bàn in",
+                    current: bluetooth.bedTemperature,
+                    target: bluetooth.bedTargetTemperature
+                )
+            }
+        }
+    }
+
     private var fanTelemetryText: String {
         var values: [String] = []
-        if bluetooth.partFanPercent >= 0 { values.append("mẫu \(bluetooth.partFanPercent)%") }
-        if bluetooth.auxiliaryFanPercent >= 0 { values.append("phụ \(bluetooth.auxiliaryFanPercent)%") }
-        if bluetooth.chamberFanPercent >= 0 { values.append("buồng \(bluetooth.chamberFanPercent)%") }
-        if bluetooth.heatbreakFanPercent >= 0 { values.append("đầu \(bluetooth.heatbreakFanPercent)%") }
+        if bluetooth.partFanPercent >= 0 { values.append("Part \(bluetooth.partFanPercent)%") }
+        if bluetooth.auxiliaryFanPercent >= 0 { values.append("Aux \(bluetooth.auxiliaryFanPercent)%") }
+        if bluetooth.exhaustFanPercent >= 0 { values.append("Exhaust \(bluetooth.exhaustFanPercent)%") }
         return "Quạt: " + values.joined(separator: " • ")
+    }
+
+    private var currentAlarmID: String {
+        let detail = bluetooth.printerAlertText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(bluetooth.printerSerial)|\(detail.isEmpty ? "critical" : detail)"
+    }
+
+    private func synchronizePrinterAlarm() {
+        guard bluetooth.hasActiveCriticalPrinterAlert else {
+            printerAlarm.stop()
+            showCriticalPrinterAlarm = false
+            acknowledgedAlarmID = ""
+            return
+        }
+        guard acknowledgedAlarmID != currentAlarmID else { return }
+        showCriticalPrinterAlarm = true
+        printerAlarm.startLooping()
     }
 
     private func persistActiveProfile() {

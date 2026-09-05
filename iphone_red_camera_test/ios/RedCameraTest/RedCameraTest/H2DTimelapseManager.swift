@@ -48,16 +48,15 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private var capturedLayers = Set<Int>()
     private var sessionDirectory: URL?
     private var finishRequested = false
-    private var cameraStopWorkItem: DispatchWorkItem?
     private var originalBrightness: CGFloat?
     private var lastJobID = ""
     private var monitorPreviewRequested = false
     private var captureRotationAngle: CGFloat = 270
     private var minimumAcceptedLayer = 1
-    // The MQTT layer transition already arrives while Smooth Timelapse has
-    // parked the toolhead. Waiting another 0.7 s moved the photo into the next
-    // layer, so capture starts immediately and only gives AE a tiny settle.
-    private let captureSettleDelay: TimeInterval = 0.04
+    // Smooth Timelapse reports the completed layer while the toolhead is at
+    // the tower/parking move. Keep the sensor warm and fire immediately; any
+    // extra delay moves the photo into the following layer.
+    private let captureSettleDelay: TimeInterval = 0
 
     func preparePreview() {
         requestCameraPermission { [weak self] granted in
@@ -103,7 +102,6 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.finishRequested = false
             self.pendingRequests.removeAll()
             self.currentRequest = nil
-            self.cameraStopWorkItem?.cancel()
             self.monitorPreviewRequested = false
             if self.previewSession.isRunning { self.previewSession.stopRunning() }
             let directory = self.sessionDirectory
@@ -136,18 +134,18 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         }
     }
 
-    func handleScenePhase(_ phase: ScenePhase) {
+    func handleScenePhase(_ phase: ScenePhase, allowSetupPreview: Bool) {
         switch phase {
         case .active:
             if isArmed {
                 UIApplication.shared.isIdleTimerDisabled = true
+                sessionQueue.async { [weak self] in self?.startSessionIfNeeded() }
                 if isLiveMonitorVisible {
                     showMonitorDisplay()
-                    sessionQueue.async { [weak self] in self?.startSessionIfNeeded() }
                 } else {
                     setDimmedDisplay()
                 }
-            } else if !isRendering {
+            } else if !isRendering && allowSetupPreview {
                 preparePreview()
             }
         case .inactive, .background:
@@ -181,12 +179,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self, self.isArmed, !self.isRendering else { return }
             self.monitorPreviewRequested = visible
-            self.cameraStopWorkItem?.cancel()
-            if visible {
-                self.startSessionIfNeeded()
-            } else if self.currentRequest == nil && self.pendingRequests.isEmpty {
-                self.scheduleCameraSleep(after: 0.35)
-            }
+            if visible { self.startSessionIfNeeded() }
             self.publishOnMain {
                 self.isLiveMonitorVisible = visible
                 if visible {
@@ -298,7 +291,6 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     }
 
     private func beginNewRun(startingAtLayer: Int) {
-        cameraStopWorkItem?.cancel()
         pendingRequests.removeAll()
         currentRequest = nil
         capturedLayers.removeAll()
@@ -335,9 +327,11 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             UIApplication.shared.isIdleTimerDisabled = true
         }
 
-        // Warm only for setup. It will sleep after the first quiet interval.
+        // Keep the capture session warm for the whole armed run. Previously it
+        // slept after 1.2 s, and waking it again cost roughly one second. That
+        // is why the first few Smooth frames were correct but later ones were
+        // taken after the printer had already started the next layer.
         startSessionIfNeeded()
-        scheduleCameraSleep(after: 1.2)
     }
 
     private func enqueueSnapshot(layer: Int, totalLayers: Int, jobID: String) {
@@ -373,7 +367,6 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         }
         pendingRequests.removeFirst()
         currentRequest = request
-        cameraStopWorkItem?.cancel()
         startSessionIfNeeded()
         publishOnMain {
             self.isCapturing = true
@@ -418,7 +411,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             if success {
                 self.capturedFrameCount = storedFrameCount
                 self.lastCapturedLayer = max(self.lastCapturedLayer, finishedLayer)
-                self.statusText = "Đã chụp lớp \(finishedLayer) • camera đang nghỉ"
+                self.statusText = "Đã chụp lớp \(finishedLayer) • camera sẵn sàng cho lớp kế tiếp"
                 if let preview {
                     self.recentFramePreviews.removeAll { $0.layer == preview.layer }
                     self.recentFramePreviews.insert(preview, at: 0)
@@ -428,9 +421,6 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                 self.statusText = "Chụp lớp \(finishedLayer) lỗi • chờ tín hiệu tiếp theo"
             }
             self.didStoreFrame?(finishedLayer, success)
-        }
-        if pendingRequests.isEmpty && !monitorPreviewRequested {
-            scheduleCameraSleep(after: 0.9)
         }
         captureNextIfNeeded()
     }
@@ -449,18 +439,6 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         return H2DCapturedFramePreview(layer: layer, image: UIImage(cgImage: thumbnail))
     }
 
-    private func scheduleCameraSleep(after seconds: TimeInterval) {
-        cameraStopWorkItem?.cancel()
-        let item = DispatchWorkItem { [weak self] in
-            guard let self, self.currentRequest == nil, self.pendingRequests.isEmpty,
-                  !self.monitorPreviewRequested, self.previewSession.isRunning else { return }
-            self.previewSession.stopRunning()
-            self.publishOnMain { self.isPreviewRunning = false }
-        }
-        cameraStopWorkItem = item
-        sessionQueue.asyncAfter(deadline: .now() + seconds, execute: item)
-    }
-
     private func requestFinish(jobID: String) {
         sessionQueue.async { [weak self] in
             guard let self, self.isArmed else { return }
@@ -475,7 +453,6 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         guard finishRequested, currentRequest == nil, pendingRequests.isEmpty,
               !isRendering else { return }
         finishRequested = false
-        cameraStopWorkItem?.cancel()
         monitorPreviewRequested = false
         if previewSession.isRunning { previewSession.stopRunning() }
         guard let directory = sessionDirectory, !capturedLayers.isEmpty else {

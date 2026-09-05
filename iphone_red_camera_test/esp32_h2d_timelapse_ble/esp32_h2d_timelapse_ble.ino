@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.8.3
+// SE Bambu Timelapse Bridge for classic ESP32 v1.8.4
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -94,14 +94,18 @@ String activeFilamentType = "";
 String activeFilamentColor = "";
 int activeFilamentSlot = -1;
 uint8_t materialSyncRequests = 0;
+constexpr uint8_t MATERIAL_CACHE_SLOTS = 17;  // AMS 0...15 + external 16.
+String cachedFilamentType[MATERIAL_CACHE_SLOTS];
+String cachedFilamentColor[MATERIAL_CACHE_SLOTS];
 int nozzleTemperature = -1;
 int nozzleTargetTemperature = -1;
+int leftNozzleTemperature = -1;
+int leftNozzleTargetTemperature = -1;
 int bedTemperature = -1;
 int bedTargetTemperature = -1;
 int partFanPercent = -1;
 int auxiliaryFanPercent = -1;
-int chamberFanPercent = -1;
-int heatbreakFanPercent = -1;
+int exhaustFanPercent = -1;
 bool telemetryDirty = false;
 int currentLayer = 0;
 int totalLayers = 0;
@@ -197,9 +201,11 @@ void reportMaterial() {
 
 void reportTelemetry(bool force = false) {
   const bool hasData = nozzleTemperature >= 0 || nozzleTargetTemperature >= 0 ||
+                       leftNozzleTemperature >= 0 ||
+                       leftNozzleTargetTemperature >= 0 ||
                        bedTemperature >= 0 || bedTargetTemperature >= 0 ||
                        partFanPercent >= 0 || auxiliaryFanPercent >= 0 ||
-                       chamberFanPercent >= 0 || heatbreakFanPercent >= 0;
+                       exhaustFanPercent >= 0;
   if (!hasData) return;
   const uint32_t now = millis();
   if (!force && (!telemetryDirty ||
@@ -209,10 +215,17 @@ void reportTelemetry(bool force = false) {
   lastTelemetryNotifyAt = now;
   telemetryDirty = false;
   queuePhoneEvent(String("H2D,TELEMETRY,") + nozzleTemperature + "," +
-                  nozzleTargetTemperature + "," + bedTemperature + "," +
+                  nozzleTargetTemperature + "," + leftNozzleTemperature + "," +
+                  leftNozzleTargetTemperature + "," + bedTemperature + "," +
                   bedTargetTemperature + "," + partFanPercent + "," +
-                  auxiliaryFanPercent + "," + chamberFanPercent + "," +
-                  heatbreakFanPercent);
+                  auxiliaryFanPercent + "," + exhaustFanPercent);
+}
+
+void clearMaterialCache() {
+  for (uint8_t i = 0; i < MATERIAL_CACHE_SLOTS; ++i) {
+    cachedFilamentType[i] = "";
+    cachedFilamentColor[i] = "";
+  }
 }
 
 void clearActiveMaterial(bool notifyPhone = true) {
@@ -250,14 +263,16 @@ void resetPrinterRuntimeForProfileSwitch() {
   lastStatusNotifyAt = 0;
   lastPrintDataAt = 0;
   clearActiveMaterial(false);
+  clearMaterialCache();
   nozzleTemperature = -1;
   nozzleTargetTemperature = -1;
+  leftNozzleTemperature = -1;
+  leftNozzleTargetTemperature = -1;
   bedTemperature = -1;
   bedTargetTemperature = -1;
   partFanPercent = -1;
   auxiliaryFanPercent = -1;
-  chamberFanPercent = -1;
-  heatbreakFanPercent = -1;
+  exhaustFanPercent = -1;
   telemetryDirty = false;
   lastTelemetryNotifyAt = 0;
 }
@@ -420,11 +435,93 @@ bool updateIntIfPresent(const uint8_t *payload, size_t length,
   return true;
 }
 
+bool findObjectRangeAfterKey(const uint8_t *payload, size_t length,
+                             const char *key, size_t &start, size_t &end);
+
+bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
+                                    bool &foundPackedNozzles) {
+  // H2D reports both hotends in print.extruder.info[]. Each packed `temp`
+  // stores target temperature in the high 16 bits and actual temperature in
+  // the low 16 bits. Extruder id 0 is right, id 1 is left.
+  foundPackedNozzles = false;
+  size_t extruderStart = 0;
+  size_t extruderEnd = 0;
+  if (!findObjectRangeAfterKey(payload, length, "extruder",
+                               extruderStart, extruderEnd)) {
+    return false;
+  }
+  const uint8_t *extruder = payload + extruderStart;
+  const size_t extruderLength = extruderEnd - extruderStart;
+  size_t infoPosition = 0;
+  if (!findKey(extruder, extruderLength, "info", 0, infoPosition)) return false;
+  size_t cursor = infoPosition;
+  while (cursor < extruderLength && extruder[cursor] != '[') ++cursor;
+  if (cursor >= extruderLength) return false;
+
+  bool changed = false;
+  ++cursor;
+  while (cursor < extruderLength && extruder[cursor] != ']') {
+    while (cursor < extruderLength && extruder[cursor] != '{' &&
+           extruder[cursor] != ']') ++cursor;
+    if (cursor >= extruderLength || extruder[cursor] == ']') break;
+    const size_t objectStart = cursor;
+    int depth = 0;
+    bool inString = false;
+    bool escaped = false;
+    size_t objectEnd = objectStart;
+    for (; objectEnd < extruderLength; ++objectEnd) {
+      const char c = static_cast<char>(extruder[objectEnd]);
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (c == '\\') escaped = true;
+        else if (c == '"') inString = false;
+        continue;
+      }
+      if (c == '"') inString = true;
+      else if (c == '{') ++depth;
+      else if (c == '}' && --depth == 0) {
+        ++objectEnd;
+        break;
+      }
+    }
+    if (objectEnd <= objectStart || objectEnd > extruderLength) break;
+
+    int id = -1;
+    uint32_t packed = 0;
+    const uint8_t *object = extruder + objectStart;
+    const size_t objectLength = objectEnd - objectStart;
+    if (extractLastJsonInt(object, objectLength, "id", id) &&
+        extractLastJsonUInt32(object, objectLength, "temp", packed) &&
+        (id == 0 || id == 1)) {
+      foundPackedNozzles = true;
+      const int actual = static_cast<int>(packed & 0xFFFFU);
+      const int target = static_cast<int>((packed >> 16U) & 0xFFFFU);
+      int &storedActual = id == 0 ? nozzleTemperature : leftNozzleTemperature;
+      int &storedTarget = id == 0 ? nozzleTargetTemperature
+                                  : leftNozzleTargetTemperature;
+      if (actual != storedActual || target != storedTarget) {
+        storedActual = actual;
+        storedTarget = target;
+        changed = true;
+      }
+    }
+    cursor = objectEnd;
+  }
+  return changed;
+}
+
 void updatePrinterTelemetry(const uint8_t *payload, size_t length) {
   bool changed = false;
-  changed |= updateIntIfPresent(payload, length, "nozzle_temper", nozzleTemperature);
-  changed |= updateIntIfPresent(payload, length, "nozzle_target_temper",
-                                nozzleTargetTemperature);
+  bool foundPackedNozzles = false;
+  changed |= updatePackedH2DNozzleTelemetry(payload, length, foundPackedNozzles);
+  const bool dualNozzleStateKnown =
+      printerModelFromSerial(settings.printerSerial) == "H2D" &&
+      leftNozzleTemperature >= 0;
+  if (!foundPackedNozzles && !dualNozzleStateKnown) {
+    changed |= updateIntIfPresent(payload, length, "nozzle_temper", nozzleTemperature);
+    changed |= updateIntIfPresent(payload, length, "nozzle_target_temper",
+                                  nozzleTargetTemperature);
+  }
   changed |= updateIntIfPresent(payload, length, "bed_temper", bedTemperature);
   changed |= updateIntIfPresent(payload, length, "bed_target_temper",
                                 bedTargetTemperature);
@@ -433,9 +530,7 @@ void updatePrinterTelemetry(const uint8_t *payload, size_t length) {
   changed |= updateIntIfPresent(payload, length, "big_fan1_speed",
                                 auxiliaryFanPercent, true);
   changed |= updateIntIfPresent(payload, length, "big_fan2_speed",
-                                chamberFanPercent, true);
-  changed |= updateIntIfPresent(payload, length, "heatbreak_fan_speed",
-                                heatbreakFanPercent, true);
+                                exhaustFanPercent, true);
   if (changed) telemetryDirty = true;
 }
 
@@ -627,15 +722,58 @@ bool extractExternalMaterial(const uint8_t *payload, size_t length,
   return true;
 }
 
-void updateActiveMaterial(const uint8_t *payload, size_t length) {
-  int trayNow = 255;
-  extractLastJsonInt(payload, length, "tray_now", trayNow);
-  if (trayNow == 255 || trayNow < 0) {
-    int trayTarget = 255;
-    if (extractLastJsonInt(payload, length, "tray_tar", trayTarget) &&
-        trayTarget >= 0 && trayTarget != 255) {
-      trayNow = trayTarget;
+int materialCacheIndex(int trayIndex) {
+  if (trayIndex >= 0 && trayIndex < 16) return trayIndex;
+  if (trayIndex == 254) return 16;
+  return -1;
+}
+
+void cacheMaterial(int trayIndex, const String &type, const String &color) {
+  const int index = materialCacheIndex(trayIndex);
+  if (index < 0 || type.isEmpty()) return;
+  cachedFilamentType[index] = type;
+  cachedFilamentColor[index] = color;
+}
+
+bool readCachedMaterial(int trayIndex, String &type, String &color) {
+  const int index = materialCacheIndex(trayIndex);
+  if (index < 0 || cachedFilamentType[index].isEmpty()) return false;
+  type = cachedFilamentType[index];
+  color = cachedFilamentColor[index];
+  return true;
+}
+
+void refreshMaterialCache(const uint8_t *payload, size_t length) {
+  // Full pushall packets contain all AMS trays. Cache them once so small MQTT
+  // updates that only change tray_now can still switch the UI immediately to
+  // the real filament type and color currently feeding the nozzle.
+  size_t amsStart = 0;
+  size_t amsEnd = 0;
+  if (findObjectRangeAfterKey(payload, length, "ams", amsStart, amsEnd)) {
+    for (int tray = 0; tray < 16; ++tray) {
+      String type;
+      String color;
+      if (extractMaterialFromTrayIndex(payload, length, tray, type, color)) {
+        cacheMaterial(tray, type, color);
+      }
     }
+  }
+  String externalType;
+  String externalColor;
+  if (extractExternalMaterial(payload, length, externalType, externalColor)) {
+    cacheMaterial(254, externalType, externalColor);
+  }
+}
+
+void updateActiveMaterial(const uint8_t *payload, size_t length) {
+  refreshMaterialCache(payload, length);
+  int trayNow = 255;
+  const bool hasTrayNow = extractLastJsonInt(payload, length, "tray_now", trayNow);
+  if ((!hasTrayNow || trayNow == 255 || trayNow < 0) &&
+      activeFilamentSlot >= 0) {
+    // During a tool/filament transition Bambu briefly reports no current tray.
+    // Keep the last truly active color instead of jumping early to tray_tar.
+    trayNow = activeFilamentSlot;
   }
   if (trayNow == 255 || trayNow < 0) {
     int trayPrevious = 255;
@@ -644,18 +782,30 @@ void updateActiveMaterial(const uint8_t *payload, size_t length) {
       trayNow = trayPrevious;
     }
   }
+  if (trayNow == 255 || trayNow < 0) {
+    int trayTarget = 255;
+    if (extractLastJsonInt(payload, length, "tray_tar", trayTarget) &&
+        trayTarget >= 0 && trayTarget != 255) {
+      trayNow = trayTarget;
+    }
+  }
 
   String type;
   String color;
-  bool found = trayNow == 254
-      ? extractExternalMaterial(payload, length, type, color)
-      : trayNow >= 0 && trayNow < 254 &&
-            extractMaterialFromTrayIndex(payload, length, trayNow, type, color);
+  bool found = readCachedMaterial(trayNow, type, color);
+  if (!found) {
+    found = trayNow == 254
+        ? extractExternalMaterial(payload, length, type, color)
+        : trayNow >= 0 && trayNow < 254 &&
+              extractMaterialFromTrayIndex(payload, length, trayNow, type, color);
+    if (found) cacheMaterial(trayNow, type, color);
+  }
   // A1/P2S without AMS can report tray_now=255 while idle even though the
   // external virtual tray already contains the selected material. Use that
   // data as a safe fallback; when printing, tray_now=254 takes precedence.
   if (!found && (trayNow == 255 || trayNow < 0)) {
-    found = extractExternalMaterial(payload, length, type, color);
+    found = readCachedMaterial(254, type, color) ||
+            extractExternalMaterial(payload, length, type, color);
     if (found) trayNow = 254;
   }
   if (!found) return;
@@ -1154,7 +1304,7 @@ void updateLedStrip() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.3");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.4");
   ledStrip.begin();
   ledStrip.setBrightness(Config::LED_BRIGHTNESS);
   ledStrip.clear();

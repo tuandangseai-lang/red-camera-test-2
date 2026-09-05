@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "9.19"
-    CURRENT_PROJECT_VERSION: "98"
+    MARKETING_VERSION: "9.20"
+    CURRENT_PROJECT_VERSION: "99"
 targets:
   RedCameraTest:
     type: application
@@ -18,9 +18,12 @@ targets:
       - path: RedCameraTest/H2DBLEManager.swift
       - path: RedCameraTest/H2DTimelapseManager.swift
       - path: RedCameraTest/H2DTimelapseView.swift
+      - path: RedCameraTest/PrinterAlarmPlayer.swift
       - path: RedCameraTest/BambuPrinterProfile.swift
       - path: RedCameraTest/BambuCredentialStore.swift
       - path: RedCameraTest/Assets.xcassets
+    resources:
+      - path: RedCameraTest/fire-alarm-sound.mp3
     info:
       path: RedCameraTest/Info.plist
       properties:
@@ -39,8 +42,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: vn.rockettracker.RedCameraTest
-        MARKETING_VERSION: "9.19"
-        CURRENT_PROJECT_VERSION: "98"
+        MARKETING_VERSION: "9.20"
+        CURRENT_PROJECT_VERSION: "99"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"
