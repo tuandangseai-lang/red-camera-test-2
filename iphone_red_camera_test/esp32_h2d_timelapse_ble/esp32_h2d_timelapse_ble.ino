@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.8.5
+// SE Bambu Timelapse Bridge for classic ESP32 v1.8.6
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -35,6 +35,7 @@ constexpr uint32_t STATUS_REQUEST_RETRY_MS = 3500;
 constexpr uint32_t PRINT_DATA_STALE_MS = 10000;
 constexpr uint32_t DATA_TIMEOUT_MS = 45000;
 constexpr uint8_t MATERIAL_SYNC_RETRY_LIMIT = 5;
+constexpr uint8_t NOZZLE_SYNC_RETRY_LIMIT = 8;
 constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
@@ -91,12 +92,11 @@ uint32_t lastReportedPrintErrorCode = 0;
 String printState = "IDLE";
 String activeJob = "0";
 String activeFilamentType = "";
-String activeFilamentColor = "";
 int activeFilamentSlot = -1;
 uint8_t materialSyncRequests = 0;
+uint8_t nozzleSyncRequests = 0;
 constexpr uint8_t MATERIAL_CACHE_SLOTS = 17;  // AMS 0...15 + external 16.
 String cachedFilamentType[MATERIAL_CACHE_SLOTS];
-String cachedFilamentColor[MATERIAL_CACHE_SLOTS];
 int nozzleTemperature = -1;
 int nozzleTargetTemperature = -1;
 int leftNozzleTemperature = -1;
@@ -194,9 +194,7 @@ void reportPrinterIdentity() {
 
 void reportMaterial() {
   queuePhoneEvent(String("H2D,MATERIAL,") +
-                  safeEventField(activeFilamentType) + "," +
-                  safeEventField(activeFilamentColor) + "," +
-                  activeFilamentSlot);
+                  safeEventField(activeFilamentType));
 }
 
 void reportTelemetry(bool force = false) {
@@ -224,13 +222,11 @@ void reportTelemetry(bool force = false) {
 void clearMaterialCache() {
   for (uint8_t i = 0; i < MATERIAL_CACHE_SLOTS; ++i) {
     cachedFilamentType[i] = "";
-    cachedFilamentColor[i] = "";
   }
 }
 
 void clearActiveMaterial(bool notifyPhone = true) {
   activeFilamentType = "";
-  activeFilamentColor = "";
   activeFilamentSlot = -1;
   materialSyncRequests = 0;
   if (notifyPhone) reportMaterial();
@@ -262,6 +258,7 @@ void resetPrinterRuntimeForProfileSwitch() {
   lastSnapLayer = 0;
   lastStatusNotifyAt = 0;
   lastPrintDataAt = 0;
+  nozzleSyncRequests = 0;
   clearActiveMaterial(false);
   clearMaterialCache();
   nozzleTemperature = -1;
@@ -459,6 +456,7 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
   if (cursor >= extruderLength) return false;
 
   bool changed = false;
+  uint8_t entryIndex = 0;
   ++cursor;
   while (cursor < extruderLength && extruder[cursor] != ']') {
     while (cursor < extruderLength && extruder[cursor] != '{' &&
@@ -490,8 +488,12 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
     uint32_t packed = 0;
     const uint8_t *object = extruder + objectStart;
     const size_t objectLength = objectEnd - objectStart;
-    if (extractLastJsonInt(object, objectLength, "id", id) &&
-        extractLastJsonUInt32(object, objectLength, "temp", packed) &&
+    const bool hasExplicitId = extractLastJsonInt(object, objectLength, "id", id);
+    // Normal H2D pushall packets include id 0/1. Some incremental firmware
+    // packets omit id but preserve the documented two-entry order, so retain
+    // that order as a fallback instead of dropping the left nozzle entirely.
+    if (!hasExplicitId && entryIndex < 2) id = entryIndex;
+    if (extractLastJsonUInt32(object, objectLength, "temp", packed) &&
         (id == 0 || id == 1)) {
       foundPackedNozzles = true;
       const int actual = static_cast<int>(packed & 0xFFFFU);
@@ -505,7 +507,11 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
         changed = true;
       }
     }
+    ++entryIndex;
     cursor = objectEnd;
+  }
+  if (nozzleTemperature >= 0 && leftNozzleTemperature >= 0) {
+    nozzleSyncRequests = Config::NOZZLE_SYNC_RETRY_LIMIT;
   }
   return changed;
 }
@@ -646,16 +652,8 @@ bool findObjectRangeAfterKey(const uint8_t *payload, size_t length,
   return false;
 }
 
-String normalizedFilamentColor(String color) {
-  color.trim();
-  color.replace("#", "");
-  color.toUpperCase();
-  if (color.length() > 8) color = color.substring(0, 8);
-  return color;
-}
-
 bool extractMaterialFromTrayIndex(const uint8_t *payload, size_t length,
-                                  int trayIndex, String &type, String &color) {
+                                  int trayIndex, String &type) {
   if (trayIndex < 0) return false;
   size_t amsStart = 0;
   size_t amsEnd = 0;
@@ -669,7 +667,6 @@ bool extractMaterialFromTrayIndex(const uint8_t *payload, size_t length,
   while (findKey(ams, amsLength, "tray_type", searchFrom, valuePosition)) {
     if (seen == trayIndex) {
       String parsedType;
-      String parsedColor;
       const size_t typeStart = valuePosition >= 12 ? valuePosition - 12 : 0;
       if (!extractJsonString(ams + typeStart,
                              amsLength - typeStart,
@@ -680,10 +677,6 @@ bool extractMaterialFromTrayIndex(const uint8_t *payload, size_t length,
       const size_t localStart = valuePosition > 16 ? valuePosition - 16 : 0;
       const size_t remaining = amsLength - localStart;
       const size_t localLength = remaining < 768 ? remaining : 768;
-      extractJsonString(ams + localStart, localLength, "tray_color", parsedColor);
-      if (parsedColor.length() < 6) {
-        extractJsonString(ams + localStart, localLength, "cols", parsedColor);
-      }
       parsedType.trim();
       if (parsedType.isEmpty()) {
         extractJsonString(ams + localStart, localLength,
@@ -692,7 +685,6 @@ bool extractMaterialFromTrayIndex(const uint8_t *payload, size_t length,
       }
       if (parsedType.isEmpty()) return false;
       type = parsedType;
-      color = normalizedFilamentColor(parsedColor);
       return true;
     }
     ++seen;
@@ -702,26 +694,20 @@ bool extractMaterialFromTrayIndex(const uint8_t *payload, size_t length,
 }
 
 bool extractExternalMaterial(const uint8_t *payload, size_t length,
-                             String &type, String &color) {
+                             String &type) {
   size_t start = 0;
   size_t end = 0;
   if (!findObjectRangeAfterKey(payload, length, "vt_tray", start, end)) return false;
   String parsedType;
-  String parsedColor;
   if (!extractJsonString(payload + start, end - start, "tray_type", parsedType)) {
     extractJsonString(payload + start, end - start, "tray_sub_brands", parsedType);
   }
   if (parsedType.isEmpty()) {
     extractJsonString(payload + start, end - start, "tray_info_idx", parsedType);
   }
-  extractJsonString(payload + start, end - start, "tray_color", parsedColor);
-  if (parsedColor.length() < 6) {
-    extractJsonString(payload + start, end - start, "cols", parsedColor);
-  }
   parsedType.trim();
   if (parsedType.isEmpty()) return false;
   type = parsedType;
-  color = normalizedFilamentColor(parsedColor);
   return true;
 }
 
@@ -731,40 +717,36 @@ int materialCacheIndex(int trayIndex) {
   return -1;
 }
 
-void cacheMaterial(int trayIndex, const String &type, const String &color) {
+void cacheMaterial(int trayIndex, const String &type) {
   const int index = materialCacheIndex(trayIndex);
   if (index < 0 || type.isEmpty()) return;
   cachedFilamentType[index] = type;
-  cachedFilamentColor[index] = color;
 }
 
-bool readCachedMaterial(int trayIndex, String &type, String &color) {
+bool readCachedMaterial(int trayIndex, String &type) {
   const int index = materialCacheIndex(trayIndex);
   if (index < 0 || cachedFilamentType[index].isEmpty()) return false;
   type = cachedFilamentType[index];
-  color = cachedFilamentColor[index];
   return true;
 }
 
 void refreshMaterialCache(const uint8_t *payload, size_t length) {
   // Full pushall packets contain all AMS trays. Cache them once so small MQTT
   // updates that only change tray_now can still switch the UI immediately to
-  // the real filament type and color currently feeding the nozzle.
+  // the real filament type currently feeding the nozzle.
   size_t amsStart = 0;
   size_t amsEnd = 0;
   if (findObjectRangeAfterKey(payload, length, "ams", amsStart, amsEnd)) {
     for (int tray = 0; tray < 16; ++tray) {
       String type;
-      String color;
-      if (extractMaterialFromTrayIndex(payload, length, tray, type, color)) {
-        cacheMaterial(tray, type, color);
+      if (extractMaterialFromTrayIndex(payload, length, tray, type)) {
+        cacheMaterial(tray, type);
       }
     }
   }
   String externalType;
-  String externalColor;
-  if (extractExternalMaterial(payload, length, externalType, externalColor)) {
-    cacheMaterial(254, externalType, externalColor);
+  if (extractExternalMaterial(payload, length, externalType)) {
+    cacheMaterial(254, externalType);
   }
 }
 
@@ -775,7 +757,7 @@ void updateActiveMaterial(const uint8_t *payload, size_t length) {
   if ((!hasTrayNow || trayNow == 255 || trayNow < 0) &&
       activeFilamentSlot >= 0) {
     // During a tool/filament transition Bambu briefly reports no current tray.
-    // Keep the last truly active color instead of jumping early to tray_tar.
+    // Keep the last truly active material instead of jumping early to tray_tar.
     trayNow = activeFilamentSlot;
   }
   if (trayNow == 255 || trayNow < 0) {
@@ -794,33 +776,30 @@ void updateActiveMaterial(const uint8_t *payload, size_t length) {
   }
 
   String type;
-  String color;
-  bool found = readCachedMaterial(trayNow, type, color);
+  bool found = readCachedMaterial(trayNow, type);
   if (!found) {
     found = trayNow == 254
-        ? extractExternalMaterial(payload, length, type, color)
+        ? extractExternalMaterial(payload, length, type)
         : trayNow >= 0 && trayNow < 254 &&
-              extractMaterialFromTrayIndex(payload, length, trayNow, type, color);
-    if (found) cacheMaterial(trayNow, type, color);
+              extractMaterialFromTrayIndex(payload, length, trayNow, type);
+    if (found) cacheMaterial(trayNow, type);
   }
   // A1/P2S without AMS can report tray_now=255 while idle even though the
   // external virtual tray already contains the selected material. Use that
   // data as a safe fallback; when printing, tray_now=254 takes precedence.
   if (!found && (trayNow == 255 || trayNow < 0)) {
-    found = readCachedMaterial(254, type, color) ||
-            extractExternalMaterial(payload, length, type, color);
+    found = readCachedMaterial(254, type) ||
+            extractExternalMaterial(payload, length, type);
     if (found) trayNow = 254;
   }
   if (!found) return;
-  if (type == activeFilamentType && color == activeFilamentColor &&
-      trayNow == activeFilamentSlot) return;
+  if (type == activeFilamentType && trayNow == activeFilamentSlot) return;
   activeFilamentType = type;
-  activeFilamentColor = color;
   activeFilamentSlot = trayNow;
   materialSyncRequests = Config::MATERIAL_SYNC_RETRY_LIMIT;
   reportMaterial();
-  Serial.printf("[MATERIAL] %s #%s slot=%d\n", activeFilamentType.c_str(),
-                activeFilamentColor.c_str(), activeFilamentSlot);
+  Serial.printf("[MATERIAL] %s slot=%d\n", activeFilamentType.c_str(),
+                activeFilamentSlot);
 }
 
 void reportPrinterAlert(bool force = false) {
@@ -1029,6 +1008,7 @@ void disconnectNetwork() {
   lastPrintDataAt = 0;
   lastStatusRequestAt = 0;
   materialSyncRequests = 0;
+  nozzleSyncRequests = 0;
   lastWifiAttemptAt = 0;
   lastMqttAttemptAt = 0;
 }
@@ -1056,6 +1036,10 @@ void maintainMqtt() {
       reportStatus("READY");
       publishStatusRequest();
       if (activeFilamentType.isEmpty()) ++materialSyncRequests;
+      if (printerModelFromSerial(settings.printerSerial) == "H2D" &&
+          (nozzleTemperature < 0 || leftNozzleTemperature < 0)) {
+        ++nozzleSyncRequests;
+      }
     }
     // Some H2D firmware revisions do not immediately answer the first
     // pushall sent right after MQTT subscription. Retry only while no fresh
@@ -1067,10 +1051,15 @@ void maintainMqtt() {
     const bool materialMissing =
         activeFilamentType.isEmpty() &&
         materialSyncRequests < Config::MATERIAL_SYNC_RETRY_LIMIT;
-    if ((printDataStale || materialMissing) &&
+    const bool nozzleTelemetryMissing =
+        printerModelFromSerial(settings.printerSerial) == "H2D" &&
+        (nozzleTemperature < 0 || leftNozzleTemperature < 0) &&
+        nozzleSyncRequests < Config::NOZZLE_SYNC_RETRY_LIMIT;
+    if ((printDataStale || materialMissing || nozzleTelemetryMissing) &&
         now - lastStatusRequestAt >= Config::STATUS_REQUEST_RETRY_MS) {
       publishStatusRequest();
       if (materialMissing) ++materialSyncRequests;
+      if (nozzleTelemetryMissing) ++nozzleSyncRequests;
     }
     if (!statusDataSeen && lastMqttMessageAt > 0 &&
         millis() - lastMqttMessageAt > Config::DATA_TIMEOUT_MS) {
@@ -1123,7 +1112,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.8.3");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.8.6");
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
   reportTelemetry(true);
@@ -1307,7 +1296,7 @@ void updateLedStrip() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.5");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.6");
   ledStrip.begin();
   ledStrip.setBrightness(Config::LED_BRIGHTNESS);
   ledStrip.clear();

@@ -39,8 +39,6 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var printerModelCode = "Bambu"
     @Published private(set) var printerSerial = ""
     @Published private(set) var filamentType = ""
-    @Published private(set) var filamentColorHex = ""
-    @Published private(set) var filamentSlot = -1
     @Published private(set) var nozzleTemperature = -1
     @Published private(set) var nozzleTargetTemperature = -1
     @Published private(set) var leftNozzleTemperature = -1
@@ -65,13 +63,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     }
 
     var materialDescription: String {
-        guard !filamentType.isEmpty else { return "Chưa nhận dữ liệu nhựa" }
-        let slot = filamentSlot == 254
-            ? "cuộn ngoài"
-            : filamentSlot >= 0
-                ? "AMS \(filamentSlot / 4 + 1) • khay \(filamentSlot % 4 + 1)"
-                : ""
-        return slot.isEmpty ? filamentType : "\(filamentType) • \(slot)"
+        filamentType.isEmpty ? "Chưa nhận loại nhựa" : filamentType
     }
 
     var hasTemperatureTelemetry: Bool {
@@ -89,8 +81,6 @@ final class H2DBLEManager: NSObject, ObservableObject {
         printerModelCode = kind.rawValue
         printerSerial = serial.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         filamentType = ""
-        filamentColorHex = ""
-        filamentSlot = -1
         nozzleTemperature = -1
         nozzleTargetTemperature = -1
         leftNozzleTemperature = -1
@@ -486,13 +476,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
             connectionText = "Đã kết nối ESP32 • \(printerDisplayName)"
         case "MATERIAL":
             guard !isSwitchingPrinter else { return }
-            guard fields.count >= 5 else { return }
+            guard fields.count >= 3 else { return }
             filamentType = fields[2].trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-            filamentColorHex = fields[3]
-                .replacingOccurrences(of: "#", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .uppercased()
-            filamentSlot = Int(fields[4]) ?? -1
         case "TELEMETRY":
             guard !isSwitchingPrinter, fields.count >= 10 else { return }
             nozzleTemperature = Int(fields[2]) ?? nozzleTemperature

@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.22 build101 - H2D dung dau, zero shutter lag, am bao 3x
+name: Tao IPA SE v9.23 build102 - du hai nhiet H2D, chi hien loai nhua
 
 on:
   workflow_dispatch:
@@ -64,6 +64,8 @@ jobs:
           grep -q "isLiveMonitorVisible" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q 'case "PRINTER"' "RedCameraTest/H2DBLEManager.swift"
           grep -q 'case "MATERIAL"' "RedCameraTest/H2DBLEManager.swift"
+          ! grep -q "filamentColorHex" "RedCameraTest/H2DBLEManager.swift"
+          ! grep -q "filamentColorHex" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "prepareForPrinterProfile" "RedCameraTest/H2DBLEManager.swift"
           grep -q "isSwitchingPrinter" "RedCameraTest/H2DBLEManager.swift"
           grep -q 'case "TELEMETRY"' "RedCameraTest/H2DBLEManager.swift"
@@ -82,7 +84,7 @@ jobs:
           grep -q "gain.globalGain = 9.54" "RedCameraTest/PrinterAlarmPlayer.swift"
           ! grep -q "scheduleCameraSleep" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "restoreDisplayWhenLeaving" "RedCameraTest/H2DTimelapseManager.swift"
-          grep -q "đang đồng bộ loại nhựa và màu" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "đang đồng bộ loại nhựa" "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'hasPrefix("22E")' "RedCameraTest/BambuPrinterProfile.swift"
           grep -q "hasActivePrinterAlert" "RedCameraTest/H2DBLEManager.swift"
           grep -q "hasActiveCriticalPrinterAlert" "RedCameraTest/H2DBLEManager.swift"
@@ -139,19 +141,19 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.22"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "101"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.23"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "102"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.22-build101-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.23-build102-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.22-build101-unsigned-ipa
-          path: SE-v9.22-build101-unsigned.ipa
+          name: SE-v9.23-build102-unsigned-ipa
+          path: SE-v9.23-build102-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -189,7 +191,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.8.5
+          name: SE-Bambu-ESP32-v1.8.6
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

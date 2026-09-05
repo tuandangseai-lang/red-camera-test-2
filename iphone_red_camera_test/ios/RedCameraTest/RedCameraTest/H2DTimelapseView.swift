@@ -317,16 +317,6 @@ struct H2DTimelapseView: View {
         return 0
     }
 
-    private var filamentColor: Color {
-        let raw = String(bluetooth.filamentColorHex.prefix(6))
-        guard raw.count == 6, let value = UInt64(raw, radix: 16) else { return .gray }
-        return Color(
-            red: Double((value >> 16) & 0xFF) / 255,
-            green: Double((value >> 8) & 0xFF) / 255,
-            blue: Double(value & 0xFF) / 255
-        )
-    }
-
     private var setupView: some View {
         NavigationStack {
             ScrollView {
@@ -487,22 +477,15 @@ struct H2DTimelapseView: View {
                     .foregroundStyle(.secondary)
             }
             HStack(spacing: 8) {
-                Circle()
-                    .fill(bluetooth.filamentType.isEmpty ? Color.gray.opacity(0.45) : filamentColor)
-                    .frame(width: 14, height: 14)
-                    .overlay(Circle().stroke(.white.opacity(0.35), lineWidth: 1))
+                Image(systemName: "cube.fill")
+                    .foregroundStyle(bluetooth.filamentType.isEmpty ? .gray : .orange)
                 if bluetooth.filamentType.isEmpty {
-                    Text("\(printerName) • đang đồng bộ loại nhựa và màu")
+                    Text("\(printerName) • đang đồng bộ loại nhựa")
                         .font(.custom("Arial", size: 12).weight(.semibold))
                         .foregroundStyle(.secondary)
                 } else {
                     Text("\(printerName) • \(bluetooth.materialDescription)")
                         .font(.custom("Arial", size: 12).weight(.bold))
-                    if !bluetooth.filamentColorHex.isEmpty {
-                        Text("#\(String(bluetooth.filamentColorHex.prefix(6)))")
-                            .font(.custom("Arial", size: 10).monospaced())
-                            .foregroundStyle(.secondary)
-                    }
                 }
             }
             if bluetooth.hasTemperatureTelemetry || bluetooth.hasFanTelemetry {
@@ -753,10 +736,8 @@ struct H2DTimelapseView: View {
             }
 
             HStack(spacing: 7) {
-                Circle()
-                    .fill(bluetooth.filamentType.isEmpty ? Color.gray.opacity(0.45) : filamentColor)
-                    .frame(width: 12, height: 12)
-                    .overlay(Circle().stroke(.white.opacity(0.35), lineWidth: 1))
+                Image(systemName: "cube.fill")
+                    .foregroundStyle(bluetooth.filamentType.isEmpty ? .gray : .orange)
                 Text(
                     bluetooth.filamentType.isEmpty
                         ? "\(printerName) • đang đồng bộ nhựa"
