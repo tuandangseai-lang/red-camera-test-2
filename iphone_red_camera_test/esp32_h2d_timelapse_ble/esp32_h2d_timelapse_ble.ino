@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.8.4
+// SE Bambu Timelapse Bridge for classic ESP32 v1.8.5
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -514,10 +514,13 @@ void updatePrinterTelemetry(const uint8_t *payload, size_t length) {
   bool changed = false;
   bool foundPackedNozzles = false;
   changed |= updatePackedH2DNozzleTelemetry(payload, length, foundPackedNozzles);
-  const bool dualNozzleStateKnown =
-      printerModelFromSerial(settings.printerSerial) == "H2D" &&
-      leftNozzleTemperature >= 0;
-  if (!foundPackedNozzles && !dualNozzleStateKnown) {
+  const bool isH2D = printerModelFromSerial(settings.printerSerial) == "H2D";
+  // During H2D preparation Bambu may publish only the generic nozzle fields.
+  // Those fields describe whichever tool is currently active; they do not say
+  // whether it is the left or right hotend. Never guess a physical side from
+  // them. Wait for print.extruder.info[] where every value has an explicit id.
+  // Single-nozzle A1/P2S printers continue to use the generic fields.
+  if (!foundPackedNozzles && !isH2D) {
     changed |= updateIntIfPresent(payload, length, "nozzle_temper", nozzleTemperature);
     changed |= updateIntIfPresent(payload, length, "nozzle_target_temper",
                                   nozzleTargetTemperature);
@@ -1304,7 +1307,7 @@ void updateLedStrip() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.4");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.5");
   ledStrip.begin();
   ledStrip.setBrightness(Config::LED_BRIGHTNESS);
   ledStrip.clear();

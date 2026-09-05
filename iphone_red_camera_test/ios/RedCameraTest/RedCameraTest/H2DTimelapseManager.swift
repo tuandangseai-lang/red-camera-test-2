@@ -260,10 +260,32 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         previewSession.addOutput(photoOutput)
         photoOutput.maxPhotoQualityPrioritization = .speed
 
+        // Smooth can announce the next layer while the camera is still doing
+        // normal still-photo processing. These iOS 17 capture modes keep a
+        // rolling sensor buffer and prioritize shutter response, so the saved
+        // frame is tied to the real layer event instead of drifting later when
+        // the duration of successive layers changes.
+        if photoOutput.isFastCapturePrioritizationSupported {
+            photoOutput.isFastCapturePrioritizationEnabled = true
+        }
+        if photoOutput.isResponsiveCaptureSupported {
+            photoOutput.isResponsiveCaptureEnabled = true
+        }
+        if photoOutput.isZeroShutterLagSupported {
+            photoOutput.isZeroShutterLagEnabled = true
+        }
+
         let dimensions = camera.activeFormat.supportedMaxPhotoDimensions
             .filter { Int64($0.width) * Int64($0.height) <= 8_500_000 }
             .max { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }
         if let dimensions { photoOutput.maxPhotoDimensions = dimensions }
+
+        let preparedSettings = makeFastPhotoSettings()
+        photoOutput.setPreparedPhotoSettingsArray([preparedSettings]) { [weak self] _, error in
+            if error != nil {
+                self?.publishStatus("Camera vẫn sẵn sàng • dùng chế độ chụp nhanh tương thích")
+            }
+        }
 
         do {
             try camera.lockForConfiguration()
@@ -379,24 +401,29 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                 self?.finishCurrentCapture(success: false)
                 return
             }
-            let settings: AVCapturePhotoSettings
-            if self.photoOutput.availablePhotoCodecTypes.contains(.jpeg) {
-                settings = AVCapturePhotoSettings(
-                    format: [AVVideoCodecKey: AVVideoCodecType.jpeg]
-                )
-            } else {
-                settings = AVCapturePhotoSettings()
-            }
-            settings.photoQualityPrioritization = .speed
-            if self.photoOutput.maxPhotoDimensions.width > 0 {
-                settings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
-            }
+            let settings = self.makeFastPhotoSettings()
             if let connection = self.photoOutput.connection(with: .video),
                connection.isVideoRotationAngleSupported(self.captureRotationAngle) {
                 connection.videoRotationAngle = self.captureRotationAngle
             }
             self.photoOutput.capturePhoto(with: settings, delegate: self)
         }
+    }
+
+    private func makeFastPhotoSettings() -> AVCapturePhotoSettings {
+        let settings: AVCapturePhotoSettings
+        if photoOutput.availablePhotoCodecTypes.contains(.jpeg) {
+            settings = AVCapturePhotoSettings(
+                format: [AVVideoCodecKey: AVVideoCodecType.jpeg]
+            )
+        } else {
+            settings = AVCapturePhotoSettings()
+        }
+        settings.photoQualityPrioritization = .speed
+        if photoOutput.maxPhotoDimensions.width > 0 {
+            settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
+        }
+        return settings
     }
 
     private func finishCurrentCapture(
