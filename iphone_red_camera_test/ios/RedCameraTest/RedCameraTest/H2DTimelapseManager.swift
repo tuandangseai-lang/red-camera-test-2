@@ -1004,7 +1004,9 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
 
     private func setDimmedDisplay() {
         if originalBrightness == nil { originalBrightness = UIScreen.main.brightness }
-        UIScreen.main.brightness = 0.01
+        // Timelapse mode keeps the app in the foreground for iOS camera access.
+        // Use the actual minimum instead of leaving a visible 1% glow.
+        UIScreen.main.brightness = 0.0
     }
 
     private func showMonitorDisplay() {

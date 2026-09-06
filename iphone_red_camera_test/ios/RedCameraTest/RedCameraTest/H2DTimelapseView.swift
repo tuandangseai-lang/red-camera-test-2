@@ -307,6 +307,11 @@ struct H2DTimelapseView: View {
             printerIslandState == .stopping ||
             printerIslandState == .paused
         let progress: Double? = isPrinting ? min(1, max(0, printerProgress)) : nil
+        // Capturing temporarily paints the whole edge blue. Keep the green
+        // printing animation's anchor alive underneath so it resumes from the
+        // same live position instead of restarting at 12 o'clock.
+        let preservesPrintingProgress =
+            printerIslandState == .capturing && bluetooth.isActuallyPrinting
 
         return ScreenEdgeLEDStrip(
             color: printerIslandState.color,
@@ -314,7 +319,8 @@ struct H2DTimelapseView: View {
             remainingSeconds: bluetooth.h2dRemainingMinutes > 0
                 ? Double(bluetooth.h2dRemainingMinutes) * 60.0
                 : nil,
-            blinks: isBlinking
+            blinks: isBlinking,
+            preservesProgressWhenHidden: preservesPrintingProgress
         )
         .padding(.horizontal, 4)
         .padding(.vertical, 6)
@@ -1062,6 +1068,7 @@ private struct ScreenEdgeLEDStrip: View {
     let progress: Double?
     let remainingSeconds: TimeInterval?
     let blinks: Bool
+    let preservesProgressWhenHidden: Bool
 
     @State private var pulse = true
     @State private var reportedProgress = 0.0
@@ -1175,6 +1182,10 @@ private struct ScreenEdgeLEDStrip: View {
         _ newProgress: Double?,
         remainingSeconds: TimeInterval?
     ) {
+        // A blue capture flash makes `progress` nil for a moment. Do not turn
+        // that visual overlay into a real progress reset; the next green frame
+        // continues from the clock position that was already moving.
+        if newProgress == nil && preservesProgressWhenHidden { return }
         let now = Date()
         let previous = interpolatedProgress(at: now)
         let target = min(1, max(0, newProgress ?? 0))

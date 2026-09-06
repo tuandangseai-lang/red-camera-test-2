@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.29 build108 - chon khung sach pause do va tien trinh muot
+name: Tao IPA SE v9.30 build109 - giu tien trinh LED va toi man hinh
 
 on:
   workflow_dispatch:
@@ -102,7 +102,9 @@ jobs:
           grep -q "attemptAutomaticConfigurationIfNeeded" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "lanAccessCode.recovery" "RedCameraTest/BambuCredentialStore.swift"
           grep -q "ScreenEdgeLEDStrip" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "preservesProgressWhenHidden" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "ClockwiseScreenBorderShape" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "UIScreen.main.brightness = 0.0" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "9.0 / 16.0" "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'case "FAILED": return .stopping' "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'Bật camera xem trước' "RedCameraTest/H2DTimelapseView.swift"
@@ -154,19 +156,19 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.29"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "108"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.30"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "109"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.29-build108-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.30-build109-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.29-build108-unsigned-ipa
-          path: SE-v9.29-build108-unsigned.ipa
+          name: SE-v9.30-build109-unsigned-ipa
+          path: SE-v9.30-build109-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
