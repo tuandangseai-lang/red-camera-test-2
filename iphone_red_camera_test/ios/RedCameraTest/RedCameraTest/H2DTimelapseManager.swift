@@ -1,4 +1,6 @@
 import AVFoundation
+import AudioToolbox
+import CoreImage
 import ImageIO
 import Photos
 import SwiftUI
@@ -36,15 +38,26 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         let layer: Int
         let totalLayers: Int
         let jobID: String
+        let playsShutterSound: Bool
+    }
+
+    private struct BufferedFrame {
+        let pixelBuffer: CVPixelBuffer
+        let timestamp: CMTime
+        let lumaSignature: [UInt8]
+        let meanLuma: Double
     }
 
     private let sessionQueue = DispatchQueue(label: "vn.se.h2d.camera", qos: .userInitiated)
+    private let frameProcessingQueue = DispatchQueue(label: "vn.se.h2d.frame-processing", qos: .userInitiated)
     private let renderQueue = DispatchQueue(label: "vn.se.h2d.render", qos: .userInitiated)
-    private let photoOutput = AVCapturePhotoOutput()
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let ciContext = CIContext(options: [.cacheIntermediates: false])
     private var configured = false
     private var preparing = false
     private var pendingRequests: [CaptureRequest] = []
     private var currentRequest: CaptureRequest?
+    private var bufferedFrames: [BufferedFrame] = []
     private var capturedLayers = Set<Int>()
     private var sessionDirectory: URL?
     private var finishRequested = false
@@ -53,10 +66,11 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private var monitorPreviewRequested = false
     private var captureRotationAngle: CGFloat = 270
     private var minimumAcceptedLayer = 1
-    // Smooth Timelapse reports the completed layer while the toolhead is at
-    // the tower/parking move. Keep the sensor warm and fire immediately; any
-    // extra delay moves the photo into the following layer.
-    private let captureSettleDelay: TimeInterval = 0
+    // Keep exactly five lightweight preview frames, sampled every half second.
+    // When the printer confirms the next layer, only the clearest candidate is
+    // encoded and stored; the other four never reach disk or the Photos app.
+    private let bufferedFrameLimit = 5
+    private let bufferedFrameInterval: TimeInterval = 0.5
 
     func preparePreview() {
         requestCameraPermission { [weak self] granted in
@@ -102,6 +116,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.finishRequested = false
             self.pendingRequests.removeAll()
             self.currentRequest = nil
+            self.bufferedFrames.removeAll()
             self.monitorPreviewRequested = false
             if self.previewSession.isRunning { self.previewSession.stopRunning() }
             let directory = self.sessionDirectory
@@ -126,7 +141,12 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     func handle(_ event: H2DTimelapseEvent) {
         switch event.kind {
         case .snapshot:
-            enqueueSnapshot(layer: event.layer, totalLayers: event.totalLayers, jobID: event.jobID)
+            enqueueSnapshot(
+                layer: event.layer,
+                totalLayers: event.totalLayers,
+                jobID: event.jobID,
+                playsShutterSound: event.playsShutterSound
+            )
         case .finished:
             requestFinish(jobID: event.jobID)
         case .error:
@@ -195,7 +215,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.captureRotationAngle = self.captureRotationAngle == 270 ? 90 : 270
-            if let connection = self.photoOutput.connection(with: .video),
+            self.bufferedFrames.removeAll()
+            if let connection = self.videoOutput.connection(with: .video),
                connection.isVideoRotationAngleSupported(self.captureRotationAngle) {
                 connection.videoRotationAngle = self.captureRotationAngle
             }
@@ -238,7 +259,9 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         guard !configured, !preparing else { return }
         preparing = true
         previewSession.beginConfiguration()
-        previewSession.sessionPreset = .photo
+        // The finished timelapse is 1080p, so buffering larger photo frames
+        // would only add heat and memory pressure without improving the video.
+        previewSession.sessionPreset = .hd1920x1080
 
         defer {
             previewSession.commitConfiguration()
@@ -251,40 +274,22 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             position: .back
         ), let input = try? AVCaptureDeviceInput(device: camera),
            previewSession.canAddInput(input),
-           previewSession.canAddOutput(photoOutput) else {
+           previewSession.canAddOutput(videoOutput) else {
             publishStatus("Không mở được camera sau của iPhone")
             return
         }
 
         previewSession.addInput(input)
-        previewSession.addOutput(photoOutput)
-        photoOutput.maxPhotoQualityPrioritization = .speed
-
-        // Smooth can announce the next layer while the camera is still doing
-        // normal still-photo processing. These iOS 17 capture modes keep a
-        // rolling sensor buffer and prioritize shutter response, so the saved
-        // frame is tied to the real layer event instead of drifting later when
-        // the duration of successive layers changes.
-        if photoOutput.isFastCapturePrioritizationSupported {
-            photoOutput.isFastCapturePrioritizationEnabled = true
-        }
-        if photoOutput.isResponsiveCaptureSupported {
-            photoOutput.isResponsiveCaptureEnabled = true
-        }
-        if photoOutput.isZeroShutterLagSupported {
-            photoOutput.isZeroShutterLagEnabled = true
-        }
-
-        let dimensions = camera.activeFormat.supportedMaxPhotoDimensions
-            .filter { Int64($0.width) * Int64($0.height) <= 8_500_000 }
-            .max { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }
-        if let dimensions { photoOutput.maxPhotoDimensions = dimensions }
-
-        let preparedSettings = makeFastPhotoSettings()
-        photoOutput.setPreparedPhotoSettingsArray([preparedSettings]) { [weak self] _, error in
-            if error != nil {
-                self?.publishStatus("Camera vẫn sẵn sàng • dùng chế độ chụp nhanh tương thích")
-            }
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        videoOutput.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String:
+                kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        ]
+        videoOutput.setSampleBufferDelegate(self, queue: sessionQueue)
+        previewSession.addOutput(videoOutput)
+        if let connection = videoOutput.connection(with: .video),
+           connection.isVideoRotationAngleSupported(captureRotationAngle) {
+            connection.videoRotationAngle = captureRotationAngle
         }
 
         do {
@@ -315,6 +320,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private func beginNewRun(startingAtLayer: Int) {
         pendingRequests.removeAll()
         currentRequest = nil
+        bufferedFrames.removeAll()
         capturedLayers.removeAll()
         monitorPreviewRequested = false
         capturedFrameCount = 0
@@ -356,7 +362,12 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         startSessionIfNeeded()
     }
 
-    private func enqueueSnapshot(layer: Int, totalLayers: Int, jobID: String) {
+    private func enqueueSnapshot(
+        layer: Int,
+        totalLayers: Int,
+        jobID: String,
+        playsShutterSound: Bool = true
+    ) {
         sessionQueue.async { [weak self] in
             guard let self, self.isArmed, layer >= self.minimumAcceptedLayer,
                   !self.capturedLayers.contains(layer),
@@ -365,7 +376,12 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             if !jobID.isEmpty, jobID != "0", jobID != "TEST" {
                 self.lastJobID = jobID
             }
-            let request = CaptureRequest(layer: layer, totalLayers: totalLayers, jobID: jobID)
+            let request = CaptureRequest(
+                layer: layer,
+                totalLayers: totalLayers,
+                jobID: jobID,
+                playsShutterSound: playsShutterSound
+            )
             // Never build a catch-up queue after a reconnect. If several old
             // notifications arrive together, retain only the newest eligible
             // layer; normal prints still deliver one event per layer.
@@ -376,7 +392,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                 self.pendingRequests = [request]
             }
             if jobID != "TEST" {
-                self.publishStatus("Lớp \(layer) • chụp sớm 1 giây trước đổi lớp")
+                self.publishStatus("Lớp \(layer) • đang chọn khung không bị đầu in che")
             }
             self.captureNextIfNeeded()
         }
@@ -392,38 +408,106 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         startSessionIfNeeded()
         publishOnMain {
             self.isCapturing = true
-            self.statusText = "Đang chụp lớp \(request.layer)/\(max(request.layer, request.totalLayers))"
+            self.statusText = "Đang chọn ảnh lớp \(request.layer)/\(max(request.layer, request.totalLayers))"
         }
 
-        sessionQueue.asyncAfter(deadline: .now() + captureSettleDelay) { [weak self] in
-            guard let self, self.currentRequest == request,
-                  self.previewSession.isRunning else {
-                self?.finishCurrentCapture(success: false)
+        if request.playsShutterSound, request.jobID != "TEST" {
+            DispatchQueue.main.async {
+                // Play once when the printer reports the new layer. Reading
+                // five temporary frames never produces five shutter sounds.
+                AudioServicesPlaySystemSound(1108)
+            }
+        }
+
+        guard let selectedFrame = selectBestBufferedFrame() else {
+            finishCurrentCapture(success: false)
+            return
+        }
+        frameProcessingQueue.async { [weak self] in
+            guard let self,
+                  let data = self.makeJPEGData(from: selectedFrame.pixelBuffer) else {
+                self?.sessionQueue.async { self?.finishCurrentCapture(success: false) }
                 return
             }
-            let settings = self.makeFastPhotoSettings()
-            if let connection = self.photoOutput.connection(with: .video),
-               connection.isVideoRotationAngleSupported(self.captureRotationAngle) {
-                connection.videoRotationAngle = self.captureRotationAngle
+            self.sessionQueue.async { [weak self] in
+                guard let self, self.currentRequest == request,
+                      let directory = self.sessionDirectory else {
+                    self?.finishCurrentCapture(success: false)
+                    return
+                }
+                do {
+                    try data.write(
+                        to: self.frameURL(for: request.layer, in: directory),
+                        options: .atomic
+                    )
+                    self.capturedLayers.insert(request.layer)
+                    let preview = self.makePreview(from: data, layer: request.layer)
+                    self.finishCurrentCapture(success: true, preview: preview)
+                } catch {
+                    self.finishCurrentCapture(success: false)
+                }
             }
-            self.photoOutput.capturePhoto(with: settings, delegate: self)
         }
     }
 
-    private func makeFastPhotoSettings() -> AVCapturePhotoSettings {
-        let settings: AVCapturePhotoSettings
-        if photoOutput.availablePhotoCodecTypes.contains(.jpeg) {
-            settings = AVCapturePhotoSettings(
-                format: [AVVideoCodecKey: AVVideoCodecType.jpeg]
+    private func selectBestBufferedFrame() -> BufferedFrame? {
+        let candidates = Array(bufferedFrames.suffix(bufferedFrameLimit))
+        guard let newest = candidates.last else { return nil }
+        guard candidates.count > 1 else { return newest }
+
+        let signatureLength = candidates.map(\.lumaSignature.count).min() ?? 0
+        guard signatureLength > 0 else { return newest }
+        var medianSignature = [UInt8](repeating: 0, count: signatureLength)
+        for index in 0..<signatureLength {
+            let sortedValues = candidates.map { $0.lumaSignature[index] }.sorted()
+            medianSignature[index] = sortedValues[sortedValues.count / 2]
+        }
+        let brightestMean = candidates.map(\.meanLuma).max() ?? newest.meanLuma
+
+        return candidates.min { left, right in
+            selectionScore(
+                left,
+                medianSignature: medianSignature,
+                brightestMean: brightestMean,
+                newestTimestamp: newest.timestamp
+            ) < selectionScore(
+                right,
+                medianSignature: medianSignature,
+                brightestMean: brightestMean,
+                newestTimestamp: newest.timestamp
             )
-        } else {
-            settings = AVCapturePhotoSettings()
         }
-        settings.photoQualityPrioritization = .speed
-        if photoOutput.maxPhotoDimensions.width > 0 {
-            settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
+    }
+
+    private func selectionScore(
+        _ frame: BufferedFrame,
+        medianSignature: [UInt8],
+        brightestMean: Double,
+        newestTimestamp: CMTime
+    ) -> Double {
+        let count = min(frame.lumaSignature.count, medianSignature.count)
+        guard count > 0 else { return .greatestFiniteMagnitude }
+        var difference = 0.0
+        for index in 0..<count {
+            difference += abs(
+                Double(frame.lumaSignature[index]) - Double(medianSignature[index])
+            )
         }
-        return settings
+        let averageDifference = difference / Double(count)
+        // A moving toolhead usually introduces a large dark region. This term
+        // breaks near-ties in favor of the frame with less obstruction.
+        let obstructionPenalty = max(0, brightestMean - frame.meanLuma) * 0.35
+        // Prefer the user's requested one-second lead when two frames are
+        // equally clear, while still allowing a cleaner neighboring frame.
+        let age = max(0, CMTimeGetSeconds(newestTimestamp - frame.timestamp))
+        let timingPenalty = abs(age - 1.0) * 0.8
+        return averageDifference + obstructionPenalty + timingPenalty
+    }
+
+    private func makeJPEGData(from pixelBuffer: CVPixelBuffer) -> Data? {
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let cgImage = ciContext.createCGImage(image, from: image.extent) else { return nil }
+        return UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.94)
     }
 
     private func finishCurrentCapture(
@@ -727,6 +811,71 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         }
     }
 
+    private func appendBufferedFrame(_ pixelBuffer: CVPixelBuffer, timestamp: CMTime) {
+        guard isArmed else { return }
+        if let previous = bufferedFrames.last {
+            let elapsed = CMTimeGetSeconds(timestamp - previous.timestamp)
+            guard elapsed >= bufferedFrameInterval - 0.04 else { return }
+        }
+        let signature = makeLumaSignature(from: pixelBuffer)
+        guard !signature.isEmpty else { return }
+        let mean = signature.reduce(0.0) { $0 + Double($1) } / Double(signature.count)
+        bufferedFrames.append(
+            BufferedFrame(
+                pixelBuffer: pixelBuffer,
+                timestamp: timestamp,
+                lumaSignature: signature,
+                meanLuma: mean
+            )
+        )
+        if bufferedFrames.count > bufferedFrameLimit {
+            bufferedFrames.removeFirst(bufferedFrames.count - bufferedFrameLimit)
+        }
+    }
+
+    private func makeLumaSignature(from pixelBuffer: CVPixelBuffer) -> [UInt8] {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        let isPlanar = CVPixelBufferGetPlaneCount(pixelBuffer) > 0
+        let width = isPlanar
+            ? CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+            : CVPixelBufferGetWidth(pixelBuffer)
+        let height = isPlanar
+            ? CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+            : CVPixelBufferGetHeight(pixelBuffer)
+        let bytesPerRow = isPlanar
+            ? CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+            : CVPixelBufferGetBytesPerRow(pixelBuffer)
+        guard width > 0, height > 0, bytesPerRow > 0,
+              let baseAddress = isPlanar
+                ? CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0)
+                : CVPixelBufferGetBaseAddress(pixelBuffer) else { return [] }
+
+        let columns = 48
+        let rows = 48
+        let bytes = baseAddress.assumingMemoryBound(to: UInt8.self)
+        let bytesPerPixel = isPlanar ? 1 : 4
+        var signature: [UInt8] = []
+        signature.reserveCapacity(columns * rows)
+        for row in 0..<rows {
+            let y = min(height - 1, (row * height + height / 2) / rows)
+            for column in 0..<columns {
+                let x = min(width - 1, (column * width + width / 2) / columns)
+                let offset = y * bytesPerRow + x * bytesPerPixel
+                if isPlanar {
+                    signature.append(bytes[offset])
+                } else {
+                    let blue = UInt16(bytes[offset])
+                    let green = UInt16(bytes[offset + 1])
+                    let red = UInt16(bytes[offset + 2])
+                    signature.append(UInt8((red * 54 + green * 183 + blue * 19) >> 8))
+                }
+            }
+        }
+        return signature
+    }
+
     private func setDimmedDisplay() {
         if originalBrightness == nil { originalBrightness = UIScreen.main.brightness }
         UIScreen.main.brightness = 0.01
@@ -758,29 +907,17 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     }
 }
 
-extension H2DTimelapseManager: AVCapturePhotoCaptureDelegate {
-    func photoOutput(
-        _ output: AVCapturePhotoOutput,
-        didFinishProcessingPhoto photo: AVCapturePhoto,
-        error: Error?
+extension H2DTimelapseManager: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
     ) {
-        sessionQueue.async { [weak self] in
-            guard let self, let request = self.currentRequest,
-                  error == nil,
-                  let data = photo.fileDataRepresentation(),
-                  let directory = self.sessionDirectory else {
-                self?.finishCurrentCapture(success: false)
-                return
-            }
-            do {
-                try data.write(to: self.frameURL(for: request.layer, in: directory), options: .atomic)
-                self.capturedLayers.insert(request.layer)
-                let preview = self.makePreview(from: data, layer: request.layer)
-                self.finishCurrentCapture(success: true, preview: preview)
-            } catch {
-                self.finishCurrentCapture(success: false)
-            }
-        }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        appendBufferedFrame(
+            pixelBuffer,
+            timestamp: CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        )
     }
 }
 

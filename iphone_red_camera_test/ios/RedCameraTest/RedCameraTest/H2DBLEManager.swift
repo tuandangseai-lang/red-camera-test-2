@@ -15,6 +15,7 @@ struct H2DTimelapseEvent: Identifiable, Equatable {
     let totalLayers: Int
     let jobID: String
     let message: String
+    let playsShutterSound: Bool
 }
 
 final class H2DBLEManager: NSObject, ObservableObject {
@@ -586,6 +587,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             confirmH2DReady()
             let layer = max(1, Int(fields[2]) ?? 1)
             let total = max(layer, Int(fields[3]) ?? layer)
+            let snapshotPhase = fields.count >= 6 ? fields[5].uppercased() : "LAYER"
             h2dCurrentLayer = layer
             h2dTotalLayers = total
             h2dTimelapseEvent = H2DTimelapseEvent(
@@ -593,7 +595,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 layer: layer,
                 totalLayers: total,
                 jobID: fields[4],
-                message: "Chụp lớp \(layer)"
+                message: "Chụp lớp \(layer)",
+                playsShutterSound: snapshotPhase == "LAYER"
             )
         case "DONE":
             guard !isSwitchingPrinter else { return }
@@ -609,7 +612,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 layer: layer,
                 totalLayers: total,
                 jobID: fields[4],
-                message: "\(printerDisplayName) đã in xong"
+                message: "\(printerDisplayName) đã in xong",
+                playsShutterSound: false
             )
         case "ALERT":
             guard !isSwitchingPrinter else { return }
@@ -635,7 +639,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     layer: h2dCurrentLayer,
                     totalLayers: h2dTotalLayers,
                     jobID: "",
-                    message: printerAlertText
+                    message: printerAlertText,
+                    playsShutterSound: false
                 )
             } else {
                 // A non-critical HMS advisory remains visible below the main
@@ -664,7 +669,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 layer: h2dCurrentLayer,
                 totalLayers: h2dTotalLayers,
                 jobID: "",
-                message: h2dBridgeStatus
+                message: h2dBridgeStatus,
+                playsShutterSound: false
             )
         default:
             break
