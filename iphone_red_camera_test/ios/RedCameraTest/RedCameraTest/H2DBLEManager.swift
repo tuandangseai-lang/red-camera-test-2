@@ -29,6 +29,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var h2dTotalLayers = 0
     @Published private(set) var h2dPrintPercent = 0
     @Published private(set) var h2dStageCode = -1
+    @Published private(set) var h2dRemainingMinutes = -1
     @Published private(set) var h2dTimelapseEvent: H2DTimelapseEvent?
     @Published private(set) var isConfiguring = false
     @Published private(set) var configurationProgress = 0
@@ -96,6 +97,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         h2dTotalLayers = 0
         h2dPrintPercent = 0
         h2dStageCode = -1
+        h2dRemainingMinutes = -1
         isH2DReady = false
         hasPrinterAlert = false
         hasCriticalPrinterAlert = false
@@ -124,6 +126,10 @@ final class H2DBLEManager: NSObject, ObservableObject {
         default:
             return false
         }
+    }
+
+    var isPausedPrint: Bool {
+        ["PAUSE", "PAUSED"].contains(h2dPrintState.uppercased())
     }
 
     var isPrintSessionActive: Bool {
@@ -574,6 +580,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
             if fields.count >= 7 {
                 h2dStageCode = Int(fields[6]) ?? h2dStageCode
             }
+            if fields.count >= 8 {
+                h2dRemainingMinutes = Int(fields[7]) ?? h2dRemainingMinutes
+            }
             hasBridgeError = false
             if !isPrintSessionActive {
                 hasPrinterAlert = false
@@ -583,6 +592,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
             if !hasActiveCriticalPrinterAlert {
                 if isStoppingPrint {
                     h2dBridgeStatus = "\(printerDisplayName) đang dừng bản in"
+                } else if isPausedPrint {
+                    h2dBridgeStatus = "\(printerDisplayName) đang tạm dừng"
                 } else if isActuallyPrinting {
                     h2dBridgeStatus = "\(printerDisplayName) đang in lớp \(h2dCurrentLayer)/\(max(1, h2dTotalLayers))"
                 } else if h2dPrintState == "RUNNING" ||

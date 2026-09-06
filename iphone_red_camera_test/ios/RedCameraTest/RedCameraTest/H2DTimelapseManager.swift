@@ -47,6 +47,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         let timestamp: CMTime
         let lumaSignature: [UInt8]
         let meanLuma: Double
+        let centerMeanLuma: Double
+        let centerDarkRatio: Double
     }
 
     private let sessionQueue = DispatchQueue(label: "vn.se.h2d.camera", qos: .userInitiated)
@@ -67,11 +69,11 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private var monitorPreviewRequested = false
     private var captureRotationAngle: CGFloat = 270
     private var minimumAcceptedLayer = 1
-    // Keep exactly five lightweight preview frames, sampled every half second.
-    // When the printer confirms the next layer, only the clearest candidate is
-    // encoded and stored; the other four never reach disk or the Photos app.
+    // Keep exactly five lightweight preview frames, sampled every quarter
+    // second. They cover the one second immediately before a confirmed layer
+    // change; only the clearest pre-transition candidate reaches disk.
     private let bufferedFrameLimit = 5
-    private let bufferedFrameInterval: TimeInterval = 0.5
+    private let bufferedFrameInterval: TimeInterval = 0.25
 
     func preparePreview() {
         requestCameraPermission { [weak self] granted in
@@ -459,25 +461,40 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         guard let newest = candidates.last else { return nil }
         guard candidates.count > 1 else { return newest }
 
-        let signatureLength = candidates.map(\.lumaSignature.count).min() ?? 0
+        // A BLE notification arrives just after Bambu confirms the next layer.
+        // Exclude the freshest sample when older choices exist so the
+        // saved photo represents the completed layer, not the next layer that
+        // has already started moving.
+        let earlyCandidates = candidates.filter {
+            CMTimeGetSeconds(newest.timestamp - $0.timestamp) >= 0.45
+        }
+        let selectable = earlyCandidates.count >= 2 ? earlyCandidates : candidates
+
+        let signatureLength = selectable.map(\.lumaSignature.count).min() ?? 0
         guard signatureLength > 0 else { return newest }
         var medianSignature = [UInt8](repeating: 0, count: signatureLength)
         for index in 0..<signatureLength {
-            let sortedValues = candidates.map { $0.lumaSignature[index] }.sorted()
+            let sortedValues = selectable.map { $0.lumaSignature[index] }.sorted()
             medianSignature[index] = sortedValues[sortedValues.count / 2]
         }
-        let brightestMean = candidates.map(\.meanLuma).max() ?? newest.meanLuma
+        let brightestMean = selectable.map(\.meanLuma).max() ?? newest.meanLuma
+        let brightestCenterMean = selectable.map(\.centerMeanLuma).max() ?? newest.centerMeanLuma
+        let leastCenterDarkRatio = selectable.map(\.centerDarkRatio).min() ?? newest.centerDarkRatio
 
-        return candidates.min { left, right in
+        return selectable.min { left, right in
             selectionScore(
                 left,
                 medianSignature: medianSignature,
                 brightestMean: brightestMean,
+                brightestCenterMean: brightestCenterMean,
+                leastCenterDarkRatio: leastCenterDarkRatio,
                 newestTimestamp: newest.timestamp
             ) < selectionScore(
                 right,
                 medianSignature: medianSignature,
                 brightestMean: brightestMean,
+                brightestCenterMean: brightestCenterMean,
+                leastCenterDarkRatio: leastCenterDarkRatio,
                 newestTimestamp: newest.timestamp
             )
         }
@@ -487,6 +504,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         _ frame: BufferedFrame,
         medianSignature: [UInt8],
         brightestMean: Double,
+        brightestCenterMean: Double,
+        leastCenterDarkRatio: Double,
         newestTimestamp: CMTime
     ) -> Double {
         let count = min(frame.lumaSignature.count, medianSignature.count)
@@ -498,14 +517,21 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             )
         }
         let averageDifference = difference / Double(count)
-        // A moving toolhead usually introduces a large dark region. This term
-        // breaks near-ties in favor of the frame with less obstruction.
-        let obstructionPenalty = max(0, brightestMean - frame.meanLuma) * 0.35
-        // Prefer the user's requested one-second lead when two frames are
-        // equally clear, while still allowing a cleaner neighboring frame.
+        // In the supplied test video, obstructed frames were 7-12 luma points
+        // darker in the central print area while whole-frame averages differed
+        // very little. Make that central region the primary toolhead detector.
+        let centerBrightnessPenalty =
+            max(0, brightestCenterMean - frame.centerMeanLuma) * 2.8
+        let centerDarkPenalty =
+            max(0, frame.centerDarkRatio - leastCenterDarkRatio) * 180.0
+        let wholeFramePenalty = max(0, brightestMean - frame.meanLuma) * 0.8
+        // Prefer the older part of the one-second window after obstruction is
+        // rejected. Similarity is deliberately secondary because a toolhead
+        // parked in several consecutive frames can otherwise become median.
         let age = max(0, CMTimeGetSeconds(newestTimestamp - frame.timestamp))
-        let timingPenalty = abs(age - 1.0) * 0.8
-        return averageDifference + obstructionPenalty + timingPenalty
+        let timingPenalty = abs(age - 0.75) * 0.9
+        return averageDifference * 0.2 + centerBrightnessPenalty +
+            centerDarkPenalty + wholeFramePenalty + timingPenalty
     }
 
     private func makeJPEGData(from pixelBuffer: CVPixelBuffer) -> Data? {
@@ -832,12 +858,15 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         let signature = makeLumaSignature(from: ownedPixelBuffer)
         guard !signature.isEmpty else { return }
         let mean = signature.reduce(0.0) { $0 + Double($1) } / Double(signature.count)
+        let centerStats = centerLumaStats(from: signature)
         bufferedFrames.append(
             BufferedFrame(
                 pixelBuffer: ownedPixelBuffer,
                 timestamp: timestamp,
                 lumaSignature: signature,
-                meanLuma: mean
+                meanLuma: mean,
+                centerMeanLuma: centerStats.mean,
+                centerDarkRatio: centerStats.darkRatio
             )
         )
         if bufferedFrames.count > bufferedFrameLimit {
@@ -906,6 +935,28 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             }
         }
         return destination
+    }
+
+    private func centerLumaStats(from signature: [UInt8]) -> (mean: Double, darkRatio: Double) {
+        let gridSize = 48
+        guard signature.count >= gridSize * gridSize else { return (0, 1) }
+        let margin = 8
+        var total = 0.0
+        var darkCount = 0
+        var sampleCount = 0
+        for row in margin..<(gridSize - margin) {
+            for column in margin..<(gridSize - margin) {
+                let value = signature[row * gridSize + column]
+                total += Double(value)
+                if value < 70 { darkCount += 1 }
+                sampleCount += 1
+            }
+        }
+        guard sampleCount > 0 else { return (0, 1) }
+        return (
+            total / Double(sampleCount),
+            Double(darkCount) / Double(sampleCount)
+        )
     }
 
     private func makeLumaSignature(from pixelBuffer: CVPixelBuffer) -> [UInt8] {

@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.9.1
+// SE Bambu Timelapse Bridge for classic ESP32 v1.9.2
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -110,6 +110,7 @@ bool telemetryDirty = false;
 int currentLayer = 0;
 int totalLayers = 0;
 int printPercent = 0;
+int remainingMinutes = -1;
 // Bambu print.stg_cur: 0 means real layer printing, >0 is a preparation or
 // maintenance stage, and -1/255 means idle or unavailable.
 int currentStage = -1;
@@ -165,7 +166,8 @@ void reportPrintStatus(bool force = false) {
   if (!force && now - lastStatusNotifyAt < Config::STATUS_PERIOD_MS) return;
   lastStatusNotifyAt = now;
   queuePhoneEvent(String("H2D,PRINT,") + printState + "," + currentLayer +
-                  "," + totalLayers + "," + printPercent + "," + currentStage);
+                  "," + totalLayers + "," + printPercent + "," + currentStage +
+                  "," + remainingMinutes);
 }
 
 String printerModelFromSerial(const String &serial) {
@@ -253,6 +255,7 @@ void resetPrinterRuntimeForProfileSwitch() {
   currentLayer = 0;
   totalLayers = 0;
   printPercent = 0;
+  remainingMinutes = -1;
   currentStage = -1;
   lastObservedLayer = 0;
   lastSnapLayer = 0;
@@ -810,6 +813,10 @@ bool isExplicitlyStoppedState() {
          printState == "CANCELLED";
 }
 
+bool isPausedState() {
+  return printState == "PAUSE" || printState == "PAUSED";
+}
+
 bool hasCriticalPrinterError() {
   // Bambu can publish FAILED when the operator deliberately cancels a job.
   // A bare FAILED state is therefore not an alarm: require a real non-zero
@@ -912,7 +919,7 @@ void resetForNewPrint(const String &job, int layer) {
 }
 
 void processPrintUpdate(const String &newState, int newLayer, int newTotal,
-                        int newPercent, int newStage,
+                        int newPercent, int newStage, int newRemainingMinutes,
                         const String &jobToken) {
   const String previousState = printState;
   const bool wasRunning = printWasRunning;
@@ -924,6 +931,7 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
   if (newTotal >= 0) totalLayers = newTotal;
   if (newPercent >= 0) printPercent = constrain(newPercent, 0, 100);
   if (newStage != -999) currentStage = newStage;
+  if (newRemainingMinutes >= 0) remainingMinutes = newRemainingMinutes;
 
   // PREPARE may already report layer 0/1 while the bed is heating. Baseline
   // only on the first real RUNNING packet, otherwise layer 1 is photographed
@@ -937,8 +945,9 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
     } else if (currentLayer > lastObservedLayer) {
       // Never guess the duration of the next layer: its geometry can make it
       // several seconds shorter or longer than the previous one. The iPhone
-      // keeps five half-second preview frames and, at this confirmed transition,
-      // saves the least-obstructed frame from that rolling two-second window.
+      // keeps five quarter-second preview frames and, at this confirmed
+      // transition, saves the least-obstructed pre-transition frame from that
+      // rolling one-second window.
       const int lastCompletedLayer = currentLayer - 1;
       sendSnapshot(lastCompletedLayer, true);
       lastObservedLayer = currentLayer;
@@ -957,7 +966,8 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
     Serial.printf("[PRINT] finished at layer %d\n", finalLayer);
   } else if (printState == "FAILED" || printState == "ERROR" ||
              printState == "IDLE" || printState == "STOP" ||
-             printState == "STOPPED" || printState == "CANCELED" ||
+             printState == "STOPPED" || printState == "CANCEL" ||
+             printState == "CANCELED" ||
              printState == "CANCELLED" || printState == "FINISH" ||
              printState == "COMPLETE" || printState == "COMPLETED") {
     printWasRunning = false;
@@ -971,6 +981,7 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   int total = -1;
   int percent = -1;
   int stage = -999;
+  int remaining = -1;
   uint32_t incomingPrintError = 0;
   bool incomingHmsAlert = false;
   String state;
@@ -980,6 +991,8 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
       extractLastJsonInt(payload, length, "total_layer_num", total);
   const bool hasPercent = extractLastJsonInt(payload, length, "mc_percent", percent);
   const bool hasStage = extractLastJsonInt(payload, length, "stg_cur", stage);
+  const bool hasRemaining =
+      extractLastJsonInt(payload, length, "mc_remaining_time", remaining);
   const bool hasPrintError =
       extractLastJsonUInt32(payload, length, "print_error", incomingPrintError);
   const bool hasHms =
@@ -989,15 +1002,16 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   bool hasJob = extractJsonString(payload, length, "job_id", job);
   if (!hasJob) hasJob = extractJsonString(payload, length, "subtask_id", job);
 
-  if (hasLayer || hasTotal || hasPercent || hasStage || hasState ||
+  if (hasLayer || hasTotal || hasPercent || hasStage || hasRemaining || hasState ||
       hasPrintError || hasHms) {
     statusDataSeen = true;
     lastPrintDataAt = millis();
   }
-  if (hasLayer || hasTotal || hasPercent || hasStage || hasState) {
+  if (hasLayer || hasTotal || hasPercent || hasStage || hasRemaining || hasState) {
     processPrintUpdate(hasState ? state : "", hasLayer ? layer : -1,
                        hasTotal ? total : -1, hasPercent ? percent : -1,
                        hasStage ? stage : -999,
+                       hasRemaining ? remaining : -1,
                        hasJob ? safeJobID(job) : activeJob);
   }
   if (hasPrintError) {
@@ -1289,7 +1303,8 @@ void updateLedStrip() {
   } else if (static_cast<int32_t>(captureFlashUntil - now) > 0) {
     // Same meaning as the blue border on iPhone: one layer photo was ordered.
     fillLedStrip(ledStrip.Color(0, 105, 255));
-  } else if (isExplicitlyStoppedState() || printState == "FAILED") {
+  } else if (isPausedState() || isExplicitlyStoppedState() ||
+             printState == "FAILED") {
     // A deliberate stop is not an alarm, but it must remain visually distinct
     // from waiting/preparation: breathe red on the same two-second cycle.
     const uint16_t phase = now % 2000;
@@ -1327,7 +1342,7 @@ void updateLedStrip() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.9.1");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.9.2");
   ledStrip.begin();
   ledStrip.setBrightness(Config::LED_BRIGHTNESS);
   ledStrip.clear();

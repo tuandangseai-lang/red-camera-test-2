@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct H2DTimelapseView: View {
@@ -209,6 +210,7 @@ struct H2DTimelapseView: View {
         case capturing
         case connecting
         case stopping
+        case paused
         case error
 
         var color: Color {
@@ -216,7 +218,7 @@ struct H2DTimelapseView: View {
             case .idle, .preparing, .connecting: return .yellow
             case .printing: return .green
             case .capturing: return .blue
-            case .stopping: return .red
+            case .stopping, .paused: return .red
             case .error: return .red
             }
         }
@@ -226,17 +228,18 @@ struct H2DTimelapseView: View {
     private var printerIslandState: PrinterIslandState {
         if bluetooth.hasActiveCriticalPrinterAlert || visibleBridgeError { return .error }
         if timelapse.isStopping || bluetooth.isStoppingPrint { return .stopping }
+        if bluetooth.isPausedPrint { return .paused }
         if !bluetooth.isConnected { return .connecting }
         if timelapse.isCapturing { return .capturing }
         if !bluetooth.isH2DReady { return .connecting }
         switch bluetooth.h2dPrintState.uppercased() {
-        // A stopped/failed job is no longer an active printer alert. Keep the
-        // Island in its waiting state unless the bridge has a real
-        // connection/configuration error (handled above).
+        // A failed/cancelled job without a real printer alarm is a deliberate
+        // stop: show the red breathing state without starting the siren.
         case "FAILED": return .stopping
         case "ERROR": return .idle
         case "RUNNING": return bluetooth.isActuallyPrinting ? .printing : .preparing
-        case "PREPARE", "PREPARING", "SLICING", "INIT", "HEATING", "PAUSE", "PAUSED": return .preparing
+        case "PAUSE", "PAUSED": return .paused
+        case "PREPARE", "PREPARING", "SLICING", "INIT", "HEATING": return .preparing
         default: return .idle
         }
     }
@@ -253,6 +256,7 @@ struct H2DTimelapseView: View {
         case .capturing: return "\(printerName) • CHỤP LỚP \(max(1, bluetooth.h2dCurrentLayer))"
         case .connecting: return "ESP32 • ĐANG KẾT NỐI \(printerName)"
         case .stopping: return "\(printerName) • ĐANG DỪNG"
+        case .paused: return "\(printerName) • ĐANG TẠM DỪNG"
         case .error:
             if bluetooth.hasActiveCriticalPrinterAlert { return "\(printerName) • CÓ LỖI" }
             return bluetooth.isConnected ? "\(printerName) • CÓ LỖI" : "ESP32 • MẤT KẾT NỐI"
@@ -272,7 +276,7 @@ struct H2DTimelapseView: View {
                 .shadow(color: printerIslandState.color.opacity(0.8), radius: 5)
                 .opacity(
                     printerIslandState == .idle || printerIslandState == .connecting ||
-                        printerIslandState == .stopping
+                        printerIslandState == .stopping || printerIslandState == .paused
                         ? (idlePulse ? 1 : 0.18)
                         : 1
                 )
@@ -300,12 +304,16 @@ struct H2DTimelapseView: View {
         let isBlinking = printerIslandState == .idle ||
             printerIslandState == .preparing ||
             printerIslandState == .connecting ||
-            printerIslandState == .stopping
+            printerIslandState == .stopping ||
+            printerIslandState == .paused
         let progress: Double? = isPrinting ? min(1, max(0, printerProgress)) : nil
 
         return ScreenEdgeLEDStrip(
             color: printerIslandState.color,
             progress: progress,
+            remainingSeconds: bluetooth.h2dRemainingMinutes > 0
+                ? Double(bluetooth.h2dRemainingMinutes) * 60.0
+                : nil,
             blinks: isBlinking
         )
         .padding(.horizontal, 4)
@@ -738,6 +746,8 @@ struct H2DTimelapseView: View {
                         ? "\(printerName) • đang dừng chụp và ghép ảnh"
                         : bluetooth.isStoppingPrint
                             ? "\(printerName) • đang dừng bản in"
+                            : bluetooth.isPausedPrint
+                                ? "\(printerName) • đang tạm dừng"
                             : bluetooth.isActuallyPrinting
                         ? "\(printerName) • đang in lớp \(bluetooth.h2dCurrentLayer)/\(bluetooth.h2dTotalLayers)"
                         : "\(printerName) • \(bluetooth.h2dStageText.lowercased())"
@@ -1050,11 +1060,53 @@ private extension View {
 private struct ScreenEdgeLEDStrip: View {
     let color: Color
     let progress: Double?
+    let remainingSeconds: TimeInterval?
     let blinks: Bool
 
     @State private var pulse = true
+    @State private var reportedProgress = 0.0
+    @State private var transitionStartProgress = 0.0
+    @State private var progressAnchorDate = Date()
+    @State private var remainingSecondsAtAnchor: TimeInterval?
+
+    private let correctionDuration: TimeInterval = 1.2
 
     var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: progress == nil)) { context in
+            let liveProgress = progress == nil ? nil : interpolatedProgress(at: context.date)
+            let shimmer = (sin(context.date.timeIntervalSinceReferenceDate * 3.2) + 1.0) / 2.0
+            stripContent(progress: liveProgress, shimmer: shimmer)
+        }
+        .opacity(blinks && !pulse ? 0.22 : 1)
+        .onAppear {
+            reanchorProgress(progress, remainingSeconds: remainingSeconds)
+            guard blinks else { return }
+            withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) {
+                pulse = false
+            }
+        }
+        .onChange(of: progress) { _, newProgress in
+            reanchorProgress(newProgress, remainingSeconds: remainingSeconds)
+        }
+        .onChange(of: remainingSeconds) { _, newRemainingSeconds in
+            reanchorProgress(progress, remainingSeconds: newRemainingSeconds)
+        }
+        .onChange(of: blinks) { _, shouldBlink in
+            if shouldBlink {
+                withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) {
+                    pulse = false
+                }
+            } else {
+                withAnimation(.linear(duration: 0.15)) {
+                    pulse = true
+                }
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func stripContent(progress: Double?, shimmer: Double) -> some View {
         ZStack {
             // Dim rail keeps the state readable even when progress is near 0%.
             ClockwiseScreenBorderShape()
@@ -1071,7 +1123,8 @@ private struct ScreenEdgeLEDStrip: View {
                             gradient: Gradient(colors: [
                                 color.opacity(0.35),
                                 color,
-                                .white.opacity(0.92)
+                                Color.mint.opacity(0.78 + shimmer * 0.16),
+                                .white.opacity(0.78 + shimmer * 0.20)
                             ]),
                             center: .center,
                             startAngle: .degrees(-90),
@@ -1086,10 +1139,9 @@ private struct ScreenEdgeLEDStrip: View {
                 ClockwiseScreenBorderShape()
                     .trim(from: max(0, progress - 0.028), to: progress)
                     .stroke(
-                        .white.opacity(0.78),
+                        .white.opacity(0.62 + shimmer * 0.30),
                         style: StrokeStyle(lineWidth: 2, lineCap: .round)
                     )
-                    .animation(.linear(duration: 0.35), value: progress)
             } else {
                 ClockwiseScreenBorderShape()
                     .stroke(
@@ -1099,25 +1151,37 @@ private struct ScreenEdgeLEDStrip: View {
                     .shadow(color: color.opacity(0.65), radius: 5)
             }
         }
-        .opacity(blinks && !pulse ? 0.22 : 1)
-        .onAppear {
-            guard blinks else { return }
-            withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) {
-                pulse = false
-            }
+    }
+
+    private func interpolatedProgress(at date: Date) -> Double {
+        let elapsed = max(0, date.timeIntervalSince(progressAnchorDate))
+        let correction = min(1, elapsed / correctionDuration)
+        let easedCorrection = correction * correction * (3 - 2 * correction)
+        let corrected = transitionStartProgress +
+            (reportedProgress - transitionStartProgress) * easedCorrection
+        guard elapsed > correctionDuration,
+              let remainingSecondsAtAnchor,
+              remainingSecondsAtAnchor > correctionDuration else {
+            return min(1, max(0, corrected))
         }
-        .onChange(of: blinks) { _, shouldBlink in
-            if shouldBlink {
-                withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) {
-                    pulse = false
-                }
-            } else {
-                withAnimation(.linear(duration: 0.15)) {
-                    pulse = true
-                }
-            }
-        }
-        .accessibilityHidden(true)
+        let predictionElapsed = elapsed - correctionDuration
+        let predictionDuration = remainingSecondsAtAnchor - correctionDuration
+        let predicted = reportedProgress +
+            (1 - reportedProgress) * min(1, predictionElapsed / predictionDuration)
+        return min(0.999, max(corrected, predicted))
+    }
+
+    private func reanchorProgress(
+        _ newProgress: Double?,
+        remainingSeconds: TimeInterval?
+    ) {
+        let now = Date()
+        let previous = interpolatedProgress(at: now)
+        let target = min(1, max(0, newProgress ?? 0))
+        transitionStartProgress = newProgress == nil ? target : previous
+        reportedProgress = max(transitionStartProgress, target)
+        progressAnchorDate = now
+        remainingSecondsAtAnchor = remainingSeconds
     }
 }
 
