@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.27 build106 - bo dem 5 khung Smooth
+name: Tao IPA SE v9.28 build107 - bo dem camera rieng va dung mau do
 
 on:
   workflow_dispatch:
@@ -71,6 +71,9 @@ jobs:
           grep -q "selectBestBufferedFrame" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "AudioServicesPlaySystemSound(1108)" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "AVCaptureVideoDataOutput" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "copyPixelBuffer" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "isStoppingPrint" "RedCameraTest/H2DBLEManager.swift"
+          grep -q 'case stopping' "RedCameraTest/H2DTimelapseView.swift"
           grep -q "prepareForPrinterProfile" "RedCameraTest/H2DBLEManager.swift"
           grep -q "isSwitchingPrinter" "RedCameraTest/H2DBLEManager.swift"
           grep -q 'case "TELEMETRY"' "RedCameraTest/H2DBLEManager.swift"
@@ -97,7 +100,7 @@ jobs:
           grep -q "ScreenEdgeLEDStrip" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "ClockwiseScreenBorderShape" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "9.0 / 16.0" "RedCameraTest/H2DTimelapseView.swift"
-          grep -q 'case "FAILED", "ERROR": return .idle' "RedCameraTest/H2DTimelapseView.swift"
+          grep -q 'case "FAILED": return .stopping' "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'Bật camera xem trước' "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'video.slash.fill' "RedCameraTest/H2DTimelapseView.swift"
           grep -q "Hồ sơ.*đã lưu" "RedCameraTest/H2DTimelapseView.swift"
@@ -147,19 +150,19 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.27"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "106"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.28"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "107"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.27-build106-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.28-build107-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.27-build106-unsigned-ipa
-          path: SE-v9.27-build106-unsigned.ipa
+          name: SE-v9.28-build107-unsigned-ipa
+          path: SE-v9.28-build107-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -199,7 +202,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.9.0
+          name: SE-Bambu-ESP32-v1.9.1
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

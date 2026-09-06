@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.9.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.9.1
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -806,7 +806,8 @@ void updateActiveMaterial(const uint8_t *payload, size_t length) {
 
 bool isExplicitlyStoppedState() {
   return printState == "STOP" || printState == "STOPPED" ||
-         printState == "CANCELED" || printState == "CANCELLED";
+         printState == "CANCEL" || printState == "CANCELED" ||
+         printState == "CANCELLED";
 }
 
 bool hasCriticalPrinterError() {
@@ -1288,6 +1289,13 @@ void updateLedStrip() {
   } else if (static_cast<int32_t>(captureFlashUntil - now) > 0) {
     // Same meaning as the blue border on iPhone: one layer photo was ordered.
     fillLedStrip(ledStrip.Color(0, 105, 255));
+  } else if (isExplicitlyStoppedState() || printState == "FAILED") {
+    // A deliberate stop is not an alarm, but it must remain visually distinct
+    // from waiting/preparation: breathe red on the same two-second cycle.
+    const uint16_t phase = now % 2000;
+    const uint16_t ramp = phase < 1000 ? phase : 2000 - phase;
+    const uint8_t scale = 35 + static_cast<uint32_t>(ramp) * 220 / 1000;
+    fillLedStrip(scaledLedColor(255, 0, 0, scale));
   } else if (printState == "RUNNING" &&
              (currentStage == 0 || currentStage == -1)) {
     // LED 0 is the 12 o'clock point. Install the strip clockwise so the
@@ -1319,7 +1327,7 @@ void updateLedStrip() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.9.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.9.1");
   ledStrip.begin();
   ledStrip.setBrightness(Config::LED_BRIGHTNESS);
   ledStrip.clear();

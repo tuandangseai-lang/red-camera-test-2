@@ -19,6 +19,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     @Published private(set) var isArmed = false
     @Published private(set) var isCapturing = false
     @Published private(set) var isRendering = false
+    @Published private(set) var isStopping = false
     @Published private(set) var isLiveMonitorVisible = false
     // The preview is always portrait when the iPhone is mounted vertically.
     // Capture output keeps its own angle because the sensor image was mounted
@@ -128,6 +129,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 self.isArmed = false
                 self.isCapturing = false
+                self.isStopping = false
                 self.isLiveMonitorVisible = false
                 self.recentFramePreviews = []
                 self.statusText = deleteFrames
@@ -232,6 +234,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.pendingRequests.removeAll()
             self.monitorPreviewRequested = false
             self.publishOnMain {
+                self.isStopping = true
                 self.isLiveMonitorVisible = false
                 self.statusText = "Đã dừng chụp • đang ghép các ảnh đã có"
                 self.restoreDisplay()
@@ -348,6 +351,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
 
         DispatchQueue.main.async {
             self.isArmed = true
+            self.isStopping = false
             self.isLiveMonitorVisible = false
             self.recentFramePreviews = []
             self.statusText = "Màn hình tối • đang chờ lớp in đầu tiên"
@@ -577,6 +581,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 self.isArmed = false
                 self.isCapturing = false
+                self.isStopping = false
                 self.isLiveMonitorVisible = false
                 self.restoreDisplay()
             }
@@ -790,6 +795,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.isRendering = false
             self.isArmed = false
             self.isCapturing = false
+            self.isStopping = false
             self.isLiveMonitorVisible = false
             self.lastVideoSaved = success
             self.statusText = message
@@ -817,12 +823,18 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             let elapsed = CMTimeGetSeconds(timestamp - previous.timestamp)
             guard elapsed >= bufferedFrameInterval - 0.04 else { return }
         }
-        let signature = makeLumaSignature(from: pixelBuffer)
+        // AVCaptureVideoDataOutput owns the pixel buffer received by this
+        // callback. Retaining five of those buffers can exhaust its small
+        // internal pool, after which the camera silently stops delivering
+        // frames. Keep an app-owned copy instead so the capture pipeline is
+        // immediately free to reuse its own memory.
+        guard let ownedPixelBuffer = copyPixelBuffer(pixelBuffer) else { return }
+        let signature = makeLumaSignature(from: ownedPixelBuffer)
         guard !signature.isEmpty else { return }
         let mean = signature.reduce(0.0) { $0 + Double($1) } / Double(signature.count)
         bufferedFrames.append(
             BufferedFrame(
-                pixelBuffer: pixelBuffer,
+                pixelBuffer: ownedPixelBuffer,
                 timestamp: timestamp,
                 lumaSignature: signature,
                 meanLuma: mean
@@ -831,6 +843,69 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         if bufferedFrames.count > bufferedFrameLimit {
             bufferedFrames.removeFirst(bufferedFrames.count - bufferedFrameLimit)
         }
+    }
+
+    private func copyPixelBuffer(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+        let width = CVPixelBufferGetWidth(source)
+        let height = CVPixelBufferGetHeight(source)
+        let pixelFormat = CVPixelBufferGetPixelFormatType(source)
+        let attributes = [
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
+        ] as CFDictionary
+        var destination: CVPixelBuffer?
+        guard CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            pixelFormat,
+            attributes,
+            &destination
+        ) == kCVReturnSuccess, let destination else { return nil }
+
+        CVPixelBufferLockBaseAddress(source, .readOnly)
+        CVPixelBufferLockBaseAddress(destination, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(destination, [])
+            CVPixelBufferUnlockBaseAddress(source, .readOnly)
+        }
+
+        let planeCount = CVPixelBufferGetPlaneCount(source)
+        guard planeCount == CVPixelBufferGetPlaneCount(destination) else { return nil }
+        if planeCount > 0 {
+            for plane in 0..<planeCount {
+                guard let sourceBase = CVPixelBufferGetBaseAddressOfPlane(source, plane),
+                      let destinationBase = CVPixelBufferGetBaseAddressOfPlane(destination, plane) else {
+                    return nil
+                }
+                let rows = min(
+                    CVPixelBufferGetHeightOfPlane(source, plane),
+                    CVPixelBufferGetHeightOfPlane(destination, plane)
+                )
+                let sourceBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(source, plane)
+                let destinationBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(destination, plane)
+                let bytesToCopy = min(sourceBytesPerRow, destinationBytesPerRow)
+                for row in 0..<rows {
+                    destinationBase.advanced(by: row * destinationBytesPerRow).copyMemory(
+                        from: UnsafeRawPointer(sourceBase.advanced(by: row * sourceBytesPerRow)),
+                        byteCount: bytesToCopy
+                    )
+                }
+            }
+        } else {
+            guard let sourceBase = CVPixelBufferGetBaseAddress(source),
+                  let destinationBase = CVPixelBufferGetBaseAddress(destination) else { return nil }
+            let rows = min(CVPixelBufferGetHeight(source), CVPixelBufferGetHeight(destination))
+            let sourceBytesPerRow = CVPixelBufferGetBytesPerRow(source)
+            let destinationBytesPerRow = CVPixelBufferGetBytesPerRow(destination)
+            let bytesToCopy = min(sourceBytesPerRow, destinationBytesPerRow)
+            for row in 0..<rows {
+                destinationBase.advanced(by: row * destinationBytesPerRow).copyMemory(
+                    from: UnsafeRawPointer(sourceBase.advanced(by: row * sourceBytesPerRow)),
+                    byteCount: bytesToCopy
+                )
+            }
+        }
+        return destination
     }
 
     private func makeLumaSignature(from pixelBuffer: CVPixelBuffer) -> [UInt8] {

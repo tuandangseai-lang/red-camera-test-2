@@ -208,6 +208,7 @@ struct H2DTimelapseView: View {
         case printing
         case capturing
         case connecting
+        case stopping
         case error
 
         var color: Color {
@@ -215,6 +216,7 @@ struct H2DTimelapseView: View {
             case .idle, .preparing, .connecting: return .yellow
             case .printing: return .green
             case .capturing: return .blue
+            case .stopping: return .red
             case .error: return .red
             }
         }
@@ -223,6 +225,7 @@ struct H2DTimelapseView: View {
 
     private var printerIslandState: PrinterIslandState {
         if bluetooth.hasActiveCriticalPrinterAlert || visibleBridgeError { return .error }
+        if timelapse.isStopping || bluetooth.isStoppingPrint { return .stopping }
         if !bluetooth.isConnected { return .connecting }
         if timelapse.isCapturing { return .capturing }
         if !bluetooth.isH2DReady { return .connecting }
@@ -230,7 +233,8 @@ struct H2DTimelapseView: View {
         // A stopped/failed job is no longer an active printer alert. Keep the
         // Island in its waiting state unless the bridge has a real
         // connection/configuration error (handled above).
-        case "FAILED", "ERROR": return .idle
+        case "FAILED": return .stopping
+        case "ERROR": return .idle
         case "RUNNING": return bluetooth.isActuallyPrinting ? .printing : .preparing
         case "PREPARE", "PREPARING", "SLICING", "INIT", "HEATING", "PAUSE", "PAUSED": return .preparing
         default: return .idle
@@ -248,6 +252,7 @@ struct H2DTimelapseView: View {
         case .printing: return "\(printerName) • ĐANG IN \(bluetooth.h2dPrintPercent)%"
         case .capturing: return "\(printerName) • CHỤP LỚP \(max(1, bluetooth.h2dCurrentLayer))"
         case .connecting: return "ESP32 • ĐANG KẾT NỐI \(printerName)"
+        case .stopping: return "\(printerName) • ĐANG DỪNG"
         case .error:
             if bluetooth.hasActiveCriticalPrinterAlert { return "\(printerName) • CÓ LỖI" }
             return bluetooth.isConnected ? "\(printerName) • CÓ LỖI" : "ESP32 • MẤT KẾT NỐI"
@@ -266,7 +271,8 @@ struct H2DTimelapseView: View {
                 .frame(width: 9, height: 9)
                 .shadow(color: printerIslandState.color.opacity(0.8), radius: 5)
                 .opacity(
-                    printerIslandState == .idle || printerIslandState == .connecting
+                    printerIslandState == .idle || printerIslandState == .connecting ||
+                        printerIslandState == .stopping
                         ? (idlePulse ? 1 : 0.18)
                         : 1
                 )
@@ -293,7 +299,8 @@ struct H2DTimelapseView: View {
         let isPrinting = printerIslandState == .printing
         let isBlinking = printerIslandState == .idle ||
             printerIslandState == .preparing ||
-            printerIslandState == .connecting
+            printerIslandState == .connecting ||
+            printerIslandState == .stopping
         let progress: Double? = isPrinting ? min(1, max(0, printerProgress)) : nil
 
         return ScreenEdgeLEDStrip(
@@ -727,7 +734,11 @@ struct H2DTimelapseView: View {
 
             if bluetooth.h2dTotalLayers > 0 {
                 Text(
-                    bluetooth.isActuallyPrinting
+                    timelapse.isStopping
+                        ? "\(printerName) • đang dừng chụp và ghép ảnh"
+                        : bluetooth.isStoppingPrint
+                            ? "\(printerName) • đang dừng bản in"
+                            : bluetooth.isActuallyPrinting
                         ? "\(printerName) • đang in lớp \(bluetooth.h2dCurrentLayer)/\(bluetooth.h2dTotalLayers)"
                         : "\(printerName) • \(bluetooth.h2dStageText.lowercased())"
                 )

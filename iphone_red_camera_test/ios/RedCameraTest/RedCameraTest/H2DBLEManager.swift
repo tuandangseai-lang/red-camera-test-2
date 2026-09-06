@@ -117,6 +117,15 @@ final class H2DBLEManager: NSObject, ObservableObject {
         return h2dStageCode == -1 || h2dStageCode == 0
     }
 
+    var isStoppingPrint: Bool {
+        switch h2dPrintState.uppercased() {
+        case "STOP", "STOPPED", "CANCEL", "CANCELED", "CANCELLED", "FAILED":
+            return !hasActiveCriticalPrinterAlert
+        default:
+            return false
+        }
+    }
+
     var isPrintSessionActive: Bool {
         switch h2dPrintState.uppercased() {
         case "RUNNING", "PREPARE", "PREPARING", "SLICING", "INIT", "HEATING",
@@ -572,7 +581,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 printerAlertText = ""
             }
             if !hasActiveCriticalPrinterAlert {
-                if isActuallyPrinting {
+                if isStoppingPrint {
+                    h2dBridgeStatus = "\(printerDisplayName) đang dừng bản in"
+                } else if isActuallyPrinting {
                     h2dBridgeStatus = "\(printerDisplayName) đang in lớp \(h2dCurrentLayer)/\(max(1, h2dTotalLayers))"
                 } else if h2dPrintState == "RUNNING" ||
                             (h2dStageCode > 0 && h2dStageCode != 255) {
