@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.9.3
+// SE Bambu Timelapse Bridge for classic ESP32 v1.9.4
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -962,9 +962,9 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
     } else if (currentLayer > lastObservedLayer) {
       // Never guess the duration of the next layer: its geometry can make it
       // several seconds shorter or longer than the previous one. The iPhone
-      // keeps five quarter-second preview frames and, at this confirmed
+      // keeps seven preview frames 0.15 s apart and, at this confirmed
       // transition, saves the least-obstructed pre-transition frame from that
-      // rolling one-second window.
+      // rolling 0.9-second window.
       const int lastCompletedLayer = currentLayer - 1;
       sendSnapshot(lastCompletedLayer, true);
       lastObservedLayer = currentLayer;
@@ -1166,7 +1166,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.9.3");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.9.4");
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
   reportTelemetry(true);
@@ -1359,7 +1359,7 @@ void updateLedStrip() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.9.3");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.9.4");
   ledStrip.begin();
   ledStrip.setBrightness(Config::LED_BRIGHTNESS);
   ledStrip.clear();
