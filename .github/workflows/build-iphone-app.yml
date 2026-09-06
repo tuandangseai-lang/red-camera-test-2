@@ -185,7 +185,7 @@ jobs:
       - name: Bien dich firmware cau noi H2D
         run: |
           set -euo pipefail
-          grep -q 'id == 0 ? leftNozzleTemperature : nozzleTemperature' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'id == 0 ? nozzleTemperature : leftNozzleTemperature' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'hasCriticalPrinterError' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           mkdir -p "$RUNNER_TEMP/SE-Bambu-ESP32"
           arduino-cli compile \
@@ -196,7 +196,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.8.8
+          name: SE-Bambu-ESP32-v1.8.9
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

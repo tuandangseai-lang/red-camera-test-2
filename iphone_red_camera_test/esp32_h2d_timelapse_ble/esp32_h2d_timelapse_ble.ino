@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.8.8
+// SE Bambu Timelapse Bridge for classic ESP32 v1.8.9
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -446,9 +446,9 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
                                     bool &foundPackedNozzles) {
   // H2D reports both hotends in print.extruder.info[]. Each packed `temp`
   // stores target temperature in the high 16 bits and actual temperature in
-  // the low 16 bits. On the H2D LAN payload, extruder id 0 is the left
-  // hotend and id 1 is the right hotend (the same L/R order shown by Bambu
-  // Studio). Keep that physical mapping here before sending telemetry.
+  // the low 16 bits. Verified on the physical H2D: extruder id 0 is the right
+  // hotend and id 1 is the left hotend. Keep that physical mapping here before
+  // sending telemetry to the matching labels in the iPhone app.
   foundPackedNozzles = false;
   size_t extruderStart = 0;
   size_t extruderEnd = 0;
@@ -507,9 +507,9 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
       foundPackedNozzles = true;
       const int actual = static_cast<int>(packed & 0xFFFFU);
       const int target = static_cast<int>((packed >> 16U) & 0xFFFFU);
-      int &storedActual = id == 0 ? leftNozzleTemperature : nozzleTemperature;
-      int &storedTarget = id == 0 ? leftNozzleTargetTemperature
-                                  : nozzleTargetTemperature;
+      int &storedActual = id == 0 ? nozzleTemperature : leftNozzleTemperature;
+      int &storedTarget = id == 0 ? nozzleTargetTemperature
+                                  : leftNozzleTargetTemperature;
       if (actual != storedActual || target != storedTarget) {
         storedActual = actual;
         storedTarget = target;
@@ -1365,7 +1365,7 @@ void updateLedStrip() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.8");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.9");
   ledStrip.begin();
   ledStrip.setBrightness(Config::LED_BRIGHTNESS);
   ledStrip.clear();
