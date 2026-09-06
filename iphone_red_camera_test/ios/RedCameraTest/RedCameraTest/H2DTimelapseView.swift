@@ -949,16 +949,17 @@ struct H2DTimelapseView: View {
     private var temperatureTelemetryRows: some View {
         if detectedPrinterKind == .h2d {
             VStack(alignment: .leading, spacing: 5) {
+                // Match the physical H2D layout: left is outside, right is inside.
                 HStack(spacing: 12) {
-                    telemetryValue(
-                        "Đầu phải",
-                        current: bluetooth.nozzleTemperature,
-                        target: bluetooth.nozzleTargetTemperature
-                    )
                     telemetryValue(
                         "Đầu trái",
                         current: bluetooth.leftNozzleTemperature,
                         target: bluetooth.leftNozzleTargetTemperature
+                    )
+                    telemetryValue(
+                        "Đầu phải",
+                        current: bluetooth.nozzleTemperature,
+                        target: bluetooth.nozzleTargetTemperature
                     )
                 }
                 telemetryValue(

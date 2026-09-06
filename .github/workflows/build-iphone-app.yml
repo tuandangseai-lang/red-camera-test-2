@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.25 build104 - sua dau phun va nut camera
+name: Tao IPA SE v9.26 build105 - sap xep dau phun H2D
 
 on:
   workflow_dispatch:
@@ -76,6 +76,7 @@ jobs:
           grep -q "Đầu in" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "Đầu phải" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "Đầu trái" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "left is outside, right is inside" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "Part.*Aux.*Exhaust\|Part" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "setupCameraEnabled" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "synchronizePrinterAlarm" "RedCameraTest/H2DTimelapseView.swift"
@@ -144,19 +145,19 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.25"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "104"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.26"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "105"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.25-build104-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.26-build105-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.25-build104-unsigned-ipa
-          path: SE-v9.25-build104-unsigned.ipa
+          name: SE-v9.26-build105-unsigned-ipa
+          path: SE-v9.26-build105-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
