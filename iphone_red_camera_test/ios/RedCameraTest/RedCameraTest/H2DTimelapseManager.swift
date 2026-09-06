@@ -82,6 +82,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     // change; only the clearest pre-transition candidate reaches disk.
     private let bufferedFrameLimit = 5
     private let bufferedFrameInterval: TimeInterval = 0.25
+    private let cameraWarmupTimeout: TimeInterval = 1.8
+    private var captureFrameWaitDeadline: Date?
 
     func preparePreview() {
         requestCameraPermission { [weak self] granted in
@@ -127,6 +129,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.finishRequested = false
             self.pendingRequests.removeAll()
             self.currentRequest = nil
+            self.captureFrameWaitDeadline = nil
             self.bufferedFrames.removeAll()
             self.monitorPreviewRequested = false
             self.applyTorch(false)
@@ -352,6 +355,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private func beginNewRun(startingAtLayer: Int) {
         pendingRequests.removeAll()
         currentRequest = nil
+        captureFrameWaitDeadline = nil
         bufferedFrames.removeAll()
         lastAcceptedSignature = nil
         lastAcceptedMeanLuma = 0
@@ -440,6 +444,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         }
         pendingRequests.removeFirst()
         currentRequest = request
+        captureFrameWaitDeadline = Date().addingTimeInterval(cameraWarmupTimeout)
         startSessionIfNeeded()
         publishOnMain {
             self.isCapturing = true
@@ -454,8 +459,20 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             }
         }
 
+        captureCurrentRequestWhenReady()
+    }
+
+    private func captureCurrentRequestWhenReady() {
+        guard isArmed, let request = currentRequest else { return }
         guard let selectedFrame = selectBestBufferedFrame() else {
-            finishCurrentCapture(success: false)
+            if Date() < (captureFrameWaitDeadline ?? .distantPast) {
+                publishStatus("Lớp \(request.layer) • camera đang lấy khung hình")
+                sessionQueue.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                    self?.captureCurrentRequestWhenReady()
+                }
+            } else {
+                finishCurrentCapture(success: false)
+            }
             return
         }
         frameProcessingQueue.async { [weak self] in
@@ -632,6 +649,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         let finishedLayer = currentRequest?.layer ?? 0
         let storedFrameCount = capturedLayers.count
         currentRequest = nil
+        captureFrameWaitDeadline = nil
         publishOnMain {
             self.isCapturing = false
             if success {

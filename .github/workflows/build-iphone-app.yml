@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.32 build111 - loc dau in flash va zoom 1.5x
+name: Tao IPA SE v9.33 build112 - khoi phuc lenh chup sau reconnect
 
 on:
   workflow_dispatch:
@@ -112,7 +112,9 @@ jobs:
           grep -q "UIScreen.main.brightness = 0.0" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "9.0 / 16.0" "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'case "FAILED": return .stopping' "RedCameraTest/H2DTimelapseView.swift"
-          grep -q 'Bật camera xem trước' "RedCameraTest/H2DTimelapseView.swift"
+          grep -q 'Hiện hình xem trước' "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "desiredTimelapseArmed" "RedCameraTest/H2DBLEManager.swift"
+          grep -q "cameraWarmupTimeout" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q 'video.slash.fill' "RedCameraTest/H2DTimelapseView.swift"
           grep -q "Hồ sơ.*đã lưu" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "H2DTimelapseView" "RedCameraTest/ContentView.swift"
@@ -161,19 +163,19 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.32"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "111"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.33"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "112"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.32-build111-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.33-build112-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.32-build111-unsigned-ipa
-          path: SE-v9.32-build111-unsigned.ipa
+          name: SE-v9.33-build112-unsigned-ipa
+          path: SE-v9.33-build112-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -215,7 +217,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.9.2
+          name: SE-Bambu-ESP32-v1.9.3
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

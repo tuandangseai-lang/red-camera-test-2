@@ -194,6 +194,11 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private var configurationTimeoutWorkItem: DispatchWorkItem?
     private var mqttLossWorkItem: DispatchWorkItem?
     private var lifecycleActive = true
+    // The capture screen can be armed while CoreBluetooth is still restoring
+    // the ESP32 connection. Remember the user's intent and replay it as soon as
+    // the writable characteristic becomes available; otherwise the iPhone UI
+    // looks armed while the bridge silently suppresses every SNAP event.
+    private var desiredTimelapseArmed = false
 
     private struct ConfigurationCommand {
         let payload: String
@@ -263,10 +268,15 @@ final class H2DBLEManager: NSObject, ObservableObject {
     }
 
     func setH2DTimelapseArmed(_ armed: Bool) {
-        send(armed ? "H2D_ARM,1" : "H2D_ARM,0")
-        h2dBridgeStatus = armed
-            ? "Đã bật chụp theo lớp • đang chờ \(printerDisplayName)"
-            : "Đã dừng chụp theo lớp"
+        desiredTimelapseArmed = armed
+        let sent = send(armed ? "H2D_ARM,1" : "H2D_ARM,0")
+        if armed {
+            h2dBridgeStatus = sent
+                ? "Đã bật chụp theo lớp • đang chờ \(printerDisplayName)"
+                : "Đã bật chụp • chờ ESP32 nối lại để đồng bộ"
+        } else {
+            h2dBridgeStatus = "Đã dừng chụp theo lớp"
+        }
     }
 
     func requestH2DStatus() {
@@ -461,6 +471,15 @@ final class H2DBLEManager: NSObject, ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: item)
         }
         requestH2DStatus()
+        if desiredTimelapseArmed {
+            // Give notification subscription a moment to settle, then restore
+            // the bridge-side arm state that may have been lost on reconnect.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+                guard let self, self.isConnected, self.desiredTimelapseArmed else { return }
+                _ = self.send("H2D_ARM,1")
+                self.h2dBridgeStatus = "Đã đồng bộ lại chế độ chụp theo lớp"
+            }
+        }
     }
 
     private func parseEvent(_ event: String) {

@@ -401,7 +401,7 @@ struct H2DTimelapseView: View {
                     setupCameraEnabled.toggle()
                 } label: {
                     Label(
-                        setupCameraEnabled ? "Tắt camera" : "Bật camera",
+                        setupCameraEnabled ? "Ẩn hình căn khung" : "Hiện hình căn khung",
                         systemImage: setupCameraEnabled ? "video.slash.fill" : "video.fill"
                     )
                         .labelStyle(.iconOnly)
@@ -438,7 +438,7 @@ struct H2DTimelapseView: View {
                             VStack(spacing: 10) {
                                 Image(systemName: "video.slash.fill")
                                     .font(.system(size: 30, weight: .semibold))
-                                Text("Camera xem trước đang tắt")
+                                Text("Hình căn khung đang ẩn")
                                     .font(.custom("Arial", size: 12).weight(.semibold))
                             }
                             .foregroundStyle(.secondary)
@@ -454,7 +454,7 @@ struct H2DTimelapseView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 Spacer(minLength: 0)
             }
-            Text("Bạn có thể tắt camera khi không cần căn khung. Khi bật chờ chụp, camera vẫn tự hoạt động theo từng lớp.")
+            Text("Nút này chỉ ẩn hình căn khung. Khi bật chờ, camera vẫn tự chụp theo từng lớp.")
                 .font(.custom("Arial", size: 12))
                 .foregroundStyle(.secondary)
         }
@@ -795,8 +795,8 @@ struct H2DTimelapseView: View {
                     } label: {
                         Label(
                             timelapse.isLiveMonitorVisible
-                                ? "Tắt camera xem trước"
-                                : "Bật camera xem trước",
+                                ? "Ẩn hình xem trước"
+                                : "Hiện hình xem trước",
                             systemImage: timelapse.isLiveMonitorVisible
                                 ? "video.slash.fill"
                                 : "video.fill"
@@ -808,8 +808,8 @@ struct H2DTimelapseView: View {
                     .tint(timelapse.isLiveMonitorVisible ? .gray : .blue)
                     .accessibilityLabel(
                         timelapse.isLiveMonitorVisible
-                            ? "Tắt camera xem trước"
-                            : "Bật camera xem trước"
+                            ? "Ẩn hình xem trước"
+                            : "Hiện hình xem trước"
                     )
 
                     Button {

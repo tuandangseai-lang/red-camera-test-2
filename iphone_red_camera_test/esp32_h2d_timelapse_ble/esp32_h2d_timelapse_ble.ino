@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.9.2
+// SE Bambu Timelapse Bridge for classic ESP32 v1.9.3
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -339,11 +339,24 @@ bool savePendingSettings() {
 
 bool findKey(const uint8_t *payload, size_t length, const char *key,
              size_t start, size_t &valuePosition) {
-  String pattern = String('"') + key + '"';
-  const size_t patternLength = pattern.length();
+  if (payload == nullptr || key == nullptr) return false;
+  const size_t keyLength = strlen(key);
+  const size_t patternLength = keyLength + 2;
   if (length < patternLength || start >= length) return false;
-  for (size_t i = start; i + patternLength < length; ++i) {
-    if (memcmp(payload + i, pattern.c_str(), patternLength) != 0) continue;
+  // Do not allocate a temporary Arduino String for every search. With the
+  // 49-KB Bambu pushall packet and BLE active, those tiny repeated allocations
+  // could fragment the remaining heap and leave memcmp with an invalid pattern
+  // pointer, rebooting the bridge just as the phone entered capture mode.
+  for (size_t i = start; i <= length - patternLength; ++i) {
+    if (payload[i] != '"' || payload[i + keyLength + 1] != '"') continue;
+    bool matches = true;
+    for (size_t character = 0; character < keyLength; ++character) {
+      if (payload[i + character + 1] != static_cast<uint8_t>(key[character])) {
+        matches = false;
+        break;
+      }
+    }
+    if (!matches) continue;
     size_t cursor = i + patternLength;
     while (cursor < length && payload[cursor] != ':') ++cursor;
     if (cursor >= length) return false;
@@ -937,8 +950,12 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
   // only on the first real RUNNING packet, otherwise layer 1 is photographed
   // before it has actually finished.
   const bool stateRunning = printState == "RUNNING";
+  const bool layerAdvanced =
+      currentLayer > 0 && currentLayer > lastObservedLayer;
   const bool actualLayerPrinting =
-      stateRunning && (currentStage == 0 || currentStage == -1);
+      stateRunning &&
+      (currentStage == 0 || currentStage == -1 || layerAdvanced ||
+       (currentLayer > 0 && printPercent > 0));
   if (actualLayerPrinting) {
     if (!wasRunning || (jobToken != "0" && jobToken != activeJob)) {
       resetForNewPrint(jobToken, currentLayer);
@@ -1149,7 +1166,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.8.7");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.9.3");
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
   reportTelemetry(true);
@@ -1342,7 +1359,7 @@ void updateLedStrip() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.9.2");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.9.3");
   ledStrip.begin();
   ledStrip.setBrightness(Config::LED_BRIGHTNESS);
   ledStrip.clear();
