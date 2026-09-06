@@ -376,7 +376,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                 self.pendingRequests = [request]
             }
             if jobID != "TEST" {
-                self.publishStatus("Lớp \(layer) đã xong • chụp ngay tại vị trí Smooth")
+                self.publishStatus("Lớp \(layer) • chụp sớm 1 giây trước đổi lớp")
             }
             self.captureNextIfNeeded()
         }

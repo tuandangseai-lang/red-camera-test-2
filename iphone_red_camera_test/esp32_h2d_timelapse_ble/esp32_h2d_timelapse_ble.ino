@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.8.6
+// SE Bambu Timelapse Bridge for classic ESP32 v1.8.7
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -36,6 +36,9 @@ constexpr uint32_t PRINT_DATA_STALE_MS = 10000;
 constexpr uint32_t DATA_TIMEOUT_MS = 45000;
 constexpr uint8_t MATERIAL_SYNC_RETRY_LIMIT = 5;
 constexpr uint8_t NOZZLE_SYNC_RETRY_LIMIT = 8;
+constexpr uint32_t SNAP_LEAD_MS = 1000;
+constexpr uint32_t MIN_PREDICTABLE_LAYER_MS = 2500;
+constexpr uint32_t MAX_PREDICTABLE_LAYER_MS = 10UL * 60UL * 1000UL;
 constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
@@ -115,6 +118,8 @@ int printPercent = 0;
 int currentStage = -1;
 int lastObservedLayer = 0;
 int lastSnapLayer = 0;
+uint32_t layerStartedAt = 0;
+uint32_t predictedLayerDurationMs = 0;
 uint32_t lastWifiAttemptAt = 0;
 uint32_t lastMqttAttemptAt = 0;
 uint32_t lastStatusNotifyAt = 0;
@@ -256,6 +261,8 @@ void resetPrinterRuntimeForProfileSwitch() {
   currentStage = -1;
   lastObservedLayer = 0;
   lastSnapLayer = 0;
+  layerStartedAt = 0;
+  predictedLayerDurationMs = 0;
   lastStatusNotifyAt = 0;
   lastPrintDataAt = 0;
   nozzleSyncRequests = 0;
@@ -870,6 +877,37 @@ void sendSnapshot(int layer) {
   Serial.printf("[SNAP] completed layer %d/%d\n", layer, totalLayers);
 }
 
+void learnLayerDuration(uint32_t durationMs) {
+  if (durationMs < Config::MIN_PREDICTABLE_LAYER_MS ||
+      durationMs > Config::MAX_PREDICTABLE_LAYER_MS) {
+    return;
+  }
+  // Favor the newest real layer because wall thickness and cross-section can
+  // change quickly. Retaining 25% of the previous estimate filters MQTT jitter
+  // without needing several late frames before the prediction catches up.
+  predictedLayerDurationMs = predictedLayerDurationMs == 0
+      ? durationMs
+      : (predictedLayerDurationMs + durationMs * 3U) / 4U;
+  Serial.printf("[SNAP] learned layer duration %lu ms\n",
+                static_cast<unsigned long>(predictedLayerDurationMs));
+}
+
+void maybeSendEarlySnapshot() {
+  if (!timelapseArmed || !printWasRunning || printState != "RUNNING" ||
+      (currentStage != 0 && currentStage != -1) || currentLayer <= 0 ||
+      currentLayer <= lastSnapLayer || layerStartedAt == 0 ||
+      predictedLayerDurationMs <= Config::SNAP_LEAD_MS) {
+    return;
+  }
+  const uint32_t captureAfterMs =
+      predictedLayerDurationMs - Config::SNAP_LEAD_MS;
+  if (millis() - layerStartedAt < captureAfterMs) return;
+  Serial.printf("[SNAP] predictive capture layer %d, lead=%lu ms\n",
+                currentLayer,
+                static_cast<unsigned long>(Config::SNAP_LEAD_MS));
+  sendSnapshot(currentLayer);
+}
+
 void resetForNewPrint(const String &job, int layer) {
   activeJob = job;
   currentLayer = max(0, layer);
@@ -878,6 +916,8 @@ void resetForNewPrint(const String &job, int layer) {
   // replay layers 1...N to the iPhone. The current layer becomes eligible
   // only when the printer advances to the next one.
   lastSnapLayer = max(0, currentLayer - 1);
+  layerStartedAt = millis();
+  predictedLayerDurationMs = 0;
   finishSent = false;
   printWasRunning = true;
   Serial.printf("[PRINT] new job %s, starting observation at layer %d\n",
@@ -908,17 +948,19 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
     if (!wasRunning || (jobToken != "0" && jobToken != activeJob)) {
       resetForNewPrint(jobToken, currentLayer);
     } else if (currentLayer > lastObservedLayer) {
+      const uint32_t now = millis();
+      if (layerStartedAt != 0) learnLayerDuration(now - layerStartedAt);
       // When H2D announces layer N, layer N-1 has completed. This avoids taking
-      // a picture while the reported layer is still being printed. If a
-      // report jumps over more than one layer, queue each missing completed
-      // layer instead of silently turning the timelapse into a timer-like
-      // sequence.
+      // a picture while the reported layer is still being printed. Normally
+      // the predictive path already photographed it one second earlier; this
+      // transition path is the fallback when a layer was too short to predict.
       const int lastCompletedLayer = currentLayer - 1;
       for (int completedLayer = max(1, lastSnapLayer + 1);
            completedLayer <= lastCompletedLayer; ++completedLayer) {
         sendSnapshot(completedLayer);
       }
       lastObservedLayer = currentLayer;
+      layerStartedAt = now;
     }
     printWasRunning = true;
   }
@@ -1112,7 +1154,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.8.6");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.8.7");
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
   reportTelemetry(true);
@@ -1176,7 +1218,10 @@ void handlePhoneCommand(String command) {
       lastObservedLayer = currentLayer;
       // Resume from the layer currently being printed. On the next transition
       // only that just-finished layer is emitted; old layers are never filled.
-      lastSnapLayer = max(0, currentLayer - 1);
+      lastSnapLayer = max(lastSnapLayer, max(0, currentLayer - 1));
+      // Keep the live layer clock learned while the phone was away. If this
+      // layer reaches its predicted keyframe after reconnect, only the current
+      // layer is captured; completed layers are never replayed.
       finishSent = false;
       reportStatus("ARMED");
     } else {
@@ -1296,7 +1341,7 @@ void updateLedStrip() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.6");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.7");
   ledStrip.begin();
   ledStrip.setBrightness(Config::LED_BRIGHTNESS);
   ledStrip.clear();
@@ -1327,6 +1372,7 @@ void loop() {
   maintainWiFi();
   maintainMqtt();
   if (mqtt.connected()) mqtt.loop();
+  maybeSendEarlySnapshot();
   reportPrintStatus(false);
   reportTelemetry(false);
   flushPhoneEvents();
