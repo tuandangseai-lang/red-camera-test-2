@@ -61,6 +61,11 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private var pendingRequests: [CaptureRequest] = []
     private var currentRequest: CaptureRequest?
     private var bufferedFrames: [BufferedFrame] = []
+    // The last photo that was actually accepted is a much stronger clean-scene
+    // reference than brightness alone. Consecutive printed layers change only
+    // slightly, while a toolhead crossing the frame changes a large region.
+    private var lastAcceptedSignature: [UInt8]?
+    private var lastAcceptedMeanLuma = 0.0
     private var capturedLayers = Set<Int>()
     private var sessionDirectory: URL?
     private var finishRequested = false
@@ -220,6 +225,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             guard let self else { return }
             self.captureRotationAngle = self.captureRotationAngle == 270 ? 90 : 270
             self.bufferedFrames.removeAll()
+            self.lastAcceptedSignature = nil
+            self.lastAcceptedMeanLuma = 0
             if let connection = self.videoOutput.connection(with: .video),
                connection.isVideoRotationAngleSupported(self.captureRotationAngle) {
                 connection.videoRotationAngle = self.captureRotationAngle
@@ -326,6 +333,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         pendingRequests.removeAll()
         currentRequest = nil
         bufferedFrames.removeAll()
+        lastAcceptedSignature = nil
+        lastAcceptedMeanLuma = 0
         capturedLayers.removeAll()
         monitorPreviewRequested = false
         capturedFrameCount = 0
@@ -447,6 +456,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                         options: .atomic
                     )
                     self.capturedLayers.insert(request.layer)
+                    self.lastAcceptedSignature = selectedFrame.lumaSignature
+                    self.lastAcceptedMeanLuma = selectedFrame.meanLuma
                     let preview = self.makePreview(from: data, layer: request.layer)
                     self.finishCurrentCapture(success: true, preview: preview)
                 } catch {
@@ -488,6 +499,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                 brightestMean: brightestMean,
                 brightestCenterMean: brightestCenterMean,
                 leastCenterDarkRatio: leastCenterDarkRatio,
+                previousAcceptedSignature: lastAcceptedSignature,
+                previousAcceptedMeanLuma: lastAcceptedMeanLuma,
                 newestTimestamp: newest.timestamp
             ) < selectionScore(
                 right,
@@ -495,6 +508,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                 brightestMean: brightestMean,
                 brightestCenterMean: brightestCenterMean,
                 leastCenterDarkRatio: leastCenterDarkRatio,
+                previousAcceptedSignature: lastAcceptedSignature,
+                previousAcceptedMeanLuma: lastAcceptedMeanLuma,
                 newestTimestamp: newest.timestamp
             )
         }
@@ -506,6 +521,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         brightestMean: Double,
         brightestCenterMean: Double,
         leastCenterDarkRatio: Double,
+        previousAcceptedSignature: [UInt8]?,
+        previousAcceptedMeanLuma: Double,
         newestTimestamp: CMTime
     ) -> Double {
         let count = min(frame.lumaSignature.count, medianSignature.count)
@@ -525,13 +542,61 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         let centerDarkPenalty =
             max(0, frame.centerDarkRatio - leastCenterDarkRatio) * 180.0
         let wholeFramePenalty = max(0, brightestMean - frame.meanLuma) * 0.8
+        let referencePenalty: Double
+        if let previousAcceptedSignature {
+            referencePenalty = normalizedReferenceDifference(
+                frame,
+                reference: previousAcceptedSignature,
+                referenceMeanLuma: previousAcceptedMeanLuma
+            )
+        } else {
+            referencePenalty = 0
+        }
         // Prefer the older part of the one-second window after obstruction is
         // rejected. Similarity is deliberately secondary because a toolhead
         // parked in several consecutive frames can otherwise become median.
         let age = max(0, CMTimeGetSeconds(newestTimestamp - frame.timestamp))
         let timingPenalty = abs(age - 0.75) * 0.9
-        return averageDifference * 0.2 + centerBrightnessPenalty +
-            centerDarkPenalty + wholeFramePenalty + timingPenalty
+        return averageDifference * 0.2 + referencePenalty * 2.4 +
+            centerBrightnessPenalty + centerDarkPenalty + wholeFramePenalty +
+            timingPenalty
+    }
+
+    private func normalizedReferenceDifference(
+        _ frame: BufferedFrame,
+        reference: [UInt8],
+        referenceMeanLuma: Double
+    ) -> Double {
+        let gridSize = 48
+        let count = min(frame.lumaSignature.count, reference.count)
+        guard count >= gridSize * gridSize else { return 0 }
+
+        // Remove a uniform exposure change first. The remaining difference is
+        // physical scene change: most importantly the moving H2D toolhead.
+        let exposureShift = frame.meanLuma - referenceMeanLuma
+        let centerMargin = 8
+        var wholeDifference = 0.0
+        var centerDifference = 0.0
+        var centerCount = 0
+        for index in 0..<count {
+            let difference = abs(
+                Double(frame.lumaSignature[index]) -
+                    (Double(reference[index]) + exposureShift)
+            )
+            wholeDifference += difference
+            let row = index / gridSize
+            let column = index % gridSize
+            if row >= centerMargin, row < gridSize - centerMargin,
+               column >= centerMargin, column < gridSize - centerMargin {
+                centerDifference += difference
+                centerCount += 1
+            }
+        }
+        let wholeMean = wholeDifference / Double(count)
+        let centerMean = centerCount > 0
+            ? centerDifference / Double(centerCount)
+            : wholeMean
+        return wholeMean * 0.8 + centerMean * 1.2
     }
 
     private func makeJPEGData(from pixelBuffer: CVPixelBuffer) -> Data? {

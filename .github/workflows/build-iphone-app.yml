@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.30 build109 - giu tien trinh LED va toi man hinh
+name: Tao IPA SE v9.31 build110 - loc dau in bang khung sach truoc
 
 on:
   workflow_dispatch:
@@ -73,6 +73,8 @@ jobs:
           grep -q "AVCaptureVideoDataOutput" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "copyPixelBuffer" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "centerDarkRatio" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "lastAcceptedSignature" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "normalizedReferenceDifference" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "isStoppingPrint" "RedCameraTest/H2DBLEManager.swift"
           grep -q "isPausedPrint" "RedCameraTest/H2DBLEManager.swift"
           grep -q "h2dRemainingMinutes" "RedCameraTest/H2DBLEManager.swift"
@@ -156,19 +158,19 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.30"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "109"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.31"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "110"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.30-build109-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.31-build110-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.30-build109-unsigned-ipa
-          path: SE-v9.30-build109-unsigned.ipa
+          name: SE-v9.31-build110-unsigned-ipa
+          path: SE-v9.31-build110-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
