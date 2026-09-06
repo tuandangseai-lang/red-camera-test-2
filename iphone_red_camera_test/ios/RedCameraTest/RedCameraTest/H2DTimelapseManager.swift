@@ -21,6 +21,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     @Published private(set) var isRendering = false
     @Published private(set) var isStopping = false
     @Published private(set) var isLiveMonitorVisible = false
+    @Published private(set) var canUseTorch = false
+    @Published private(set) var isTorchEnabled = false
     // The preview is always portrait when the iPhone is mounted vertically.
     // Capture output keeps its own angle because the sensor image was mounted
     // upside down in the previous bracket.
@@ -56,6 +58,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private let renderQueue = DispatchQueue(label: "vn.se.h2d.render", qos: .userInitiated)
     private let videoOutput = AVCaptureVideoDataOutput()
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
+    private var captureDevice: AVCaptureDevice?
     private var configured = false
     private var preparing = false
     private var pendingRequests: [CaptureRequest] = []
@@ -126,6 +129,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.currentRequest = nil
             self.bufferedFrames.removeAll()
             self.monitorPreviewRequested = false
+            self.applyTorch(false)
             if self.previewSession.isRunning { self.previewSession.stopRunning() }
             let directory = self.sessionDirectory
             self.sessionDirectory = nil
@@ -187,6 +191,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             DispatchQueue.main.async { [weak self] in self?.restoreDisplay() }
             sessionQueue.async { [weak self] in
                 guard let self, self.previewSession.isRunning else { return }
+                self.applyTorch(false)
                 self.previewSession.stopRunning()
                 self.publishOnMain { self.isPreviewRunning = false }
             }
@@ -220,6 +225,13 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         }
     }
 
+    func setTorchEnabled(_ enabled: Bool) {
+        sessionQueue.async { [weak self] in
+            guard let self, self.isArmed, !self.isRendering else { return }
+            self.applyTorch(enabled)
+        }
+    }
+
     func rotateCamera180() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -242,6 +254,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.finishRequested = true
             self.pendingRequests.removeAll()
             self.monitorPreviewRequested = false
+            self.applyTorch(false)
             self.publishOnMain {
                 self.isStopping = true
                 self.isLiveMonitorVisible = false
@@ -292,6 +305,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         }
 
         previewSession.addInput(input)
+        captureDevice = camera
         videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String:
@@ -315,7 +329,12 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             if camera.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
                 camera.whiteBalanceMode = .continuousAutoWhiteBalance
             }
-            camera.videoZoomFactor = 1.0
+            // The wide camera is too loose for a fixed printer shot. Start at
+            // 1.5x while clamping to the active lens' supported range.
+            camera.videoZoomFactor = min(
+                max(1.5, camera.minAvailableVideoZoomFactor),
+                camera.maxAvailableVideoZoomFactor
+            )
             camera.isSubjectAreaChangeMonitoringEnabled = false
             camera.unlockForConfiguration()
         } catch {
@@ -325,6 +344,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         configured = true
         DispatchQueue.main.async {
             self.isCameraReady = true
+            self.canUseTorch = camera.hasTorch
             self.statusText = "Camera đã sẵn sàng • căn khung hình rồi bật chờ máy in"
         }
     }
@@ -660,6 +680,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
               !isRendering else { return }
         finishRequested = false
         monitorPreviewRequested = false
+        applyTorch(false)
         if previewSession.isRunning { previewSession.stopRunning() }
         guard let directory = sessionDirectory, !capturedLayers.isEmpty else {
             let emptyDirectory = sessionDirectory
@@ -905,6 +926,35 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         publishOnMain {
             self.isPreviewRunning = running
             if !running { self.statusText = "Camera chưa phát hình • đang thử mở lại" }
+        }
+    }
+
+    private func applyTorch(_ enabled: Bool) {
+        guard let camera = captureDevice, camera.hasTorch else {
+            publishOnMain {
+                self.canUseTorch = false
+                self.isTorchEnabled = false
+            }
+            return
+        }
+        do {
+            try camera.lockForConfiguration()
+            defer { camera.unlockForConfiguration() }
+            if enabled && camera.isTorchAvailable {
+                try camera.setTorchModeOn(level: min(0.65, AVCaptureDevice.maxAvailableTorchLevel))
+            } else {
+                camera.torchMode = .off
+            }
+            let active = camera.torchMode == .on
+            publishOnMain {
+                self.canUseTorch = camera.isTorchAvailable || active
+                self.isTorchEnabled = active
+            }
+        } catch {
+            publishOnMain {
+                self.isTorchEnabled = false
+                self.statusText = "Không bật được đèn flash của iPhone"
+            }
         }
     }
 

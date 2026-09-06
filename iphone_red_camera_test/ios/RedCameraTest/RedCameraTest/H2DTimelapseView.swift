@@ -812,6 +812,26 @@ struct H2DTimelapseView: View {
                             : "Bật camera xem trước"
                     )
 
+                    Button {
+                        timelapse.setTorchEnabled(!timelapse.isTorchEnabled)
+                    } label: {
+                        Label(
+                            timelapse.isTorchEnabled ? "Tắt đèn flash" : "Bật đèn flash",
+                            systemImage: timelapse.isTorchEnabled
+                                ? "bolt.fill"
+                                : "bolt.slash.fill"
+                        )
+                            .labelStyle(.iconOnly)
+                            .frame(width: 44, height: 32)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(timelapse.isTorchEnabled ? .yellow : .gray)
+                    .disabled(!timelapse.canUseTorch)
+                    .opacity(timelapse.canUseTorch ? 1 : 0.42)
+                    .accessibilityLabel(
+                        timelapse.isTorchEnabled ? "Tắt đèn flash" : "Bật đèn flash"
+                    )
+
                     Button(role: .destructive) {
                         showStopOptions = true
                     } label: {
