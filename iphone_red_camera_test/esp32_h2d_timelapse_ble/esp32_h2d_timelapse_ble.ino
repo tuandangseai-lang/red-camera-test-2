@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.8.7
+// SE Bambu Timelapse Bridge for classic ESP32 v1.8.8
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -446,7 +446,9 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
                                     bool &foundPackedNozzles) {
   // H2D reports both hotends in print.extruder.info[]. Each packed `temp`
   // stores target temperature in the high 16 bits and actual temperature in
-  // the low 16 bits. Extruder id 0 is right, id 1 is left.
+  // the low 16 bits. On the H2D LAN payload, extruder id 0 is the left
+  // hotend and id 1 is the right hotend (the same L/R order shown by Bambu
+  // Studio). Keep that physical mapping here before sending telemetry.
   foundPackedNozzles = false;
   size_t extruderStart = 0;
   size_t extruderEnd = 0;
@@ -505,9 +507,9 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
       foundPackedNozzles = true;
       const int actual = static_cast<int>(packed & 0xFFFFU);
       const int target = static_cast<int>((packed >> 16U) & 0xFFFFU);
-      int &storedActual = id == 0 ? nozzleTemperature : leftNozzleTemperature;
-      int &storedTarget = id == 0 ? nozzleTargetTemperature
-                                  : leftNozzleTargetTemperature;
+      int &storedActual = id == 0 ? leftNozzleTemperature : nozzleTemperature;
+      int &storedTarget = id == 0 ? leftNozzleTargetTemperature
+                                  : nozzleTargetTemperature;
       if (actual != storedActual || target != storedTarget) {
         storedActual = actual;
         storedTarget = target;
@@ -809,6 +811,27 @@ void updateActiveMaterial(const uint8_t *payload, size_t length) {
                 activeFilamentSlot);
 }
 
+bool isExplicitlyStoppedState() {
+  return printState == "STOP" || printState == "STOPPED" ||
+         printState == "CANCELED" || printState == "CANCELLED";
+}
+
+bool hasCriticalPrinterError() {
+  // Bambu can publish FAILED when the operator deliberately cancels a job.
+  // A bare FAILED state is therefore not an alarm: require a real non-zero
+  // print_error. ERROR remains critical by itself. Explicit stop/cancel wins
+  // even if an older incremental packet left a stale error code in memory.
+  if (isExplicitlyStoppedState()) return false;
+  if (printState == "ERROR") return true;
+  const bool activeOrFailed =
+      printState == "RUNNING" || printState == "PREPARE" ||
+      printState == "PREPARING" || printState == "PAUSE" ||
+      printState == "PAUSED" || printState == "SLICING" ||
+      printState == "INIT" || printState == "HEATING" ||
+      printState == "FAILED";
+  return activeOrFailed && printErrorActive;
+}
+
 void reportPrinterAlert(bool force = false) {
   // H2D keeps acknowledged/old HMS entries in some full-state packets even
   // while the printer is idle. Only surface them during a real print session;
@@ -818,9 +841,10 @@ void reportPrinterAlert(bool force = false) {
       printState == "PREPARING" || printState == "PAUSE" ||
       printState == "PAUSED" || printState == "SLICING" ||
       printState == "INIT" || printState == "HEATING";
-  const bool failedState = printState == "FAILED" || printState == "ERROR";
-  const bool critical = failedState || (printContext && printErrorActive);
-  const bool active = critical || (printContext && hmsAlertActive);
+  const bool critical = hasCriticalPrinterError();
+  const bool active = critical ||
+                      (!isExplicitlyStoppedState() && printContext &&
+                       hmsAlertActive);
   if (!force && active == lastReportedPrinterAlert &&
       critical == lastReportedPrinterAlertCritical &&
       printErrorCode == lastReportedPrintErrorCode) {
@@ -838,7 +862,8 @@ void reportPrinterAlert(bool force = false) {
     } else {
       // HMS can contain an acknowledged advisory (for example a lens-cleaning
       // reminder) while H2D is legitimately cleaning the nozzle. Report it as
-      // secondary information; only print_error/FAILED may turn the Island red.
+      // secondary information; only a real print_error/ERROR may turn the
+      // Island red. A user-cancelled job stays silent.
       queuePhoneEvent(String("H2D,ALERT,1,WARN,") +
                       printerModelFromSerial(settings.printerSerial) +
                       " có lưu ý HMS • xem màn hình máy in");
@@ -1303,8 +1328,7 @@ void updateLedStrip() {
   lastLedRefreshAt = now;
   ledStrip.clear();
 
-  const bool criticalError = printErrorActive || printState == "FAILED" ||
-                             printState == "ERROR";
+  const bool criticalError = hasCriticalPrinterError();
   if (criticalError) {
     fillLedStrip(ledStrip.Color(255, 0, 0));
   } else if (static_cast<int32_t>(captureFlashUntil - now) > 0) {
@@ -1341,7 +1365,7 @@ void updateLedStrip() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.7");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.8.8");
   ledStrip.begin();
   ledStrip.setBrightness(Config::LED_BRIGHTNESS);
   ledStrip.clear();

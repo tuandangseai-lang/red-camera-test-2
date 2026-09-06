@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.24 build103 - chup som 1 giay truoc doi layer
+name: Tao IPA SE v9.25 build104 - sua dau phun va nut camera
 
 on:
   workflow_dispatch:
@@ -95,6 +95,8 @@ jobs:
           grep -q "ClockwiseScreenBorderShape" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "9.0 / 16.0" "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'case "FAILED", "ERROR": return .idle' "RedCameraTest/H2DTimelapseView.swift"
+          grep -q 'Bật camera xem trước' "RedCameraTest/H2DTimelapseView.swift"
+          grep -q 'video.slash.fill' "RedCameraTest/H2DTimelapseView.swift"
           grep -q "Hồ sơ.*đã lưu" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "H2DTimelapseView" "RedCameraTest/ContentView.swift"
           ! grep -q "CameraController.swift" project.yml
@@ -142,19 +144,19 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.24"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "103"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.25"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "104"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.24-build103-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.25-build104-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.24-build103-unsigned-ipa
-          path: SE-v9.24-build103-unsigned.ipa
+          name: SE-v9.25-build104-unsigned-ipa
+          path: SE-v9.25-build104-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -183,6 +185,8 @@ jobs:
       - name: Bien dich firmware cau noi H2D
         run: |
           set -euo pipefail
+          grep -q 'id == 0 ? leftNozzleTemperature : nozzleTemperature' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'hasCriticalPrinterError' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           mkdir -p "$RUNNER_TEMP/SE-Bambu-ESP32"
           arduino-cli compile \
             --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
@@ -192,7 +196,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.8.7
+          name: SE-Bambu-ESP32-v1.8.8
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

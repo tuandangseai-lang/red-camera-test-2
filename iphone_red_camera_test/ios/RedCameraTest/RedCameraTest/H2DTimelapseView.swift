@@ -767,12 +767,23 @@ struct H2DTimelapseView: View {
                         timelapse.setLiveMonitorVisible(!timelapse.isLiveMonitorVisible)
                     } label: {
                         Label(
-                            timelapse.isLiveMonitorVisible ? "Tắt hình" : "Xem hình",
-                            systemImage: timelapse.isLiveMonitorVisible ? "eye.slash" : "eye"
+                            timelapse.isLiveMonitorVisible
+                                ? "Tắt camera xem trước"
+                                : "Bật camera xem trước",
+                            systemImage: timelapse.isLiveMonitorVisible
+                                ? "video.slash.fill"
+                                : "video.fill"
                         )
-                            .frame(maxWidth: .infinity)
+                            .labelStyle(.iconOnly)
+                            .frame(width: 44, height: 32)
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.borderedProminent)
+                    .tint(timelapse.isLiveMonitorVisible ? .gray : .blue)
+                    .accessibilityLabel(
+                        timelapse.isLiveMonitorVisible
+                            ? "Tắt camera xem trước"
+                            : "Bật camera xem trước"
+                    )
 
                     Button(role: .destructive) {
                         showStopOptions = true
