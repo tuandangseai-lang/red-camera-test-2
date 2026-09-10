@@ -36,6 +36,43 @@ struct H2DTimelapseView: View {
     private var printerName: String { detectedPrinterKind.rawValue }
 
     var body: some View {
+        observedContent
+            .onChange(of: bluetooth.hardwareControlRevision) { _, _ in
+                applyHardwareControls()
+            }
+            .onChange(of: timelapse.isRendering) { _, rendering in
+                if !rendering { applyHardwareControls(force: true) }
+            }
+            .alert("\(printerName) đang có lỗi", isPresented: $showCriticalPrinterAlarm) {
+                Button("OK") {
+                    acknowledgedAlarmID = currentAlarmID
+                    printerAlarm.stop()
+                }
+            } message: {
+                Text(bluetooth.printerAlertText.isEmpty
+                    ? "Hãy kiểm tra màn hình máy in. Âm báo sẽ tự tắt khi lỗi được xử lý."
+                    : bluetooth.printerAlertText)
+            }
+            .confirmationDialog(
+                "Bạn muốn xử lý các ảnh đã chụp thế nào?",
+                isPresented: $showStopOptions,
+                titleVisibility: .visible
+            ) {
+                Button("Ghép \(timelapse.capturedFrameCount) ảnh thành video") {
+                    bluetooth.setH2DTimelapseArmed(false)
+                    timelapse.finishEarlyAndRender()
+                }
+                Button("Bỏ toàn bộ ảnh", role: .destructive) {
+                    bluetooth.setH2DTimelapseArmed(false)
+                    timelapse.disarm(deleteFrames: true)
+                }
+                Button("Tiếp tục chụp", role: .cancel) {}
+            } message: {
+                Text("Dừng chụp không dừng máy in \(printerName).")
+            }
+    }
+
+    private var observedContent: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             if timelapse.isArmed || timelapse.isRendering {
@@ -150,12 +187,6 @@ struct H2DTimelapseView: View {
             }
             if bluetooth.isH2DReady { applyHardwareControls(force: true) }
         }
-        .onChange(of: bluetooth.hardwareControlRevision) { _, _ in
-            applyHardwareControls()
-        }
-        .onChange(of: timelapse.isRendering) { _, rendering in
-            if !rendering { applyHardwareControls(force: true) }
-        }
         .onChange(of: bluetooth.isH2DBridge) { _, recognized in
             if recognized {
                 reconcileBridgeWithSelectedProfile()
@@ -185,33 +216,6 @@ struct H2DTimelapseView: View {
         }
         .onChange(of: bluetooth.printerAlertText) { _, _ in
             synchronizePrinterAlarm()
-        }
-        .alert("\(printerName) đang có lỗi", isPresented: $showCriticalPrinterAlarm) {
-            Button("OK") {
-                acknowledgedAlarmID = currentAlarmID
-                printerAlarm.stop()
-            }
-        } message: {
-            Text(bluetooth.printerAlertText.isEmpty
-                ? "Hãy kiểm tra màn hình máy in. Âm báo sẽ tự tắt khi lỗi được xử lý."
-                : bluetooth.printerAlertText)
-        }
-        .confirmationDialog(
-            "Bạn muốn xử lý các ảnh đã chụp thế nào?",
-            isPresented: $showStopOptions,
-            titleVisibility: .visible
-        ) {
-            Button("Ghép \(timelapse.capturedFrameCount) ảnh thành video") {
-                bluetooth.setH2DTimelapseArmed(false)
-                timelapse.finishEarlyAndRender()
-            }
-            Button("Bỏ toàn bộ ảnh", role: .destructive) {
-                bluetooth.setH2DTimelapseArmed(false)
-                timelapse.disarm(deleteFrames: true)
-            }
-            Button("Tiếp tục chụp", role: .cancel) {}
-        } message: {
-            Text("Dừng chụp không dừng máy in \(printerName).")
         }
     }
 
