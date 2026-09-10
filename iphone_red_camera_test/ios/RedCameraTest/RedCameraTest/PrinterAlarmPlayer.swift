@@ -1,11 +1,21 @@
 import AVFoundation
 import Combine
+import Foundation
 
 final class PrinterAlarmPlayer: ObservableObject {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let gain = AVAudioUnitEQ(numberOfBands: 0)
     private var graphIsReady = false
+    private var requestedLevel: Float = 0.7
+
+    func setLevel(_ normalizedLevel: Double) {
+        let clamped = Float(min(1, max(0, normalizedLevel)))
+        requestedLevel = clamped
+        // A gentle logarithmic curve gives the potentiometer useful travel at
+        // low volume while preserving the previous 3x maximum alarm gain.
+        player.volume = powf(clamped, 1.45)
+    }
 
     func startLooping() {
         if player.isPlaying { return }
@@ -35,7 +45,7 @@ final class PrinterAlarmPlayer: ObservableObject {
             // +9.54 dB is a 3x signal gain. The system output mixer applies
             // the final hardware limit while keeping the alarm at full volume.
             gain.globalGain = 9.54
-            player.volume = 1
+            player.volume = powf(requestedLevel, 1.45)
             player.scheduleBuffer(buffer, at: nil, options: [.loops])
             engine.prepare()
             if !engine.isRunning { try engine.start() }

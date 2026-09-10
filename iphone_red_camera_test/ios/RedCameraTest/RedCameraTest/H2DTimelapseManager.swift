@@ -85,6 +85,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private let bufferedFrameInterval: TimeInterval = 0.15
     private let cameraWarmupTimeout: TimeInterval = 1.8
     private var captureFrameWaitDeadline: Date?
+    private var hardwareTorchGeneration = 0
 
     func preparePreview() {
         requestCameraPermission { [weak self] granted in
@@ -133,6 +134,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.captureFrameWaitDeadline = nil
             self.bufferedFrames.removeAll()
             self.monitorPreviewRequested = false
+            self.hardwareTorchGeneration &+= 1
             self.applyTorch(false)
             if self.previewSession.isRunning { self.previewSession.stopRunning() }
             let directory = self.sessionDirectory
@@ -195,6 +197,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             DispatchQueue.main.async { [weak self] in self?.restoreDisplay() }
             sessionQueue.async { [weak self] in
                 guard let self, self.previewSession.isRunning else { return }
+                self.hardwareTorchGeneration &+= 1
                 self.applyTorch(false)
                 self.previewSession.stopRunning()
                 self.publishOnMain { self.isPreviewRunning = false }
@@ -232,7 +235,46 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     func setTorchEnabled(_ enabled: Bool) {
         sessionQueue.async { [weak self] in
             guard let self, self.isArmed, !self.isRendering else { return }
+            self.hardwareTorchGeneration &+= 1
             self.applyTorch(enabled)
+        }
+    }
+
+    /// Applies the physical controls connected to the ESP32. A held button
+    /// alternates the iPhone torch like a film projector; the left rotary
+    /// position requests a steady torch even outside an armed timelapse.
+    func setHardwareTorch(steady: Bool, blinking: Bool, keepCameraWarm: Bool) {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.hardwareTorchGeneration &+= 1
+            let generation = self.hardwareTorchGeneration
+
+            guard steady || blinking else {
+                self.applyTorch(false)
+                if !keepCameraWarm && !self.isArmed && self.previewSession.isRunning {
+                    self.previewSession.stopRunning()
+                    self.publishOnMain { self.isPreviewRunning = false }
+                }
+                return
+            }
+
+            self.requestCameraPermission { [weak self] granted in
+                guard let self else { return }
+                self.sessionQueue.async {
+                    guard generation == self.hardwareTorchGeneration else { return }
+                    guard granted else {
+                        self.publishStatus("Hãy cấp quyền Camera để công tắc điều khiển đèn flash")
+                        return
+                    }
+                    self.configureIfNeeded()
+                    self.startSessionIfNeeded()
+                    if blinking {
+                        self.runHardwareTorchBlink(generation: generation, turnOn: true)
+                    } else {
+                        self.applyTorch(steady)
+                    }
+                }
+            }
         }
     }
 
@@ -258,6 +300,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.finishRequested = true
             self.pendingRequests.removeAll()
             self.monitorPreviewRequested = false
+            self.hardwareTorchGeneration &+= 1
             self.applyTorch(false)
             self.publishOnMain {
                 self.isStopping = true
@@ -783,6 +826,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
               !isRendering else { return }
         finishRequested = false
         monitorPreviewRequested = false
+        hardwareTorchGeneration &+= 1
         applyTorch(false)
         if previewSession.isRunning { previewSession.stopRunning() }
         guard let directory = sessionDirectory, !capturedLayers.isEmpty else {
@@ -1029,6 +1073,18 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         publishOnMain {
             self.isPreviewRunning = running
             if !running { self.statusText = "Camera chưa phát hình • đang thử mở lại" }
+        }
+    }
+
+    private func runHardwareTorchBlink(generation: Int, turnOn: Bool) {
+        guard generation == hardwareTorchGeneration, !isRendering else { return }
+        applyTorch(turnOn)
+        // Slightly asymmetric on/off timing resembles a moving film shutter
+        // and remains responsive when the physical button is released.
+        let delay = turnOn ? 0.11 : 0.08
+        sessionQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, generation == self.hardwareTorchGeneration else { return }
+            self.runHardwareTorchBlink(generation: generation, turnOn: !turnOn)
         }
     }
 

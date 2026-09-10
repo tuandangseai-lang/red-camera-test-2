@@ -21,8 +21,25 @@ Mở file:
 `esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino`
 
 Chọn board **ESP32 Dev Module**, đặt **Partition Scheme = Huge APP (3MB No
-OTA/1MB SPIFFS)**, cài thư viện **PubSubClient**, sau đó nạp qua USB. Firmware
-dùng LED trạng thái ở GPIO 25 và không sử dụng servo.
+OTA/1MB SPIFFS)**, cài các thư viện **PubSubClient**, **NimBLE-Arduino 2.5.1**
+và **Adafruit NeoPixel**, sau đó nạp qua USB. Firmware không sử dụng servo.
+
+## Đấu cụm điều khiển vật lý
+
+- WS2812B: DIN vào **GPIO5** qua điện trở 330 ohm; dùng đúng 5 LED. Cấp 5V
+  riêng cho dải LED và nối chung GND với ESP32.
+- Nút nhấn giữ: một chân vào **GPIO27**, chân còn lại vào GND.
+- Công tắc xoay 3 nấc: chân chung vào GND; tiếp điểm bên phải vào **GPIO25**,
+  tiếp điểm bên trái vào **GPIO26**. Nấc giữa không nối chân nào.
+- Biến trở: hai chân ngoài vào 3V3 và GND, chân giữa vào **GPIO34**. Nếu xoay
+  theo chiều tăng mà độ sáng lại giảm, đổi chéo hai chân ngoài của biến trở.
+
+Nấc giữa làm 5 LED thở vàng. Nấc phải chớp đỏ một lần rồi vào hiệu ứng trạng
+thái timelapse; tiến trình xanh tăng sáng mượt từng LED theo chiều từ LED số 0.
+Nấc trái bật đèn flash iPhone liên tục và giữ dải LED màu vàng. Giữ nút GPIO27
+để đèn flash iPhone nhấp nháy như cửa trập phim. Biến trở đồng thời điều chỉnh
+độ sáng dải WS2812B và âm lượng cảnh báo trên iPhone. Khi máy in có lỗi nghiêm
+trọng, 5 LED đỏ đập theo nhịp âm báo.
 
 Firmware v1.1 gửi xác nhận riêng cho từng trường cấu hình. Nếu Bluetooth hụt
 một gói, app tự gửi lại tối đa hai lần và báo rõ bước lỗi thay vì chờ vô hạn.
@@ -36,7 +53,7 @@ một gói, app tự gửi lại tối đa hai lần và báo rõ bước lỗi 
 5. Không khóa iPhone và giữ SE ở màn hình trước.
 6. Sau khi H2D báo hoàn tất, SE tự ghép ảnh theo số lớp và lưu video vào Ảnh.
 
-Camera iPhone chỉ chạy ngắn ở thời điểm chụp rồi ngủ lại, nên nhẹ và mát hơn
-việc quay video liên tục. Nếu cần đầu in đứng cùng một chỗ trong từng ảnh, bật
-chế độ timelapse **Smooth** trong Bambu Studio; đổi lại máy in sẽ có thêm chuyển
-động đỗ đầu in/prime tower theo thiết lập của Bambu.
+Camera iPhone được giữ sẵn trong phiên timelapse để không trễ khung hình. Nếu
+cần đầu in đứng cùng một chỗ trong từng ảnh, bật chế độ timelapse **Smooth**
+trong Bambu Studio; đổi lại máy in sẽ có thêm chuyển động đỗ đầu in/prime tower
+theo thiết lập của Bambu.

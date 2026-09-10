@@ -51,6 +51,11 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var auxiliaryFanPercent = -1
     @Published private(set) var exhaustFanPercent = -1
     @Published private(set) var isSwitchingPrinter = false
+    @Published private(set) var hardwareMode = 0
+    @Published private(set) var hardwareHoldActive = false
+    @Published private(set) var hardwareLevelPercent = 70
+    @Published private(set) var hardwareControlRevision = 0
+    @Published private(set) var hardwareLastControl = ""
 
     private var expectedPrinterSerial = ""
 
@@ -494,6 +499,24 @@ final class H2DBLEManager: NSObject, ObservableObject {
         switch fields[1].uppercased() {
         case "ESP32":
             hasBridgeError = false
+        case "CONTROL":
+            guard fields.count >= 4 else { return }
+            let control = fields[2].uppercased()
+            switch control {
+            case "MODE":
+                hardwareMode = min(1, max(-1, Int(fields[3]) ?? 0))
+            case "HOLD":
+                hardwareHoldActive = fields[3] == "1"
+            case "LEVEL":
+                hardwareLevelPercent = min(100, max(0, Int(fields[3]) ?? 70))
+            default:
+                return
+            }
+            hardwareLastControl = control
+            // A revision also delivers deliberate repeated switch commands;
+            // relying only on value changes could leave torch state stale after
+            // the app returns from the background.
+            hardwareControlRevision &+= 1
         case "PRINTER":
             guard fields.count >= 4 else { return }
             let reportedSerial = normalizeSerial(fields[3])

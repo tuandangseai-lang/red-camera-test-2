@@ -23,6 +23,7 @@ struct H2DTimelapseView: View {
     @State private var pendingProfileSwitch = false
     @State private var showCriticalPrinterAlarm = false
     @State private var acknowledgedAlarmID = ""
+    @State private var hardwareArmRequested = false
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -86,6 +87,7 @@ struct H2DTimelapseView: View {
                 }
             }
             bluetooth.requestH2DStatus()
+            applyHardwareControls(force: true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 reconcileBridgeWithSelectedProfile()
                 attemptAutomaticConfigurationIfNeeded()
@@ -94,6 +96,7 @@ struct H2DTimelapseView: View {
         }
         .onDisappear {
             timelapse.restoreDisplayWhenLeaving()
+            timelapse.setHardwareTorch(steady: false, blinking: false, keepCameraWarm: false)
             if !timelapse.isArmed { timelapse.stopPreview() }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -101,6 +104,7 @@ struct H2DTimelapseView: View {
         }
         .onChange(of: timelapse.isArmed) { _, armed in
             bluetooth.setH2DTimelapseArmed(armed)
+            if armed { hardwareArmRequested = false }
             if !armed {
                 // Let the capture screen disappear before starting the fairly
                 // expensive AVCapture session again. This removes the visible
@@ -112,6 +116,7 @@ struct H2DTimelapseView: View {
                     } else {
                         timelapse.stopPreview()
                     }
+                    applyHardwareControls(force: true)
                 }
             }
         }
@@ -143,6 +148,13 @@ struct H2DTimelapseView: View {
             } else {
                 attemptAutomaticConfigurationIfNeeded()
             }
+            if bluetooth.isH2DReady { applyHardwareControls(force: true) }
+        }
+        .onChange(of: bluetooth.hardwareControlRevision) { _, _ in
+            applyHardwareControls()
+        }
+        .onChange(of: timelapse.isRendering) { _, rendering in
+            if !rendering { applyHardwareControls(force: true) }
         }
         .onChange(of: bluetooth.isH2DBridge) { _, recognized in
             if recognized {
@@ -1043,6 +1055,48 @@ struct H2DTimelapseView: View {
         let detail = bluetooth.printerAlertText
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return "\(bluetooth.printerSerial)|\(detail.isEmpty ? "critical" : detail)"
+    }
+
+    private func applyHardwareControls(force: Bool = false) {
+        printerAlarm.setLevel(Double(bluetooth.hardwareLevelPercent) / 100.0)
+
+        // Potentiometer reports are frequent. They only control brightness and
+        // alarm volume, so they must not disturb a torch the user enabled from
+        // the app or restart another hardware action.
+        if !force && bluetooth.hardwareLastControl == "LEVEL" { return }
+
+        let mode = bluetooth.hardwareMode
+        let buttonHeld = bluetooth.hardwareHoldActive
+        let keepCameraWarm = setupCameraEnabled || timelapse.isArmed || mode == 1
+        timelapse.setHardwareTorch(
+            steady: mode == -1,
+            blinking: buttonHeld,
+            keepCameraWarm: keepCameraWarm
+        )
+
+        if mode == 1 {
+            guard bluetooth.isH2DReady, !timelapse.isArmed,
+                  !timelapse.isRendering, !hardwareArmRequested else { return }
+            hardwareArmRequested = true
+            timelapse.arm(startingAtLayer: bluetooth.h2dCurrentLayer)
+            // Permission denial or a camera startup failure must not leave the
+            // hardware switch permanently unable to retry.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                if !timelapse.isArmed { hardwareArmRequested = false }
+            }
+            return
+        }
+
+        hardwareArmRequested = false
+        guard timelapse.isArmed, !timelapse.isStopping else { return }
+        // Leaving the right position is an intentional end of capture, not a
+        // printer fault. Preserve existing frames by rendering them when any
+        // were already captured; an empty run can simply be disarmed.
+        if timelapse.capturedFrameCount > 0 {
+            timelapse.finishEarlyAndRender()
+        } else {
+            timelapse.disarm()
+        }
     }
 
     private func synchronizePrinterAlarm() {
