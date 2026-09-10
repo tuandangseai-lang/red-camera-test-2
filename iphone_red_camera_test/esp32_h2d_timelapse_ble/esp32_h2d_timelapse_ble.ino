@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.9.5
+// SE Bambu Timelapse Bridge for classic ESP32 v1.9.6
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -1191,7 +1191,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.9.5");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.9.6");
   reportHardwareControls();
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
@@ -1249,19 +1249,24 @@ void handlePhoneCommand(String command) {
       queuePhoneEvent("H2D,ERROR,Cấu hình thiếu hoặc IP máy in chưa đúng");
     }
   } else if (head == "H2D_ARM") {
-    timelapseArmed = argument == "1";
-    if (timelapseArmed) {
-      // Arm at the current layer so reconnecting in the middle of a print does
-      // not invent frames for layers that the iPhone never observed.
-      lastObservedLayer = currentLayer;
-      // Resume from the layer currently being printed. On the next transition
-      // only that just-finished layer is emitted; old layers are never filled.
-      lastSnapLayer = max(lastSnapLayer, max(0, currentLayer - 1));
-      // The next confirmed transition emits only the layer observed after
-      // arming; completed layers are never replayed.
-      finishSent = false;
+    const bool requestedArmed = argument == "1";
+    if (requestedArmed) {
+      // The iPhone deliberately repeats ARM as a delivery handshake. Only the
+      // first transition may establish a layer baseline; resetting it for
+      // every retry could swallow the layer transition that should be shot.
+      if (!timelapseArmed) {
+        // Arm at the current layer so reconnecting in the middle of a print
+        // does not invent frames for layers that the iPhone never observed.
+        lastObservedLayer = currentLayer;
+        // Resume from the layer currently being printed. On the next
+        // transition only that just-finished layer is emitted.
+        lastSnapLayer = max(lastSnapLayer, max(0, currentLayer - 1));
+        finishSent = false;
+      }
+      timelapseArmed = true;
       reportStatus("ARMED");
     } else {
+      timelapseArmed = false;
       reportStatus("DISARMED");
     }
   } else if (head == "H2D_STATUS" || head == "APP_READY" || head == "PING") {
@@ -1490,10 +1495,6 @@ void updateLedStrip() {
     // Left position: the iPhone torch is steady and the physical strip is a
     // steady warm-yellow locator light.
     fillLedStrip(ledStrip.Color(255, 175, 0));
-  } else if (hardwareMode == 0) {
-    // Centre position: normal setup/outside screen, exactly the two-second
-    // yellow breathing state used by the iPhone border.
-    fillLedStrip(scaledLedColor(255, 190, 0, breathingScale(now)));
   } else if (isPausedState() || isExplicitlyStoppedState() ||
              printState == "FAILED") {
     // A deliberate stop is not an alarm, but it must remain visually distinct
@@ -1528,7 +1529,7 @@ void updateLedStrip() {
 void setup() {
   Serial.begin(115200);
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.9.5");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.9.6");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

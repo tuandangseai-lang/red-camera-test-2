@@ -878,7 +878,11 @@ struct H2DTimelapseView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(timelapse.isCapturing ? "iPhone đang chụp ảnh lớp" : "Chế độ chụp đang hoạt động")
                         .font(.custom("Arial", size: 13).weight(.bold))
-                    Text("Đã lưu \(timelapse.capturedFrameCount) ảnh trong phiên này")
+                    Text(
+                        bluetooth.h2dStatusCode == "ARMED"
+                            ? "ESP32 đã nhận chụp • đã lưu \(timelapse.capturedFrameCount) ảnh"
+                            : "Đang đồng bộ ESP32 • đã lưu \(timelapse.capturedFrameCount) ảnh"
+                    )
                         .font(.custom("Arial", size: 11).monospacedDigit())
                         .foregroundStyle(.secondary)
                 }

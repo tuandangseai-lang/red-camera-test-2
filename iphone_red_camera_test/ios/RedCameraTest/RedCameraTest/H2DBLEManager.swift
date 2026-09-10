@@ -198,6 +198,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private var statusRefreshWorkItems: [DispatchWorkItem] = []
     private var configurationTimeoutWorkItem: DispatchWorkItem?
     private var mqttLossWorkItem: DispatchWorkItem?
+    private var armSyncWorkItems: [DispatchWorkItem] = []
     private var lifecycleActive = true
     // The capture screen can be armed while CoreBluetooth is still restoring
     // the ESP32 connection. Remember the user's intent and replay it as soon as
@@ -273,12 +274,27 @@ final class H2DBLEManager: NSObject, ObservableObject {
     }
 
     func setH2DTimelapseArmed(_ armed: Bool) {
+        armSyncWorkItems.forEach { $0.cancel() }
+        armSyncWorkItems.removeAll()
         desiredTimelapseArmed = armed
         let sent = send(armed ? "H2D_ARM,1" : "H2D_ARM,0")
         if armed {
             h2dBridgeStatus = sent
                 ? "Đã bật chụp theo lớp • đang chờ \(printerDisplayName)"
                 : "Đã bật chụp • chờ ESP32 nối lại để đồng bộ"
+            // BLE write-without-response can be lost while the capture screen
+            // and camera session start together. Repeat an idempotent ARM
+            // handshake so the UI can never look armed while ESP32 suppresses
+            // every SNAP event.
+            for delay in [0.45, 1.35] {
+                let item = DispatchWorkItem { [weak self] in
+                    guard let self, self.desiredTimelapseArmed,
+                          self.isConnected else { return }
+                    _ = self.send("H2D_ARM,1")
+                }
+                armSyncWorkItems.append(item)
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+            }
         } else {
             h2dBridgeStatus = "Đã dừng chụp theo lớp"
         }

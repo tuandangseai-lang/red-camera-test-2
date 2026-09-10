@@ -34,8 +34,10 @@ và **Adafruit NeoPixel**, sau đó nạp qua USB. Firmware không sử dụng s
 - Biến trở: hai chân ngoài vào 3V3 và GND, chân giữa vào **GPIO34**. Nếu xoay
   theo chiều tăng mà độ sáng lại giảm, đổi chéo hai chân ngoài của biến trở.
 
-Nấc giữa làm 5 LED thở vàng. Nấc phải chớp đỏ một lần rồi vào hiệu ứng trạng
-thái timelapse; tiến trình xanh tăng sáng mượt từng LED theo chiều từ LED số 0.
+Nấc giữa là chế độ điều khiển bình thường: dải LED luôn bám trạng thái thật của
+máy in và iPhone (vàng khi chờ/chuẩn bị, xanh lá theo tiến trình khi đang in,
+xanh biển lúc chụp và đỏ khi dừng/lỗi). Nấc phải chớp đỏ một lần rồi kích hoạt
+timelapse; tiến trình xanh tăng sáng mượt từng LED theo chiều từ LED số 0.
 Nấc trái bật đèn flash iPhone liên tục và giữ dải LED màu vàng. Giữ nút GPIO27
 để đèn flash iPhone nhấp nháy như cửa trập phim. Biến trở đồng thời điều chỉnh
 độ sáng dải WS2812B và âm lượng cảnh báo trên iPhone. Khi máy in có lỗi nghiêm
