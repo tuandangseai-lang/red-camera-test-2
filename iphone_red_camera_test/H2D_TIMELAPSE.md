@@ -43,6 +43,11 @@ Nấc trái bật đèn flash iPhone liên tục và giữ dải LED màu vàng.
 độ sáng dải WS2812B và âm lượng cảnh báo trên iPhone. Khi máy in có lỗi nghiêm
 trọng, 5 LED đỏ đập theo nhịp âm báo.
 
+Ở nấc giữa, vẫn có thể bấm nút trên màn hình iPhone để bắt đầu/dừng timelapse
+thủ công. Nấc giữa là trung tính nên không tự thoát phiên chụp thủ công. Nếu
+nấc phải đã tự mở phiên chụp, gạt trở lại nấc giữa sẽ chỉ kết thúc phiên do
+công tắc mở.
+
 Firmware v1.1 gửi xác nhận riêng cho từng trường cấu hình. Nếu Bluetooth hụt
 một gói, app tự gửi lại tối đa hai lần và báo rõ bước lỗi thay vì chờ vô hạn.
 

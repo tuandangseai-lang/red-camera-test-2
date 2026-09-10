@@ -24,6 +24,8 @@ struct H2DTimelapseView: View {
     @State private var showCriticalPrinterAlarm = false
     @State private var acknowledgedAlarmID = ""
     @State private var hardwareArmRequested = false
+    @State private var hardwareStartedCapture = false
+    @State private var hardwareModeOneLatched = false
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -363,6 +365,13 @@ struct H2DTimelapseView: View {
                     configurationCard
 
                     Button {
+                        // Position 0 is neutral. A session started from this
+                        // on-screen button must not be stopped when ESP32 later
+                        // repeats MODE,0 as part of a status response.
+                        hardwareStartedCapture = false
+                        if bluetooth.hardwareMode == 1 {
+                            hardwareModeOneLatched = true
+                        }
                         timelapse.arm(startingAtLayer: bluetooth.h2dCurrentLayer)
                     } label: {
                         Label("Bật chờ \(printerName) và làm tối màn hình", systemImage: "camera.aperture")
@@ -1083,9 +1092,12 @@ struct H2DTimelapseView: View {
         )
 
         if mode == 1 {
+            guard !hardwareModeOneLatched else { return }
             guard bluetooth.isH2DReady, !timelapse.isArmed,
                   !timelapse.isRendering, !hardwareArmRequested else { return }
+            hardwareModeOneLatched = true
             hardwareArmRequested = true
+            hardwareStartedCapture = true
             timelapse.arm(startingAtLayer: bluetooth.h2dCurrentLayer)
             // Permission denial or a camera startup failure must not leave the
             // hardware switch permanently unable to retry.
@@ -1095,7 +1107,12 @@ struct H2DTimelapseView: View {
             return
         }
 
+        hardwareModeOneLatched = false
         hardwareArmRequested = false
+        // MODE 0 is neutral for a manually started capture. Only leaving
+        // position +1 may stop a session that position +1 itself started.
+        guard hardwareStartedCapture else { return }
+        hardwareStartedCapture = false
         guard timelapse.isArmed, !timelapse.isStopping else { return }
         // Leaving the right position is an intentional end of capture, not a
         // printer fault. Preserve existing frames by rendering them when any
