@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.9.7
+// SE Bambu Timelapse Bridge for classic ESP32 v1.9.9
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -1193,7 +1193,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.9.7");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.9.9");
   reportHardwareControls();
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
@@ -1449,20 +1449,6 @@ uint8_t breathingScale(uint32_t now) {
   return 35 + static_cast<uint32_t>(ramp) * 220 / 1000;
 }
 
-uint8_t alarmMusicScale(uint32_t now) {
-  // Four short, unequal beats make the red alarm strip visibly follow the
-  // bundled siren rhythm instead of behaving like a plain status lamp.
-  static constexpr uint8_t beatStrength[] = {255, 175, 230, 145};
-  const uint16_t beatPeriod = 270;
-  const uint8_t beat = (now / beatPeriod) % 4;
-  const uint16_t local = now % beatPeriod;
-  const uint8_t envelope = local < 115
-      ? 255 - static_cast<uint32_t>(local) * 150 / 115
-      : 105 - static_cast<uint32_t>(local - 115) * 70 /
-                  (beatPeriod - 115);
-  return 28 + static_cast<uint16_t>(beatStrength[beat]) * envelope / 290;
-}
-
 float smoothLedProgress(uint32_t now) {
   const float target = constrain(static_cast<float>(printPercent), 0.0f, 100.0f);
   if (lastProgressTickAt == 0 || target + 2.0f < displayedPrintPercent) {
@@ -1506,11 +1492,19 @@ void updateLedStrip() {
   if (static_cast<int32_t>(modeEntryFlashUntil - now) > 0) {
     fillLedStrip(ledStrip.Color(255, 0, 0));
   } else if (criticalError) {
-    fillStatusLeds(ledStrip.Color(255, 0, 0));
-    fillAnimatedLeds(scaledLedColor(255, 0, 0, alarmMusicScale(now)));
+    // Alarm audio volume still follows the potentiometer on iPhone, but the
+    // physical strip stays steadily red instead of pulsing with the siren.
+    fillLedStrip(ledStrip.Color(255, 0, 0));
   } else if (static_cast<int32_t>(captureFlashUntil - now) > 0) {
     // Same meaning as the blue border on iPhone: one layer photo was ordered.
     fillLedStrip(ledStrip.Color(0, 105, 255));
+  } else if (hardwareHoldPressed) {
+    // Keep the three status pixels steady. The five effect pixels use the
+    // same 110 ms on / 80 ms off film-shutter cadence as the iPhone torch.
+    fillStatusLeds(ledStrip.Color(255, 190, 0));
+    const bool flashOn = (now % 190) < 110;
+    fillAnimatedLeds(flashOn ? ledStrip.Color(255, 190, 0)
+                             : ledStrip.Color(3, 2, 0));
   } else if (hardwareMode == -1) {
     // Left position: the iPhone torch is steady and the physical strip is a
     // steady warm-yellow locator light.
@@ -1553,8 +1547,14 @@ void updateLedStrip() {
 
 void setup() {
   Serial.begin(115200);
+  // Drive a known waiting colour before Wi-Fi/BLE/MQTT startup. This prevents
+  // the strip from briefly retaining the green/red frame shown before reset.
+  ledStrip.begin();
+  ledStrip.setBrightness(brightnessForLevel(hardwareLevelPercent));
+  fillLedStrip(ledStrip.Color(255, 190, 0));
+  ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.9.7");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.9.9");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
@@ -1568,9 +1568,8 @@ void setup() {
   hardwareLevelPercent = constrain(
       static_cast<int>(lroundf(filteredPotReading * 100.0f / 4095.0f)),
       0, 100);
-  ledStrip.begin();
   ledStrip.setBrightness(brightnessForLevel(hardwareLevelPercent));
-  ledStrip.clear();
+  fillLedStrip(ledStrip.Color(255, 190, 0));
   ledStrip.show();
   loadSettings();
   setupBle();

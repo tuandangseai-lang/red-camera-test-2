@@ -43,13 +43,14 @@ máy in và iPhone (vàng khi chờ/chuẩn bị, xanh lá theo tiến trình kh
 xanh biển lúc chụp và đỏ khi dừng/lỗi). Nấc phải chớp đỏ một lần rồi kích hoạt
 timelapse; năm LED hiệu ứng tăng sáng mượt lần lượt theo tiến trình xanh.
 Nấc trái bật đèn flash iPhone liên tục và giữ dải LED màu vàng. Giữ nút GPIO27
-để đèn flash iPhone nhấp nháy như cửa trập phim. Biến trở đồng thời điều chỉnh
+để đèn flash iPhone nhấp nháy như cửa trập phim; ba LED trạng thái giữ vàng,
+còn năm LED hiệu ứng nhấp nháy vàng cùng nhịp. Biến trở đồng thời điều chỉnh
 độ sáng dải WS2812B và âm lượng cảnh báo trên iPhone. Khi máy in có lỗi nghiêm
-trọng, 5 LED đỏ đập theo nhịp âm báo.
+trọng, cả 8 LED giữ màu đỏ ổn định; dải LED không nhấp nháy theo âm báo.
 
 Trong dải 8 LED, ba LED đầu (số 1–3) luôn sáng ổn định theo màu trạng thái hiện
 tại. Năm LED sau (số 4–8) chạy hiệu ứng: thở vàng khi chờ, tăng sáng lần lượt
-theo tiến trình xanh khi in và đập đỏ theo nhịp khi có cảnh báo.
+theo tiến trình xanh khi in. Khi có cảnh báo, cả dải giữ đỏ ổn định.
 
 Ở nấc giữa, vẫn có thể bấm nút trên màn hình iPhone để bắt đầu/dừng timelapse
 thủ công. Nấc giữa là trung tính nên không tự thoát phiên chụp thủ công. Nếu
