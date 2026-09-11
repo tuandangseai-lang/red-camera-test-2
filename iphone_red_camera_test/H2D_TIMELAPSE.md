@@ -26,22 +26,30 @@ và **Adafruit NeoPixel**, sau đó nạp qua USB. Firmware không sử dụng s
 
 ## Đấu cụm điều khiển vật lý
 
-- WS2812B: DIN vào **GPIO5** qua điện trở 330 ohm; dùng đúng 5 LED. Cấp 5V
+- WS2812B: DIN vào **GPIO5** qua điện trở 330 ohm; dùng đúng 8 LED. Cấp 5V
   riêng cho dải LED và nối chung GND với ESP32.
 - Nút nhấn giữ: một chân vào **GPIO27**, chân còn lại vào GND.
 - Công tắc xoay 3 nấc: chân chung vào GND; tiếp điểm bên phải vào **GPIO25**,
   tiếp điểm bên trái vào **GPIO26**. Nấc giữa không nối chân nào.
 - Biến trở: hai chân ngoài vào 3V3 và GND, chân giữa vào **GPIO34**. Nếu xoay
   theo chiều tăng mà độ sáng lại giảm, đổi chéo hai chân ngoài của biến trở.
+  Biến trở luôn hoạt động ở cả ba nấc -1, 0 và +1; vị trí công tắc không khóa
+  chức năng chỉnh độ sáng LED và âm lượng cảnh báo trên iPhone.
+  Độ sáng dùng đường cong gamma để vùng tối, trung bình và sáng tối đa khác
+  nhau rõ rệt hơn khi xoay.
 
 Nấc giữa là chế độ điều khiển bình thường: dải LED luôn bám trạng thái thật của
 máy in và iPhone (vàng khi chờ/chuẩn bị, xanh lá theo tiến trình khi đang in,
 xanh biển lúc chụp và đỏ khi dừng/lỗi). Nấc phải chớp đỏ một lần rồi kích hoạt
-timelapse; tiến trình xanh tăng sáng mượt từng LED theo chiều từ LED số 0.
+timelapse; năm LED hiệu ứng tăng sáng mượt lần lượt theo tiến trình xanh.
 Nấc trái bật đèn flash iPhone liên tục và giữ dải LED màu vàng. Giữ nút GPIO27
 để đèn flash iPhone nhấp nháy như cửa trập phim. Biến trở đồng thời điều chỉnh
 độ sáng dải WS2812B và âm lượng cảnh báo trên iPhone. Khi máy in có lỗi nghiêm
 trọng, 5 LED đỏ đập theo nhịp âm báo.
+
+Trong dải 8 LED, ba LED đầu (số 1–3) luôn sáng ổn định theo màu trạng thái hiện
+tại. Năm LED sau (số 4–8) chạy hiệu ứng: thở vàng khi chờ, tăng sáng lần lượt
+theo tiến trình xanh khi in và đập đỏ theo nhịp khi có cảnh báo.
 
 Ở nấc giữa, vẫn có thể bấm nút trên màn hình iPhone để bắt đầu/dừng timelapse
 thủ công. Nấc giữa là trung tính nên không tự thoát phiên chụp thủ công. Nếu
