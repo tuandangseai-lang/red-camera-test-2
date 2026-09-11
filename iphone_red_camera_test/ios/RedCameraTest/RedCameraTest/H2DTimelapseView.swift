@@ -546,7 +546,7 @@ struct H2DTimelapseView: View {
             HStack(spacing: 8) {
                 Image(systemName: "speaker.wave.2.fill")
                     .foregroundStyle(.blue)
-                Text("Âm lượng cảnh báo trên iPhone")
+                Text("Âm báo lỗi an toàn • tối thiểu 75%")
                     .font(.custom("Arial", size: 12).weight(.semibold))
                 Spacer()
                 Text("\(bluetooth.hardwareLevelPercent)%")

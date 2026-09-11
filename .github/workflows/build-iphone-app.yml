@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.41 build120 - chong lag cong tac va giu man hinh sang
+name: Tao IPA SE v9.42 build121 - am bao loi khong bi tat
 
 on:
   workflow_dispatch:
@@ -103,6 +103,8 @@ jobs:
           grep -q "synchronizePrinterAlarm" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "camera sẵn sàng cho lớp kế tiếp" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "gain.globalGain = 9.54" "RedCameraTest/PrinterAlarmPlayer.swift"
+          grep -q "criticalAlarmMinimumVolume: Float = 0.75" "RedCameraTest/PrinterAlarmPlayer.swift"
+          grep -q "player.isPlaying && engine.isRunning" "RedCameraTest/PrinterAlarmPlayer.swift"
           ! grep -q "scheduleCameraSleep" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "restoreDisplayWhenLeaving" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "setViewActive" "RedCameraTest/H2DTimelapseManager.swift"
@@ -171,19 +173,19 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.41"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "120"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.42"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "121"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.41-build120-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.42-build121-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.41-build120-unsigned-ipa
-          path: SE-v9.41-build120-unsigned.ipa
+          name: SE-v9.42-build121-unsigned-ipa
+          path: SE-v9.42-build121-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
