@@ -42,6 +42,12 @@ struct H2DTimelapseView: View {
             .onChange(of: bluetooth.hardwareControlRevision) { _, _ in
                 applyHardwareControls()
             }
+            .onChange(of: bluetooth.hardwareLevelPercent) { _, level in
+                // Apply volume directly as well as through the aggregate
+                // control revision so rapid knob updates cannot be coalesced
+                // with a simultaneous MODE or HOLD notification.
+                printerAlarm.setLevel(Double(level) / 100.0)
+            }
             .onChange(of: timelapse.isRendering) { _, rendering in
                 if !rendering { applyHardwareControls(force: true) }
             }
@@ -533,6 +539,16 @@ struct H2DTimelapseView: View {
                     Text("\(printerName) • \(bluetooth.materialDescription)")
                         .font(.custom("Arial", size: 12).weight(.bold))
                 }
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "speaker.wave.2.fill")
+                    .foregroundStyle(.blue)
+                Text("Âm lượng cảnh báo trên iPhone")
+                    .font(.custom("Arial", size: 12).weight(.semibold))
+                Spacer()
+                Text("\(bluetooth.hardwareLevelPercent)%")
+                    .font(.custom("Arial", size: 12).monospacedDigit().weight(.bold))
+                    .foregroundStyle(.blue)
             }
             if bluetooth.hasTemperatureTelemetry || bluetooth.hasFanTelemetry {
                 VStack(alignment: .leading, spacing: 6) {
