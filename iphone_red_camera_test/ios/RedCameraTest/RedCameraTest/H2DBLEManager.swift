@@ -518,21 +518,36 @@ final class H2DBLEManager: NSObject, ObservableObject {
         case "CONTROL":
             guard fields.count >= 4 else { return }
             let control = fields[2].uppercased()
+            var changed = false
             switch control {
             case "MODE":
-                hardwareMode = min(1, max(-1, Int(fields[3]) ?? 0))
+                let value = min(1, max(-1, Int(fields[3]) ?? 0))
+                if value != hardwareMode {
+                    hardwareMode = value
+                    changed = true
+                }
             case "HOLD":
-                hardwareHoldActive = fields[3] == "1"
+                let value = fields[3] == "1"
+                if value != hardwareHoldActive {
+                    hardwareHoldActive = value
+                    changed = true
+                }
             case "LEVEL":
-                hardwareLevelPercent = min(100, max(0, Int(fields[3]) ?? 70))
+                let value = min(100, max(0, Int(fields[3]) ?? 70))
+                if value != hardwareLevelPercent {
+                    hardwareLevelPercent = value
+                    changed = true
+                }
             default:
                 return
             }
-            hardwareLastControl = control
-            // A revision also delivers deliberate repeated switch commands;
-            // relying only on value changes could leave torch state stale after
-            // the app returns from the background.
-            hardwareControlRevision &+= 1
+            // ESP32 repeats MODE/HOLD/LEVEL during status synchronization.
+            // Do not restart the camera or torch for identical values; a forced
+            // synchronization already runs when the view becomes active again.
+            if changed {
+                hardwareLastControl = control
+                hardwareControlRevision &+= 1
+            }
         case "PRINTER":
             guard fields.count >= 4 else { return }
             let reportedSerial = normalizeSerial(fields[3])

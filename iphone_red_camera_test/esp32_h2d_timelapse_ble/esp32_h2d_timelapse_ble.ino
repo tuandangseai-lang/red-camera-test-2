@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.10.5
+// SE Bambu Timelapse Bridge for classic ESP32 v1.10.6
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -67,7 +67,7 @@ constexpr uint8_t LED_MIN_BRIGHTNESS = 0;
 constexpr uint8_t LED_MAX_BRIGHTNESS = 255;
 constexpr uint32_t LED_REFRESH_MS = 35;
 constexpr uint32_t INPUT_REFRESH_MS = 20;
-constexpr uint32_t INPUT_DEBOUNCE_MS = 45;
+constexpr uint32_t INPUT_DEBOUNCE_MS = 80;
 constexpr uint32_t LEVEL_STABLE_MS = 90;
 constexpr uint32_t LEVEL_NOTIFY_MS = 180;
 }  // namespace Config
@@ -1209,7 +1209,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.10.3");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.10.6");
   reportHardwareControls();
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
@@ -1622,7 +1622,7 @@ void setup() {
   fillLedStrip(ledStrip.Color(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.5");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.6");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

@@ -47,6 +47,9 @@ Nấc giữa là chế độ điều khiển bình thường: dải LED luôn b�
 máy in và iPhone (vàng khi chờ/chuẩn bị, xanh lá theo tiến trình khi đang in,
 xanh biển lúc chụp và đỏ khi dừng/lỗi). Nấc phải sáng đỏ tối đa đúng 1 giây rồi kích hoạt
 timelapse; ba LED hiệu ứng tăng sáng mượt lần lượt theo tiến trình xanh.
+Firmware lọc rung công tắc 80 ms; app gom các nấc trung gian trong 180 ms và
+không xử lý lại gói MODE/HOLD trùng, tránh bật/tắt camera liên tục làm lag hoặc
+nghẽn kết nối Bluetooth.
 Nấc trái bật đèn flash iPhone liên tục và giữ dải LED màu vàng. Giữ nút GPIO27
 để đèn flash iPhone nhấp nháy như cửa trập phim, nhưng cả 4 LED WS2812B vẫn
 giữ vàng liên tục. Biến trở đồng thời điều chỉnh

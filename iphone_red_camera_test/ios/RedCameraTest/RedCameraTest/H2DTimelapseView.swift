@@ -26,6 +26,7 @@ struct H2DTimelapseView: View {
     @State private var hardwareArmRequested = false
     @State private var hardwareStartedCapture = false
     @State private var hardwareModeOneLatched = false
+    @State private var hardwareControlGeneration = 0
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -40,7 +41,7 @@ struct H2DTimelapseView: View {
     var body: some View {
         observedContent
             .onChange(of: bluetooth.hardwareControlRevision) { _, _ in
-                applyHardwareControls()
+                scheduleHardwareControls()
             }
             .onChange(of: bluetooth.hardwareLevelPercent) { _, level in
                 // Apply volume directly as well as through the aggregate
@@ -1139,6 +1140,20 @@ struct H2DTimelapseView: View {
             timelapse.finishEarlyAndRender()
         } else {
             timelapse.disarm()
+        }
+    }
+
+    private func scheduleHardwareControls() {
+        // Industrial three-position switches briefly touch the centre contact
+        // while moving between sides. Coalesce bounce and intermediate MODE
+        // packets, then apply only the final physical position. LEVEL has its
+        // own lightweight observer and never needs to restart the camera.
+        guard bluetooth.hardwareLastControl != "LEVEL" else { return }
+        hardwareControlGeneration &+= 1
+        let generation = hardwareControlGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            guard generation == self.hardwareControlGeneration else { return }
+            self.applyHardwareControls()
         }
     }
 
