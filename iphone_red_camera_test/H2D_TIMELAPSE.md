@@ -36,8 +36,9 @@ và **Adafruit NeoPixel**, sau đó nạp qua USB. Firmware không sử dụng s
   theo chiều tăng mà độ sáng lại giảm, đổi chéo hai chân ngoài của biến trở.
   Biến trở luôn hoạt động ở cả ba nấc -1, 0 và +1; vị trí công tắc không khóa
   chức năng chỉnh độ sáng LED và âm lượng cảnh báo trên iPhone.
-  Firmware lấy trung vị 15 mẫu ADC, lọc nhiễu và chỉ nhận mức đã ổn định để
-  tiếp xúc biến trở không còn làm LED/âm lượng giật. Biến trở dùng toàn dải và
+  Firmware lấy trung vị 15 mẫu ADC rồi kiểm tra thêm cửa sổ 21 lần đọc. Giá trị
+  nhiễu rộng sẽ bị bỏ qua và LED giữ mức hợp lệ gần nhất thay vì tắt toàn bộ.
+  Biến trở dùng toàn dải và
   có vùng hiệu chỉnh ở hai đầu: vặn hết
   trái là LED tắt và âm lượng 0%; vặn hết phải là độ sáng WS2812B 255/255 và
   âm lượng cảnh báo iPhone 100%, kể cả khi ADC thực tế không đạt đúng 0/4095.

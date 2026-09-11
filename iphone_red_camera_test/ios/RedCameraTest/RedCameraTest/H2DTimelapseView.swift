@@ -100,6 +100,7 @@ struct H2DTimelapseView: View {
                 .padding(.bottom, 6)
         }
         .onAppear {
+            timelapse.setViewActive(true)
             savedProfiles = BambuPrinterProfileStore.load()
             let storedKind = BambuPrinterKind.detect(serial: printerSerial)
             if storedKind != .unknown { selectedPrinterKind = storedKind }

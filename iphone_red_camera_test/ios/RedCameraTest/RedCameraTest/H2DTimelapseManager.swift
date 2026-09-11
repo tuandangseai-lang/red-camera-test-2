@@ -113,9 +113,13 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
 
     func arm(startingAtLayer: Int = 0) {
         guard !isArmed, !isRendering else { return }
-        // 1113 is iOS' short begin-record cue. Play it at the user's action,
-        // rather than after camera permission/configuration has completed.
-        AudioServicesPlaySystemSound(1113)
+        // Use the bundled recording sound through AVAudioPlayer so it remains
+        // audible even when the undocumented system-sound ID is unavailable.
+        // A safe minimum volume makes the mode change unambiguous while the
+        // ESP32 is still delivering its first potentiometer value.
+        DispatchQueue.main.async { [weak self] in
+            self?.playCameraSound(minimumVolume: 0.55)
+        }
         requestCameraPermission { [weak self] granted in
             guard let self else { return }
             guard granted else {
@@ -189,8 +193,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     func handleScenePhase(_ phase: ScenePhase, allowSetupPreview: Bool) {
         switch phase {
         case .active:
+            setViewActive(true)
             if isArmed {
-                UIApplication.shared.isIdleTimerDisabled = true
                 sessionQueue.async { [weak self] in self?.startSessionIfNeeded() }
                 if isLiveMonitorVisible {
                     showMonitorDisplay()
@@ -207,7 +211,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             // Never leave the user's iPhone dim after switching apps or
             // leaving this screen. Re-entering an armed session will dim it
             // again from the same restored level.
-            DispatchQueue.main.async { [weak self] in self?.restoreDisplay() }
+            setViewActive(false)
             sessionQueue.async { [weak self] in
                 guard let self, self.previewSession.isRunning else { return }
                 self.hardwareTorchGeneration &+= 1
@@ -326,7 +330,14 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     }
 
     func restoreDisplayWhenLeaving() {
-        DispatchQueue.main.async { [weak self] in self?.restoreDisplay() }
+        setViewActive(false)
+    }
+
+    func setViewActive(_ active: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            UIApplication.shared.isIdleTimerDisabled = active
+            if !active { self?.restoreDisplay() }
+        }
     }
 
     private func requestCameraPermission(_ completion: @escaping (Bool) -> Void) {
@@ -511,14 +522,17 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         if request.playsShutterSound, request.jobID != "TEST" {
             // Play the supplied Sony double-shutter sample once per logical
             // layer. Reading seven temporary candidate frames remains silent.
-            DispatchQueue.main.async { [weak self] in self?.playShutterSound() }
+            DispatchQueue.main.async { [weak self] in self?.playCameraSound() }
         }
 
         captureCurrentRequestWhenReady()
     }
 
-    private func playShutterSound() {
+    private func playCameraSound(minimumVolume: Float = 0) {
         do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default, options: [.duckOthers])
+            try session.setActive(true)
             let player: AVAudioPlayer
             if let loaded = shutterSoundPlayer {
                 player = loaded
@@ -537,7 +551,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             }
             player.stop()
             player.currentTime = 0
-            player.volume = effectSoundLevel
+            player.volume = max(minimumVolume, effectSoundLevel)
             player.play()
         } catch {
             AudioServicesPlaySystemSound(1108)
@@ -1358,7 +1372,6 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     }
 
     private func restoreDisplay() {
-        UIApplication.shared.isIdleTimerDisabled = false
         if let brightness = originalBrightness {
             UIScreen.main.brightness = brightness
             originalBrightness = nil

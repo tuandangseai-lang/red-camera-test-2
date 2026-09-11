@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.39 build118 - LED va am thanh timelapse
+name: Tao IPA SE v9.40 build119 - on dinh bien tro va am bat dau quay
 
 on:
   workflow_dispatch:
@@ -72,7 +72,8 @@ jobs:
           grep -q "selectBestBufferedFrame" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "localizedDarkIntrusion" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "motionScore" "RedCameraTest/H2DTimelapseManager.swift"
-          grep -q "AudioServicesPlaySystemSound(1113)" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "playCameraSound(minimumVolume: 0.55)" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "setCategory(.playback" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "sony-nex-7-double-shutter" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "AVCaptureVideoDataOutput" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "copyPixelBuffer" "RedCameraTest/H2DTimelapseManager.swift"
@@ -104,6 +105,7 @@ jobs:
           grep -q "gain.globalGain = 9.54" "RedCameraTest/PrinterAlarmPlayer.swift"
           ! grep -q "scheduleCameraSleep" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "restoreDisplayWhenLeaving" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "setViewActive" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "đang đồng bộ loại nhựa" "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'hasPrefix("22E")' "RedCameraTest/BambuPrinterProfile.swift"
           grep -q "hasActivePrinterAlert" "RedCameraTest/H2DBLEManager.swift"
@@ -167,19 +169,19 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.39"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "118"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.40"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "119"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.39-build118-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.40-build119-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.39-build118-unsigned-ipa
-          path: SE-v9.39-build118-unsigned.ipa
+          name: SE-v9.40-build119-unsigned-ipa
+          path: SE-v9.40-build119-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -216,7 +218,7 @@ jobs:
           grep -q 'LED_STATUS_COUNT = 1' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'LED_ANIMATED_COUNT = 3' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'LED_PHYSICAL_COUNT = 8' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'readStablePotentiometer' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'acceptStablePotentiometerReading' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'modeEntryFlashUntil = now + 1000' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'currentLayer > 0' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'H2D,CONTROL' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
@@ -229,7 +231,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.10.4
+          name: SE-Bambu-ESP32-v1.10.5
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

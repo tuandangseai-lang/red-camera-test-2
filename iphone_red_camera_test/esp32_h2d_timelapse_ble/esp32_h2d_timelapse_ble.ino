@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.10.4
+// SE Bambu Timelapse Bridge for classic ESP32 v1.10.5
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -61,6 +61,8 @@ constexpr uint8_t LEVEL_POT_PIN = 34;
 constexpr uint16_t LEVEL_POT_RAW_MIN = 180;
 constexpr uint16_t LEVEL_POT_RAW_MAX = 3600;
 constexpr uint8_t LEVEL_POT_SAMPLE_COUNT = 15;
+constexpr uint8_t LEVEL_POT_WINDOW_COUNT = 21;
+constexpr uint16_t LEVEL_POT_STABLE_SPAN = 180;
 constexpr uint8_t LED_MIN_BRIGHTNESS = 0;
 constexpr uint8_t LED_MAX_BRIGHTNESS = 255;
 constexpr uint32_t LED_REFRESH_MS = 35;
@@ -160,11 +162,12 @@ int8_t hardwareMode = 0;  // -1 = torch, 0 = normal, +1 = timelapse.
 int8_t modeCandidate = 0;
 bool hardwareHoldPressed = false;
 bool holdCandidate = false;
-bool potentiometerInitialized = false;
-float filteredPotReading = 0.0f;
 float displayedPrintPercent = 0.0f;
-uint8_t hardwareLevelPercent = 70;
-uint8_t levelCandidate = 70;
+uint8_t hardwareLevelPercent = 100;
+uint8_t levelCandidate = 100;
+uint16_t potReadingWindow[Config::LEVEL_POT_WINDOW_COUNT] = {};
+uint8_t potReadingWindowCount = 0;
+uint8_t potReadingWindowIndex = 0;
 
 void reportHardwareControls();
 
@@ -1377,7 +1380,7 @@ uint8_t levelForPotReading(float rawReading) {
   return constrain(static_cast<int>(lroundf(calibrated)), 0, 100);
 }
 
-uint16_t readStablePotentiometer() {
+uint16_t readPotentiometerMedianSample() {
   uint16_t samples[Config::LEVEL_POT_SAMPLE_COUNT];
   for (uint8_t i = 0; i < Config::LEVEL_POT_SAMPLE_COUNT; ++i) {
     samples[i] = analogRead(Config::LEVEL_POT_PIN);
@@ -1396,6 +1399,39 @@ uint16_t readStablePotentiometer() {
     samples[j + 1] = value;
   }
   return samples[Config::LEVEL_POT_SAMPLE_COUNT / 2];
+}
+
+bool acceptStablePotentiometerReading(uint16_t rawSample,
+                                      uint16_t &stableReading) {
+  potReadingWindow[potReadingWindowIndex] = rawSample;
+  potReadingWindowIndex =
+      (potReadingWindowIndex + 1) % Config::LEVEL_POT_WINDOW_COUNT;
+  if (potReadingWindowCount < Config::LEVEL_POT_WINDOW_COUNT) {
+    ++potReadingWindowCount;
+    return false;
+  }
+
+  uint16_t sorted[Config::LEVEL_POT_WINDOW_COUNT];
+  memcpy(sorted, potReadingWindow, sizeof(sorted));
+  for (uint8_t i = 1; i < Config::LEVEL_POT_WINDOW_COUNT; ++i) {
+    const uint16_t value = sorted[i];
+    int8_t j = i - 1;
+    while (j >= 0 && sorted[j] > value) {
+      sorted[j + 1] = sorted[j];
+      --j;
+    }
+    sorted[j + 1] = value;
+  }
+
+  // Ignore the three highest and three lowest readings. A stationary knob is
+  // accepted only when the remaining 15 readings agree. If its contact or
+  // wiring produces wide 0...4095 jumps, keep the last valid brightness
+  // instead of blacking out every normal LED state.
+  const uint16_t low = sorted[3];
+  const uint16_t high = sorted[Config::LEVEL_POT_WINDOW_COUNT - 4];
+  if (high - low > Config::LEVEL_POT_STABLE_SPAN) return false;
+  stableReading = sorted[Config::LEVEL_POT_WINDOW_COUNT / 2];
+  return true;
 }
 
 void updateHardwareInputs() {
@@ -1431,14 +1467,10 @@ void updateHardwareInputs() {
                   hardwareHoldPressed ? "held" : "released");
   }
 
-  const int rawPot = readStablePotentiometer();
-  if (!potentiometerInitialized) {
-    filteredPotReading = rawPot;
-    potentiometerInitialized = true;
-  } else {
-    filteredPotReading = filteredPotReading * 0.72f + rawPot * 0.28f;
-  }
-  const uint8_t newLevel = levelForPotReading(filteredPotReading);
+  const uint16_t rawPot = readPotentiometerMedianSample();
+  uint16_t stablePot = 0;
+  if (!acceptStablePotentiometerReading(rawPot, stablePot)) return;
+  const uint8_t newLevel = levelForPotReading(stablePot);
   if (newLevel != levelCandidate) {
     levelCandidate = newLevel;
     levelCandidateSince = now;
@@ -1450,8 +1482,8 @@ void updateHardwareInputs() {
     if (now - lastLevelNotifyAt >= Config::LEVEL_NOTIFY_MS) {
       lastLevelNotifyAt = now;
       queueHardwareControl("LEVEL", hardwareLevelPercent);
-      Serial.printf("[CONTROL] level %u%% (median ADC %d)\n",
-                    hardwareLevelPercent, rawPot);
+      Serial.printf("[CONTROL] level %u%% (stable ADC %u)\n",
+                    hardwareLevelPercent, stablePot);
     }
   }
 }
@@ -1590,7 +1622,7 @@ void setup() {
   fillLedStrip(ledStrip.Color(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.4");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.5");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
@@ -1600,10 +1632,10 @@ void setup() {
   hardwareMode = modeCandidate = readHardwareModeRaw();
   hardwareHoldPressed = holdCandidate =
       digitalRead(Config::HOLD_BUTTON_PIN) == LOW;
-  filteredPotReading = readStablePotentiometer();
-  potentiometerInitialized = true;
-  hardwareLevelPercent = levelForPotReading(filteredPotReading);
-  levelCandidate = hardwareLevelPercent;
+  // Start visible at full brightness. The potentiometer takes control only
+  // after a complete stable time window, so a noisy/floating ADC cannot make
+  // every normal LED state disappear immediately after boot.
+  hardwareLevelPercent = levelCandidate = 100;
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   loadSettings();
