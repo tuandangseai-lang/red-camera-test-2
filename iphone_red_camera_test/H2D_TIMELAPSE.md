@@ -26,7 +26,8 @@ và **Adafruit NeoPixel**, sau đó nạp qua USB. Firmware không sử dụng s
 
 ## Đấu cụm điều khiển vật lý
 
-- WS2812B: DIN vào **GPIO5** qua điện trở 330 ohm; dùng đúng 4 LED. Cấp 5V
+- WS2812B: DIN vào **GPIO5** qua điện trở 330 ohm. Firmware gửi đủ 8 vị trí
+  nhưng chỉ cho phép 4 LED đầu hoạt động; LED số 5–8 luôn bị ép tắt. Cấp 5V
   riêng cho dải LED và nối chung GND với ESP32.
 - Nút nhấn giữ: một chân vào **GPIO27**, chân còn lại vào GND.
 - Công tắc xoay 3 nấc: chân chung vào GND; tiếp điểm bên phải vào **GPIO25**,
@@ -35,8 +36,8 @@ và **Adafruit NeoPixel**, sau đó nạp qua USB. Firmware không sử dụng s
   theo chiều tăng mà độ sáng lại giảm, đổi chéo hai chân ngoài của biến trở.
   Biến trở luôn hoạt động ở cả ba nấc -1, 0 và +1; vị trí công tắc không khóa
   chức năng chỉnh độ sáng LED và âm lượng cảnh báo trên iPhone.
-  Độ sáng dùng đường cong gamma để vùng tối, trung bình và sáng tối đa khác
-  nhau rõ rệt hơn khi xoay.
+  Biến trở dùng toàn dải tuyến tính: đầu thấp là LED tắt và âm lượng 0%; đầu
+  cao là độ sáng WS2812B 255/255 và âm lượng cảnh báo iPhone 100%.
 
 Nấc giữa là chế độ điều khiển bình thường: dải LED luôn bám trạng thái thật của
 máy in và iPhone (vàng khi chờ/chuẩn bị, xanh lá theo tiến trình khi đang in,

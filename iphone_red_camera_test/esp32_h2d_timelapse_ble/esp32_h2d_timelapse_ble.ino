@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.10.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.10.2
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -39,19 +39,22 @@ constexpr uint8_t NOZZLE_SYNC_RETRY_LIMIT = 8;
 constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
-// Four-pixel WS2812B strip. DATA -> GPIO5 through a 330-ohm resistor;
-// strip 5V/GND uses a separate 5V supply and MUST share GND with ESP32.
+// The physical strip still has eight WS2812B packages, but only the first four
+// are active. Sending all eight slots forces pixels 5...8 fully off instead of
+// letting them retain a dim frame from the older eight-pixel firmware.
+// DATA -> GPIO5 through 330 ohms; 5V/GND must share GND with the ESP32.
 constexpr uint8_t LED_STRIP_PIN = 5;
 constexpr uint16_t LED_STATUS_COUNT = 1;
 constexpr uint16_t LED_ANIMATED_COUNT = 3;
-constexpr uint16_t LED_STRIP_COUNT = LED_STATUS_COUNT + LED_ANIMATED_COUNT;
+constexpr uint16_t LED_ACTIVE_COUNT = LED_STATUS_COUNT + LED_ANIMATED_COUNT;
+constexpr uint16_t LED_PHYSICAL_COUNT = 8;
 // Controls use INPUT_PULLUP: each button/switch contact closes to GND.
 constexpr uint8_t HOLD_BUTTON_PIN = 27;
 constexpr uint8_t MODE_TIMELAPSE_PIN = 25;
 constexpr uint8_t MODE_TORCH_PIN = 26;
 // GPIO34 is ADC1, so the potentiometer keeps working while Wi-Fi is active.
 constexpr uint8_t LEVEL_POT_PIN = 34;
-constexpr uint8_t LED_MIN_BRIGHTNESS = 3;
+constexpr uint8_t LED_MIN_BRIGHTNESS = 0;
 constexpr uint8_t LED_MAX_BRIGHTNESS = 255;
 constexpr uint32_t LED_REFRESH_MS = 35;
 constexpr uint32_t INPUT_REFRESH_MS = 20;
@@ -80,7 +83,7 @@ BridgeSettings pendingSettings;
 WiFiClientSecure tlsClient;
 PubSubClient mqtt(tlsClient);
 Adafruit_NeoPixel ledStrip(
-    Config::LED_STRIP_COUNT, Config::LED_STRIP_PIN, NEO_GRB + NEO_KHZ800);
+    Config::LED_PHYSICAL_COUNT, Config::LED_STRIP_PIN, NEO_GRB + NEO_KHZ800);
 NimBLECharacteristic *eventCharacteristic = nullptr;
 
 portMUX_TYPE eventMux = portMUX_INITIALIZER_UNLOCKED;
@@ -1193,7 +1196,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.10.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.10.2");
   reportHardwareControls();
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
@@ -1348,14 +1351,11 @@ void reportHardwareControls() {
 }
 
 uint8_t brightnessForLevel(uint8_t level) {
-  // WS2812 PWM looks disproportionately bright through the lower half of a
-  // linear potentiometer. A gamma curve gives the knob an obvious dark,
-  // medium and bright range while still reaching full output at the end.
-  const float normalized = constrain(static_cast<float>(level) / 100.0f,
-                                     0.0f, 1.0f);
-  const float curved = powf(normalized, 2.2f);
-  return Config::LED_MIN_BRIGHTNESS + static_cast<uint8_t>(lroundf(
-      (Config::LED_MAX_BRIGHTNESS - Config::LED_MIN_BRIGHTNESS) * curved));
+  // Use the knob's complete electrical travel: 0% is truly off and 100% is
+  // the WS2812B's full 255/255 brightness. The same 0...100 value is sent to
+  // the iPhone as its SE alarm volume.
+  const uint8_t clamped = constrain(level, 0, 100);
+  return static_cast<uint16_t>(Config::LED_MAX_BRIGHTNESS) * clamped / 100;
 }
 
 void updateHardwareInputs() {
@@ -1426,7 +1426,7 @@ uint32_t scaledLedColor(uint8_t red, uint8_t green, uint8_t blue,
 }
 
 void fillLedStrip(uint32_t color) {
-  for (uint16_t i = 0; i < Config::LED_STRIP_COUNT; ++i) {
+  for (uint16_t i = 0; i < Config::LED_ACTIVE_COUNT; ++i) {
     ledStrip.setPixelColor(i, color);
   }
 }
@@ -1554,7 +1554,7 @@ void setup() {
   fillLedStrip(ledStrip.Color(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.2");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
