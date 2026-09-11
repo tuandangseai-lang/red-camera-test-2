@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.10.2
+// SE Bambu Timelapse Bridge for classic ESP32 v1.10.3
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -54,6 +54,12 @@ constexpr uint8_t MODE_TIMELAPSE_PIN = 25;
 constexpr uint8_t MODE_TORCH_PIN = 26;
 // GPIO34 is ADC1, so the potentiometer keeps working while Wi-Fi is active.
 constexpr uint8_t LEVEL_POT_PIN = 34;
+// Reserve a small dead zone at both physical ends. Real ESP32 ADCs and common
+// panel potentiometers rarely reach the ideal 0/4095 endpoints, so these
+// calibrated limits make fully counter-clockwise exactly 0% and fully
+// clockwise exactly 100%.
+constexpr uint16_t LEVEL_POT_RAW_MIN = 100;
+constexpr uint16_t LEVEL_POT_RAW_MAX = 3980;
 constexpr uint8_t LED_MIN_BRIGHTNESS = 0;
 constexpr uint8_t LED_MAX_BRIGHTNESS = 255;
 constexpr uint32_t LED_REFRESH_MS = 35;
@@ -1196,7 +1202,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.10.2");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.10.3");
   reportHardwareControls();
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
@@ -1358,6 +1364,13 @@ uint8_t brightnessForLevel(uint8_t level) {
   return static_cast<uint16_t>(Config::LED_MAX_BRIGHTNESS) * clamped / 100;
 }
 
+uint8_t levelForPotReading(float rawReading) {
+  const float calibrated =
+      (rawReading - Config::LEVEL_POT_RAW_MIN) * 100.0f /
+      (Config::LEVEL_POT_RAW_MAX - Config::LEVEL_POT_RAW_MIN);
+  return constrain(static_cast<int>(lroundf(calibrated)), 0, 100);
+}
+
 void updateHardwareInputs() {
   const uint32_t now = millis();
   if (now - lastInputRefreshAt < Config::INPUT_REFRESH_MS) return;
@@ -1400,9 +1413,7 @@ void updateHardwareInputs() {
     // brightness while the knob is untouched.
     filteredPotReading = filteredPotReading * 0.84f + rawPot * 0.16f;
   }
-  const uint8_t newLevel = constrain(
-      static_cast<int>(lroundf(filteredPotReading * 100.0f / 4095.0f)),
-      0, 100);
+  const uint8_t newLevel = levelForPotReading(filteredPotReading);
   const int levelDelta = abs(static_cast<int>(newLevel) -
                              static_cast<int>(hardwareLevelPercent));
   if (levelDelta >= 2 ||
@@ -1554,7 +1565,7 @@ void setup() {
   fillLedStrip(ledStrip.Color(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.2");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.3");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
@@ -1565,9 +1576,7 @@ void setup() {
       digitalRead(Config::HOLD_BUTTON_PIN) == LOW;
   filteredPotReading = analogRead(Config::LEVEL_POT_PIN);
   potentiometerInitialized = true;
-  hardwareLevelPercent = constrain(
-      static_cast<int>(lroundf(filteredPotReading * 100.0f / 4095.0f)),
-      0, 100);
+  hardwareLevelPercent = levelForPotReading(filteredPotReading);
   ledStrip.setBrightness(brightnessForLevel(hardwareLevelPercent));
   fillLedStrip(ledStrip.Color(255, 190, 0));
   ledStrip.show();
