@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.10.7
+// SE Bambu Timelapse Bridge for classic ESP32 v1.10.8
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -60,6 +60,10 @@ constexpr uint8_t LEVEL_POT_PIN = 34;
 // clockwise exactly 100%.
 constexpr uint16_t LEVEL_POT_RAW_MIN = 180;
 constexpr uint16_t LEVEL_POT_RAW_MAX = 3600;
+// A disconnected or incorrectly wired wiper commonly reads a hard zero. Keep
+// the LEDs visible at their safe boot default until the knob produces a real
+// ADC signal. Once detected, returning to zero still turns the LEDs fully off.
+constexpr uint16_t LEVEL_POT_DETECT_RAW = 80;
 constexpr uint8_t LEVEL_POT_SAMPLE_COUNT = 15;
 constexpr uint8_t LEVEL_POT_WINDOW_COUNT = 21;
 constexpr uint16_t LEVEL_POT_STABLE_SPAN = 180;
@@ -165,6 +169,7 @@ bool holdCandidate = false;
 float displayedPrintPercent = 0.0f;
 uint8_t hardwareLevelPercent = 100;
 uint8_t levelCandidate = 100;
+bool potentiometerDetected = false;
 uint16_t potReadingWindow[Config::LEVEL_POT_WINDOW_COUNT] = {};
 uint8_t potReadingWindowCount = 0;
 uint8_t potReadingWindowIndex = 0;
@@ -1209,7 +1214,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.10.7");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.10.8");
   reportHardwareControls();
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
@@ -1470,6 +1475,16 @@ void updateHardwareInputs() {
   const uint16_t rawPot = readPotentiometerMedianSample();
   uint16_t stablePot = 0;
   if (!acceptStablePotentiometerReading(rawPot, stablePot)) return;
+  if (!potentiometerDetected) {
+    if (stablePot < Config::LEVEL_POT_DETECT_RAW) {
+      // Do not let an absent/stuck-at-ground potentiometer black out every
+      // status colour. hardwareLevelPercent remains at its visible 100% boot
+      // default and the iPhone also receives that safe value.
+      return;
+    }
+    potentiometerDetected = true;
+    Serial.printf("[CONTROL] potentiometer detected (ADC %u)\n", stablePot);
+  }
   const uint8_t newLevel = levelForPotReading(stablePot);
   if (newLevel != levelCandidate) {
     levelCandidate = newLevel;
@@ -1627,7 +1642,7 @@ void setup() {
   fillLedStrip(ledStrip.Color(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.7");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.8");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
