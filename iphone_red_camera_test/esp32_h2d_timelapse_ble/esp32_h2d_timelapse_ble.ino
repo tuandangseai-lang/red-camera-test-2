@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.9.9
+// SE Bambu Timelapse Bridge for classic ESP32 v1.10.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -39,11 +39,11 @@ constexpr uint8_t NOZZLE_SYNC_RETRY_LIMIT = 8;
 constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
-// Eight-pixel WS2812B strip. DATA -> GPIO5 through a 330-ohm resistor;
+// Four-pixel WS2812B strip. DATA -> GPIO5 through a 330-ohm resistor;
 // strip 5V/GND uses a separate 5V supply and MUST share GND with ESP32.
 constexpr uint8_t LED_STRIP_PIN = 5;
-constexpr uint16_t LED_STATUS_COUNT = 3;
-constexpr uint16_t LED_ANIMATED_COUNT = 5;
+constexpr uint16_t LED_STATUS_COUNT = 1;
+constexpr uint16_t LED_ANIMATED_COUNT = 3;
 constexpr uint16_t LED_STRIP_COUNT = LED_STATUS_COUNT + LED_ANIMATED_COUNT;
 // Controls use INPUT_PULLUP: each button/switch contact closes to GND.
 constexpr uint8_t HOLD_BUTTON_PIN = 27;
@@ -1193,7 +1193,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.9.9");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.10.0");
   reportHardwareControls();
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
@@ -1499,7 +1499,7 @@ void updateLedStrip() {
     // Same meaning as the blue border on iPhone: one layer photo was ordered.
     fillLedStrip(ledStrip.Color(0, 105, 255));
   } else if (hardwareHoldPressed) {
-    // Keep the three status pixels steady. The five effect pixels use the
+    // Keep the first status pixel steady. The three effect pixels use the
     // same 110 ms on / 80 ms off film-shutter cadence as the iPhone torch.
     fillStatusLeds(ledStrip.Color(255, 190, 0));
     const bool flashOn = (now % 190) < 110;
@@ -1512,13 +1512,13 @@ void updateLedStrip() {
   } else if (isPausedState() || isExplicitlyStoppedState() ||
              printState == "FAILED") {
     // A deliberate stop is not an alarm, but it must remain visually distinct
-    // from waiting/preparation. The first three status pixels stay red while
-    // the five effect pixels breathe red on the two-second cycle.
+    // from waiting/preparation. The first status pixel stays red while the
+    // three effect pixels breathe red on the two-second cycle.
     fillStatusLeds(ledStrip.Color(255, 0, 0));
     fillAnimatedLeds(scaledLedColor(255, 0, 0, breathingScale(now)));
   } else if (printState == "RUNNING" &&
              (currentStage == 0 || currentStage == -1)) {
-    // Pixels 0...2 are always-on status lights. Pixels 3...7 are the five
+    // Pixel 0 is the always-on status light. Pixels 1...3 are the three
     // clockwise progress pixels that match the iPhone border.
     fillStatusLeds(ledStrip.Color(0, 255, 58));
     const float filledPixels =
@@ -1538,7 +1538,7 @@ void updateLedStrip() {
     }
   } else {
     // Waiting, connecting and every preparation/cleaning/calibration stage:
-    // three solid yellow status pixels plus five breathing effect pixels.
+    // one solid yellow status pixel plus three breathing effect pixels.
     fillStatusLeds(ledStrip.Color(255, 190, 0));
     fillAnimatedLeds(scaledLedColor(255, 190, 0, breathingScale(now)));
   }
@@ -1554,7 +1554,7 @@ void setup() {
   fillLedStrip(ledStrip.Color(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.9.9");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
