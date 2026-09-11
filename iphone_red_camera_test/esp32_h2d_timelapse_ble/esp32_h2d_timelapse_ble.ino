@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.10.6
+// SE Bambu Timelapse Bridge for classic ESP32 v1.10.7
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -1209,7 +1209,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.10.6");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.10.7");
   reportHardwareControls();
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
@@ -1575,9 +1575,9 @@ void updateLedStrip() {
   } else if (static_cast<int32_t>(captureFlashUntil - now) > 0) {
     // Same meaning as the blue border on iPhone: one layer photo was ordered.
     fillLedStrip(ledColor(0, 105, 255));
-  } else if (hardwareHoldPressed || hardwareMode == -1) {
-    // The physical WS2812B strip remains solid yellow while the iPhone torch
-    // is steady or blinking. Only the iPhone flash follows the film cadence.
+  } else if (hardwareHoldPressed) {
+    // Pressing the film button keeps the strip yellow and steady. Only the
+    // iPhone torch follows the button's flash cadence.
     fillLedStrip(ledColor(255, 190, 0));
   } else if (isPausedState() || isExplicitlyStoppedState() ||
              printState == "FAILED") {
@@ -1605,9 +1605,14 @@ void updateLedStrip() {
       const uint8_t scale = 18 + static_cast<uint8_t>(eased * 237.0f);
       ledStrip.setPixelColor(pixel, scaledLedColor(0, 255, 58, scale));
     }
+  } else if (hardwareMode == 0) {
+    // Centre is the normal waiting position. Match the iPhone standby effect
+    // with one smooth yellow rise/fall every two seconds. An active print has
+    // already taken the green/red/blue branches above.
+    fillLedStrip(scaledLedColor(255, 190, 0, breathingScale(now)));
   } else {
-    // Waiting, connecting and preparation remain solid yellow. The only
-    // blinking physical LED state is a real critical red printer alarm.
+    // Torch (-1) is steady yellow until a printer session takes over above.
+    // Timelapse (+1) also remains visibly yellow before its first print state.
     fillLedStrip(ledColor(255, 190, 0));
   }
   ledStrip.show();
@@ -1622,7 +1627,7 @@ void setup() {
   fillLedStrip(ledStrip.Color(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.6");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.7");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
