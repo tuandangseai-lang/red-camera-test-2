@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.10.8
+// SE Bambu Timelapse Bridge for classic ESP32 v1.10.9
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -69,6 +69,7 @@ constexpr uint8_t LEVEL_POT_WINDOW_COUNT = 21;
 constexpr uint16_t LEVEL_POT_STABLE_SPAN = 180;
 constexpr uint8_t LED_MIN_BRIGHTNESS = 0;
 constexpr uint8_t LED_MAX_BRIGHTNESS = 255;
+constexpr uint8_t LED_FIXED_BRIGHTNESS_PERCENT = 95;
 constexpr uint32_t LED_REFRESH_MS = 35;
 constexpr uint32_t INPUT_REFRESH_MS = 20;
 constexpr uint32_t INPUT_DEBOUNCE_MS = 80;
@@ -1214,7 +1215,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.10.8");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.10.9");
   reportHardwareControls();
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
@@ -1368,12 +1369,11 @@ void reportHardwareControls() {
   queueHardwareControl("LEVEL", hardwareLevelPercent);
 }
 
-uint8_t brightnessForLevel(uint8_t level) {
-  // Use the knob's complete electrical travel: 0% is truly off and 100% is
-  // the WS2812B's full 255/255 brightness. The same 0...100 value is sent to
-  // the iPhone as its SE alarm volume.
-  const uint8_t clamped = constrain(level, 0, 100);
-  return static_cast<uint16_t>(Config::LED_MAX_BRIGHTNESS) * clamped / 100;
+uint8_t fixedLedBrightness() {
+  // LED status must remain stable even when the mechanical potentiometer is
+  // noisy. The knob is now reserved for SE's iPhone sound effects only.
+  return static_cast<uint16_t>(Config::LED_MAX_BRIGHTNESS) *
+         Config::LED_FIXED_BRIGHTNESS_PERCENT / 100;
 }
 
 uint8_t levelForPotReading(float rawReading) {
@@ -1505,11 +1505,11 @@ void updateHardwareInputs() {
 
 uint32_t scaledLedColor(uint8_t red, uint8_t green, uint8_t blue,
                         uint8_t scale) {
-  const uint16_t knobScale = brightnessForLevel(hardwareLevelPercent);
+  const uint16_t fixedBrightness = fixedLedBrightness();
   return ledStrip.Color(
-      static_cast<uint32_t>(red) * scale * knobScale / 65025,
-      static_cast<uint32_t>(green) * scale * knobScale / 65025,
-      static_cast<uint32_t>(blue) * scale * knobScale / 65025);
+      static_cast<uint32_t>(red) * scale * fixedBrightness / 65025,
+      static_cast<uint32_t>(green) * scale * fixedBrightness / 65025,
+      static_cast<uint32_t>(blue) * scale * fixedBrightness / 65025);
 }
 
 uint32_t ledColor(uint8_t red, uint8_t green, uint8_t blue) {
@@ -1581,9 +1581,9 @@ void updateLedStrip() {
 
   const bool criticalError = hasCriticalPrinterError();
   if (static_cast<int32_t>(modeEntryFlashUntil - now) > 0) {
-    // Entering timelapse is always acknowledged at true full brightness,
-    // independently of the potentiometer, for one complete second.
-    fillLedStrip(ledStrip.Color(255, 0, 0));
+    // Entering timelapse is acknowledged at the fixed 95% LED power for one
+    // complete second, independently of the potentiometer.
+    fillLedStrip(ledColor(255, 0, 0));
   } else if (criticalError) {
     const bool alarmOn = (now % 260) < 150;
     fillLedStrip(alarmOn ? ledColor(255, 0, 0) : ledStrip.Color(0, 0, 0));
@@ -1639,10 +1639,10 @@ void setup() {
   // the strip from briefly retaining the green/red frame shown before reset.
   ledStrip.begin();
   ledStrip.setBrightness(255);
-  fillLedStrip(ledStrip.Color(255, 190, 0));
+  fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.8");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.9");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
