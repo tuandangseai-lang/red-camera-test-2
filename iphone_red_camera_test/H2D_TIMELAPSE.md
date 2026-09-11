@@ -36,23 +36,25 @@ và **Adafruit NeoPixel**, sau đó nạp qua USB. Firmware không sử dụng s
   theo chiều tăng mà độ sáng lại giảm, đổi chéo hai chân ngoài của biến trở.
   Biến trở luôn hoạt động ở cả ba nấc -1, 0 và +1; vị trí công tắc không khóa
   chức năng chỉnh độ sáng LED và âm lượng cảnh báo trên iPhone.
-  Biến trở dùng toàn dải tuyến tính và có vùng hiệu chỉnh ở hai đầu: vặn hết
+  Firmware lấy trung vị 15 mẫu ADC, lọc nhiễu và chỉ nhận mức đã ổn định để
+  tiếp xúc biến trở không còn làm LED/âm lượng giật. Biến trở dùng toàn dải và
+  có vùng hiệu chỉnh ở hai đầu: vặn hết
   trái là LED tắt và âm lượng 0%; vặn hết phải là độ sáng WS2812B 255/255 và
   âm lượng cảnh báo iPhone 100%, kể cả khi ADC thực tế không đạt đúng 0/4095.
 
 Nấc giữa là chế độ điều khiển bình thường: dải LED luôn bám trạng thái thật của
 máy in và iPhone (vàng khi chờ/chuẩn bị, xanh lá theo tiến trình khi đang in,
-xanh biển lúc chụp và đỏ khi dừng/lỗi). Nấc phải chớp đỏ một lần rồi kích hoạt
+xanh biển lúc chụp và đỏ khi dừng/lỗi). Nấc phải sáng đỏ tối đa đúng 1 giây rồi kích hoạt
 timelapse; ba LED hiệu ứng tăng sáng mượt lần lượt theo tiến trình xanh.
 Nấc trái bật đèn flash iPhone liên tục và giữ dải LED màu vàng. Giữ nút GPIO27
-để đèn flash iPhone nhấp nháy như cửa trập phim; LED trạng thái đầu tiên giữ
-vàng, còn ba LED hiệu ứng nhấp nháy vàng cùng nhịp. Biến trở đồng thời điều chỉnh
+để đèn flash iPhone nhấp nháy như cửa trập phim, nhưng cả 4 LED WS2812B vẫn
+giữ vàng liên tục. Biến trở đồng thời điều chỉnh
 độ sáng dải WS2812B và âm lượng cảnh báo trên iPhone. Khi máy in có lỗi nghiêm
-trọng, cả 4 LED giữ màu đỏ ổn định; dải LED không nhấp nháy theo âm báo.
+trọng, cả 4 LED nhấp nháy đỏ nhanh; đây là trạng thái duy nhất làm dải LED chớp.
 
 Trong dải 4 LED, LED đầu tiên luôn sáng ổn định theo màu trạng thái hiện tại.
-Ba LED sau (số 2–4) chạy hiệu ứng: thở vàng khi chờ, tăng sáng lần lượt
-theo tiến trình xanh khi in. Khi có cảnh báo, cả dải giữ đỏ ổn định.
+Ba LED sau (số 2–4) tăng sáng lần lượt theo tiến trình xanh khi in. Chờ/chuẩn
+bị giữ vàng liên tục; đổi nhựa giữa bản in vẫn giữ tiến trình xanh.
 
 Ở nấc giữa, vẫn có thể bấm nút trên màn hình iPhone để bắt đầu/dừng timelapse
 thủ công. Nấc giữa là trung tính nên không tự thoát phiên chụp thủ công. Nếu

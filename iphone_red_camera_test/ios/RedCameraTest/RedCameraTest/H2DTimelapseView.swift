@@ -47,6 +47,7 @@ struct H2DTimelapseView: View {
                 // control revision so rapid knob updates cannot be coalesced
                 // with a simultaneous MODE or HOLD notification.
                 printerAlarm.setLevel(Double(level) / 100.0)
+                timelapse.setEffectSoundLevel(Double(level) / 100.0)
             }
             .onChange(of: timelapse.isRendering) { _, rendering in
                 if !rendering { applyHardwareControls(force: true) }
@@ -118,7 +119,7 @@ struct H2DTimelapseView: View {
                 !printerSerial.isEmpty && !accessCode.isEmpty {
                 showConfiguration = false
             }
-            withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) {
+            withAnimation(.linear(duration: 0.18).repeatForever(autoreverses: true)) {
                 idlePulse = true
             }
             timelapse.didStoreFrame = { layer, success in
@@ -261,7 +262,7 @@ struct H2DTimelapseView: View {
         // stop: show the red breathing state without starting the siren.
         case "FAILED": return .stopping
         case "ERROR": return .idle
-        case "RUNNING": return bluetooth.isActuallyPrinting ? .printing : .preparing
+        case "RUNNING": return isLayerPrintingOrChangingFilament ? .printing : .preparing
         case "PAUSE", "PAUSED": return .paused
         case "PREPARE", "PREPARING", "SLICING", "INIT", "HEATING": return .preparing
         default: return .idle
@@ -299,8 +300,7 @@ struct H2DTimelapseView: View {
                 .frame(width: 9, height: 9)
                 .shadow(color: printerIslandState.color.opacity(0.8), radius: 5)
                 .opacity(
-                    printerIslandState == .idle || printerIslandState == .connecting ||
-                        printerIslandState == .stopping || printerIslandState == .paused
+                    printerIslandState == .error
                         ? (idlePulse ? 1 : 0.18)
                         : 1
                 )
@@ -325,17 +325,13 @@ struct H2DTimelapseView: View {
     /// colour and do not continuously redraw the camera preview.
     private var screenEdgeLEDStrip: some View {
         let isPrinting = printerIslandState == .printing
-        let isBlinking = printerIslandState == .idle ||
-            printerIslandState == .preparing ||
-            printerIslandState == .connecting ||
-            printerIslandState == .stopping ||
-            printerIslandState == .paused
+        let isBlinking = printerIslandState == .error
         let progress: Double? = isPrinting ? min(1, max(0, printerProgress)) : nil
         // Capturing temporarily paints the whole edge blue. Keep the green
         // printing animation's anchor alive underneath so it resumes from the
         // same live position instead of restarting at 12 o'clock.
         let preservesPrintingProgress =
-            printerIslandState == .capturing && bluetooth.isActuallyPrinting
+            printerIslandState == .capturing && isLayerPrintingOrChangingFilament
 
         return ScreenEdgeLEDStrip(
             color: printerIslandState.color,
@@ -360,6 +356,11 @@ struct H2DTimelapseView: View {
             return Double(bluetooth.h2dCurrentLayer) / Double(max(1, bluetooth.h2dTotalLayers))
         }
         return 0
+    }
+
+    private var isLayerPrintingOrChangingFilament: Bool {
+        bluetooth.h2dPrintState.uppercased() == "RUNNING" &&
+            (bluetooth.isActuallyPrinting || bluetooth.h2dCurrentLayer > 0)
     }
 
     private var setupView: some View {
@@ -521,7 +522,7 @@ struct H2DTimelapseView: View {
                 ProgressView(value: printerProgress)
                 .tint(.orange)
                 Text(
-                    bluetooth.isActuallyPrinting
+                    isLayerPrintingOrChangingFilament
                         ? "ĐANG IN • lớp \(bluetooth.h2dCurrentLayer)/\(bluetooth.h2dTotalLayers) • \(bluetooth.h2dPrintPercent)%"
                         : "\(bluetooth.h2dStageText) • \(bluetooth.h2dPrintPercent)%"
                 )
@@ -706,10 +707,9 @@ struct H2DTimelapseView: View {
                     Label("Hồ sơ \(printerName) đã lưu", systemImage: "checkmark.shield.fill")
                         .font(.custom("Arial", size: 14).weight(.bold))
                         .foregroundStyle(.green)
-                    Text("Wi‑Fi: \(wifiSSID)  •  IP: \(printerIP)  •  Serial: \(printerSerial)")
-                        .font(.custom("Arial", size: 11).monospacedDigit())
+                    Text("Thông tin kết nối được ẩn để bảo vệ hồ sơ máy in.")
+                        .font(.custom("Arial", size: 11))
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
                     Button("Thay đổi cấu hình") {
                         configurationSaved = false
                         showConfiguration = true
@@ -795,7 +795,7 @@ struct H2DTimelapseView: View {
                             ? "\(printerName) • đang dừng bản in"
                             : bluetooth.isPausedPrint
                                 ? "\(printerName) • đang tạm dừng"
-                            : bluetooth.isActuallyPrinting
+                            : isLayerPrintingOrChangingFilament
                         ? "\(printerName) • đang in lớp \(bluetooth.h2dCurrentLayer)/\(bluetooth.h2dTotalLayers)"
                         : "\(printerName) • \(bluetooth.h2dStageText.lowercased())"
                 )
@@ -1092,6 +1092,7 @@ struct H2DTimelapseView: View {
 
     private func applyHardwareControls(force: Bool = false) {
         printerAlarm.setLevel(Double(bluetooth.hardwareLevelPercent) / 100.0)
+        timelapse.setEffectSoundLevel(Double(bluetooth.hardwareLevelPercent) / 100.0)
 
         // Potentiometer reports are frequent. They only control brightness and
         // alarm volume, so they must not disturb a torch the user enabled from
@@ -1203,7 +1204,7 @@ private struct ScreenEdgeLEDStrip: View {
         .onAppear {
             reanchorProgress(progress, remainingSeconds: remainingSeconds)
             guard blinks else { return }
-            withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) {
+            withAnimation(.linear(duration: 0.18).repeatForever(autoreverses: true)) {
                 pulse = false
             }
         }
@@ -1215,7 +1216,7 @@ private struct ScreenEdgeLEDStrip: View {
         }
         .onChange(of: blinks) { _, shouldBlink in
             if shouldBlink {
-                withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) {
+                withAnimation(.linear(duration: 0.18).repeatForever(autoreverses: true)) {
                     pulse = false
                 }
             } else {

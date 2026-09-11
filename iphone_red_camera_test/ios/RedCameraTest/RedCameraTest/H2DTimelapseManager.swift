@@ -86,6 +86,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private let cameraWarmupTimeout: TimeInterval = 1.8
     private var captureFrameWaitDeadline: Date?
     private var hardwareTorchGeneration = 0
+    private var shutterSoundPlayer: AVAudioPlayer?
+    private var effectSoundLevel: Float = 0.7
 
     func preparePreview() {
         requestCameraPermission { [weak self] granted in
@@ -111,6 +113,9 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
 
     func arm(startingAtLayer: Int = 0) {
         guard !isArmed, !isRendering else { return }
+        // 1113 is iOS' short begin-record cue. Play it at the user's action,
+        // rather than after camera permission/configuration has completed.
+        AudioServicesPlaySystemSound(1113)
         requestCameraPermission { [weak self] granted in
             guard let self else { return }
             guard granted else {
@@ -122,6 +127,14 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                 guard self.configured else { return }
                 self.beginNewRun(startingAtLayer: startingAtLayer)
             }
+        }
+    }
+
+    func setEffectSoundLevel(_ normalizedLevel: Double) {
+        let level = Float(min(1, max(0, normalizedLevel)))
+        DispatchQueue.main.async { [weak self] in
+            self?.effectSoundLevel = level
+            self?.shutterSoundPlayer?.volume = level
         }
     }
 
@@ -496,14 +509,39 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         }
 
         if request.playsShutterSound, request.jobID != "TEST" {
-            DispatchQueue.main.async {
-                // Play once when the printer reports the new layer. Reading
-                // seven temporary frames never produce seven shutter sounds.
-                AudioServicesPlaySystemSound(1108)
-            }
+            // Play the supplied Sony double-shutter sample once per logical
+            // layer. Reading seven temporary candidate frames remains silent.
+            DispatchQueue.main.async { [weak self] in self?.playShutterSound() }
         }
 
         captureCurrentRequestWhenReady()
+    }
+
+    private func playShutterSound() {
+        do {
+            let player: AVAudioPlayer
+            if let loaded = shutterSoundPlayer {
+                player = loaded
+            } else {
+                guard let url = Bundle.main.url(
+                    forResource: "sony-nex-7-double-shutter",
+                    withExtension: "mp3"
+                ) else {
+                    AudioServicesPlaySystemSound(1108)
+                    return
+                }
+                let created = try AVAudioPlayer(contentsOf: url)
+                created.prepareToPlay()
+                shutterSoundPlayer = created
+                player = created
+            }
+            player.stop()
+            player.currentTime = 0
+            player.volume = effectSoundLevel
+            player.play()
+        } catch {
+            AudioServicesPlaySystemSound(1108)
+        }
     }
 
     private func captureCurrentRequestWhenReady() {

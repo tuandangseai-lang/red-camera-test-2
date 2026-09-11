@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.10.3
+// SE Bambu Timelapse Bridge for classic ESP32 v1.10.4
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -58,13 +58,15 @@ constexpr uint8_t LEVEL_POT_PIN = 34;
 // panel potentiometers rarely reach the ideal 0/4095 endpoints, so these
 // calibrated limits make fully counter-clockwise exactly 0% and fully
 // clockwise exactly 100%.
-constexpr uint16_t LEVEL_POT_RAW_MIN = 100;
-constexpr uint16_t LEVEL_POT_RAW_MAX = 3980;
+constexpr uint16_t LEVEL_POT_RAW_MIN = 180;
+constexpr uint16_t LEVEL_POT_RAW_MAX = 3600;
+constexpr uint8_t LEVEL_POT_SAMPLE_COUNT = 15;
 constexpr uint8_t LED_MIN_BRIGHTNESS = 0;
 constexpr uint8_t LED_MAX_BRIGHTNESS = 255;
 constexpr uint32_t LED_REFRESH_MS = 35;
 constexpr uint32_t INPUT_REFRESH_MS = 20;
 constexpr uint32_t INPUT_DEBOUNCE_MS = 45;
+constexpr uint32_t LEVEL_STABLE_MS = 90;
 constexpr uint32_t LEVEL_NOTIFY_MS = 180;
 }  // namespace Config
 
@@ -152,6 +154,7 @@ uint32_t lastInputRefreshAt = 0;
 uint32_t lastLevelNotifyAt = 0;
 uint32_t modeCandidateSince = 0;
 uint32_t holdCandidateSince = 0;
+uint32_t levelCandidateSince = 0;
 uint32_t lastProgressTickAt = 0;
 int8_t hardwareMode = 0;  // -1 = torch, 0 = normal, +1 = timelapse.
 int8_t modeCandidate = 0;
@@ -161,6 +164,7 @@ bool potentiometerInitialized = false;
 float filteredPotReading = 0.0f;
 float displayedPrintPercent = 0.0f;
 uint8_t hardwareLevelPercent = 70;
+uint8_t levelCandidate = 70;
 
 void reportHardwareControls();
 
@@ -1365,10 +1369,33 @@ uint8_t brightnessForLevel(uint8_t level) {
 }
 
 uint8_t levelForPotReading(float rawReading) {
+  if (rawReading <= Config::LEVEL_POT_RAW_MIN) return 0;
+  if (rawReading >= Config::LEVEL_POT_RAW_MAX) return 100;
   const float calibrated =
       (rawReading - Config::LEVEL_POT_RAW_MIN) * 100.0f /
       (Config::LEVEL_POT_RAW_MAX - Config::LEVEL_POT_RAW_MIN);
   return constrain(static_cast<int>(lroundf(calibrated)), 0, 100);
+}
+
+uint16_t readStablePotentiometer() {
+  uint16_t samples[Config::LEVEL_POT_SAMPLE_COUNT];
+  for (uint8_t i = 0; i < Config::LEVEL_POT_SAMPLE_COUNT; ++i) {
+    samples[i] = analogRead(Config::LEVEL_POT_PIN);
+    delayMicroseconds(35);
+  }
+  // A median rejects the large one-sample spikes seen when Wi-Fi and the ADC
+  // are active together. It also prevents a slightly noisy wiper from making
+  // the iPhone volume and LED brightness jump back and forth.
+  for (uint8_t i = 1; i < Config::LEVEL_POT_SAMPLE_COUNT; ++i) {
+    const uint16_t value = samples[i];
+    int8_t j = i - 1;
+    while (j >= 0 && samples[j] > value) {
+      samples[j + 1] = samples[j];
+      --j;
+    }
+    samples[j + 1] = value;
+  }
+  return samples[Config::LEVEL_POT_SAMPLE_COUNT / 2];
 }
 
 void updateHardwareInputs() {
@@ -1386,7 +1413,7 @@ void updateHardwareInputs() {
     if (hardwareMode == 1) {
       // A short red acknowledgement makes the physical transition into
       // timelapse mode unambiguous before live printer colours take over.
-      modeEntryFlashUntil = now + 320;
+      modeEntryFlashUntil = now + 1000;
     }
     queueHardwareControl("MODE", hardwareMode);
     Serial.printf("[CONTROL] rotary mode %d\n", hardwareMode);
@@ -1404,36 +1431,42 @@ void updateHardwareInputs() {
                   hardwareHoldPressed ? "held" : "released");
   }
 
-  const int rawPot = analogRead(Config::LEVEL_POT_PIN);
+  const int rawPot = readStablePotentiometer();
   if (!potentiometerInitialized) {
     filteredPotReading = rawPot;
     potentiometerInitialized = true;
   } else {
-    // Low-pass filtering prevents ADC noise from changing BLE volume or LED
-    // brightness while the knob is untouched.
-    filteredPotReading = filteredPotReading * 0.84f + rawPot * 0.16f;
+    filteredPotReading = filteredPotReading * 0.72f + rawPot * 0.28f;
   }
   const uint8_t newLevel = levelForPotReading(filteredPotReading);
-  const int levelDelta = abs(static_cast<int>(newLevel) -
+  if (newLevel != levelCandidate) {
+    levelCandidate = newLevel;
+    levelCandidateSince = now;
+  }
+  const int levelDelta = abs(static_cast<int>(levelCandidate) -
                              static_cast<int>(hardwareLevelPercent));
-  if (levelDelta >= 2 ||
-      (levelDelta >= 1 && now - lastLevelNotifyAt >= 900)) {
-    hardwareLevelPercent = newLevel;
-    ledStrip.setBrightness(brightnessForLevel(hardwareLevelPercent));
+  if (levelDelta >= 2 && now - levelCandidateSince >= Config::LEVEL_STABLE_MS) {
+    hardwareLevelPercent = levelCandidate;
     if (now - lastLevelNotifyAt >= Config::LEVEL_NOTIFY_MS) {
       lastLevelNotifyAt = now;
       queueHardwareControl("LEVEL", hardwareLevelPercent);
-      Serial.printf("[CONTROL] level %u%%\n", hardwareLevelPercent);
+      Serial.printf("[CONTROL] level %u%% (median ADC %d)\n",
+                    hardwareLevelPercent, rawPot);
     }
   }
 }
 
 uint32_t scaledLedColor(uint8_t red, uint8_t green, uint8_t blue,
                         uint8_t scale) {
+  const uint16_t knobScale = brightnessForLevel(hardwareLevelPercent);
   return ledStrip.Color(
-      static_cast<uint16_t>(red) * scale / 255,
-      static_cast<uint16_t>(green) * scale / 255,
-      static_cast<uint16_t>(blue) * scale / 255);
+      static_cast<uint32_t>(red) * scale * knobScale / 65025,
+      static_cast<uint32_t>(green) * scale * knobScale / 65025,
+      static_cast<uint32_t>(blue) * scale * knobScale / 65025);
+}
+
+uint32_t ledColor(uint8_t red, uint8_t green, uint8_t blue) {
+  return scaledLedColor(red, green, blue, 255);
 }
 
 void fillLedStrip(uint32_t color) {
@@ -1501,44 +1534,37 @@ void updateLedStrip() {
 
   const bool criticalError = hasCriticalPrinterError();
   if (static_cast<int32_t>(modeEntryFlashUntil - now) > 0) {
+    // Entering timelapse is always acknowledged at true full brightness,
+    // independently of the potentiometer, for one complete second.
     fillLedStrip(ledStrip.Color(255, 0, 0));
   } else if (criticalError) {
-    // Alarm audio volume still follows the potentiometer on iPhone, but the
-    // physical strip stays steadily red instead of pulsing with the siren.
-    fillLedStrip(ledStrip.Color(255, 0, 0));
+    const bool alarmOn = (now % 260) < 150;
+    fillLedStrip(alarmOn ? ledColor(255, 0, 0) : ledStrip.Color(0, 0, 0));
   } else if (static_cast<int32_t>(captureFlashUntil - now) > 0) {
     // Same meaning as the blue border on iPhone: one layer photo was ordered.
-    fillLedStrip(ledStrip.Color(0, 105, 255));
-  } else if (hardwareHoldPressed) {
-    // Keep the first status pixel steady. The three effect pixels use the
-    // same 110 ms on / 80 ms off film-shutter cadence as the iPhone torch.
-    fillStatusLeds(ledStrip.Color(255, 190, 0));
-    const bool flashOn = (now % 190) < 110;
-    fillAnimatedLeds(flashOn ? ledStrip.Color(255, 190, 0)
-                             : ledStrip.Color(3, 2, 0));
-  } else if (hardwareMode == -1) {
-    // Left position: the iPhone torch is steady and the physical strip is a
-    // steady warm-yellow locator light.
-    fillLedStrip(ledStrip.Color(255, 175, 0));
+    fillLedStrip(ledColor(0, 105, 255));
+  } else if (hardwareHoldPressed || hardwareMode == -1) {
+    // The physical WS2812B strip remains solid yellow while the iPhone torch
+    // is steady or blinking. Only the iPhone flash follows the film cadence.
+    fillLedStrip(ledColor(255, 190, 0));
   } else if (isPausedState() || isExplicitlyStoppedState() ||
              printState == "FAILED") {
-    // A deliberate stop is not an alarm, but it must remain visually distinct
-    // from waiting/preparation. The first status pixel stays red while the
-    // three effect pixels breathe red on the two-second cycle.
-    fillStatusLeds(ledStrip.Color(255, 0, 0));
-    fillAnimatedLeds(scaledLedColor(255, 0, 0, breathingScale(now)));
+    // A deliberate pause/stop is red but steady and never sounds the alarm.
+    fillLedStrip(ledColor(255, 0, 0));
   } else if (printState == "RUNNING" &&
-             (currentStage == 0 || currentStage == -1)) {
+             (currentStage == 0 || currentStage == -1 || currentLayer > 0)) {
+    // Keep the print-progress colour green through filament changes and every
+    // other RUNNING sub-stage. Maintenance stage codes must not turn it yellow.
     // Pixel 0 is the always-on status light. Pixels 1...3 are the three
     // clockwise progress pixels that match the iPhone border.
-    fillStatusLeds(ledStrip.Color(0, 255, 58));
+    fillStatusLeds(ledColor(0, 255, 58));
     const float filledPixels =
         smoothLedProgress(now) * Config::LED_ANIMATED_COUNT / 100.0f;
     for (uint16_t i = 0; i < Config::LED_ANIMATED_COUNT; ++i) {
       const uint16_t pixel = Config::LED_STATUS_COUNT + i;
       const float portion = constrain(filledPixels - i, 0.0f, 1.0f);
       if (portion <= 0.001f) {
-        ledStrip.setPixelColor(pixel, ledStrip.Color(0, 5, 1));
+        ledStrip.setPixelColor(pixel, ledColor(0, 5, 1));
         continue;
       }
       // One pixel rises smoothly from a faint green to full green. Only after
@@ -1548,10 +1574,9 @@ void updateLedStrip() {
       ledStrip.setPixelColor(pixel, scaledLedColor(0, 255, 58, scale));
     }
   } else {
-    // Waiting, connecting and every preparation/cleaning/calibration stage:
-    // one solid yellow status pixel plus three breathing effect pixels.
-    fillStatusLeds(ledStrip.Color(255, 190, 0));
-    fillAnimatedLeds(scaledLedColor(255, 190, 0, breathingScale(now)));
+    // Waiting, connecting and preparation remain solid yellow. The only
+    // blinking physical LED state is a real critical red printer alarm.
+    fillLedStrip(ledColor(255, 190, 0));
   }
   ledStrip.show();
 }
@@ -1561,24 +1586,25 @@ void setup() {
   // Drive a known waiting colour before Wi-Fi/BLE/MQTT startup. This prevents
   // the strip from briefly retaining the green/red frame shown before reset.
   ledStrip.begin();
-  ledStrip.setBrightness(brightnessForLevel(hardwareLevelPercent));
+  ledStrip.setBrightness(255);
   fillLedStrip(ledStrip.Color(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.3");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.4");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
   pinMode(Config::LEVEL_POT_PIN, INPUT);
   analogReadResolution(12);
+  analogSetPinAttenuation(Config::LEVEL_POT_PIN, ADC_11db);
   hardwareMode = modeCandidate = readHardwareModeRaw();
   hardwareHoldPressed = holdCandidate =
       digitalRead(Config::HOLD_BUTTON_PIN) == LOW;
-  filteredPotReading = analogRead(Config::LEVEL_POT_PIN);
+  filteredPotReading = readStablePotentiometer();
   potentiometerInitialized = true;
   hardwareLevelPercent = levelForPotReading(filteredPotReading);
-  ledStrip.setBrightness(brightnessForLevel(hardwareLevelPercent));
-  fillLedStrip(ledStrip.Color(255, 190, 0));
+  levelCandidate = hardwareLevelPercent;
+  fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   loadSettings();
   setupBle();
