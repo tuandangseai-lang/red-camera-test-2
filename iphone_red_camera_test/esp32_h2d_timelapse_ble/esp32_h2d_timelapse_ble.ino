@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.11.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.11.1
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -39,13 +39,12 @@ constexpr uint8_t NOZZLE_SYNC_RETRY_LIMIT = 8;
 constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
-// The physical strip still has eight WS2812B packages, but only the first four
-// are active. Sending all eight slots forces pixels 5...8 fully off instead of
-// letting them retain a dim frame from the older eight-pixel firmware.
+// All eight WS2812B packages are active: pixels 0...2 hold the printer status
+// colour and pixels 3...7 form the real-time print progress bar.
 // DATA -> GPIO5 through 330 ohms; 5V/GND must share GND with the ESP32.
 constexpr uint8_t LED_STRIP_PIN = 5;
-constexpr uint16_t LED_STATUS_COUNT = 1;
-constexpr uint16_t LED_ANIMATED_COUNT = 3;
+constexpr uint16_t LED_STATUS_COUNT = 3;
+constexpr uint16_t LED_ANIMATED_COUNT = 5;
 constexpr uint16_t LED_ACTIVE_COUNT = LED_STATUS_COUNT + LED_ANIMATED_COUNT;
 constexpr uint16_t LED_PHYSICAL_COUNT = 8;
 // Controls use INPUT_PULLUP: each button/switch contact closes to GND.
@@ -1215,7 +1214,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.11.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.11.1");
   reportHardwareControls();
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
@@ -1602,7 +1601,7 @@ void updateLedStrip() {
              (currentStage == 0 || currentStage == -1 || currentLayer > 0)) {
     // Keep the print-progress colour green through filament changes and every
     // other RUNNING sub-stage. Maintenance stage codes must not turn it yellow.
-    // Pixel 0 is the always-on status light. Pixels 1...3 are the three
+    // Pixels 0...2 are the always-on status group. Pixels 3...7 are the five
     // clockwise progress pixels that match the iPhone border.
     fillStatusLeds(ledColor(0, 255, 58));
     const float filledPixels =
@@ -1651,7 +1650,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.11.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.11.1");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
