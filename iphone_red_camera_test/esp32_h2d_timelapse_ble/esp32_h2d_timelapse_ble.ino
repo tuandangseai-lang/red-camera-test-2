@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.10.9
+// SE Bambu Timelapse Bridge for classic ESP32 v1.11.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -1215,7 +1215,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.10.9");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.11.0");
   reportHardwareControls();
   reportPrinterIdentity();
   if (!activeFilamentType.isEmpty()) reportMaterial();
@@ -1611,13 +1611,22 @@ void updateLedStrip() {
       const uint16_t pixel = Config::LED_STATUS_COUNT + i;
       const float portion = constrain(filledPixels - i, 0.0f, 1.0f);
       if (portion <= 0.001f) {
-        ledStrip.setPixelColor(pixel, ledColor(0, 5, 1));
+        // Future progress pixels are truly off. Even a faint green base can
+        // look almost full through a diffuser and hides the completion edge.
+        ledStrip.setPixelColor(pixel, ledStrip.Color(0, 0, 0));
         continue;
       }
-      // One pixel rises smoothly from a faint green to full green. Only after
-      // it is full does the next clockwise pixel begin to rise.
+      if (portion >= 0.999f) {
+        // A completed segment is the only progress state allowed to reach the
+        // fixed 95% power, so it remains unmistakable from the active segment.
+        ledStrip.setPixelColor(pixel, ledColor(0, 255, 58));
+        continue;
+      }
+      // The active segment starts at true 0% and rises smoothly only as far
+      // as 50% brightness. It snaps to the full completed level at the exact
+      // segment boundary, while the following segment stays black.
       const float eased = portion * portion * (3.0f - 2.0f * portion);
-      const uint8_t scale = 18 + static_cast<uint8_t>(eased * 237.0f);
+      const uint8_t scale = static_cast<uint8_t>(eased * 128.0f);
       ledStrip.setPixelColor(pixel, scaledLedColor(0, 255, 58, scale));
     }
   } else if (hardwareMode == 0) {
@@ -1642,7 +1651,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.10.9");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.11.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
