@@ -5,6 +5,7 @@ import ImageIO
 import Photos
 import SwiftUI
 import UIKit
+import Vision
 
 struct H2DCapturedFramePreview: Identifiable {
     let layer: Int
@@ -23,6 +24,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     @Published private(set) var isLiveMonitorVisible = false
     @Published private(set) var canUseTorch = false
     @Published private(set) var isTorchEnabled = false
+    @Published private(set) var isTorchSleepDisplayActive = false
     // The preview is always portrait when the iPhone is mounted vertically.
     // Capture output keeps its own angle because the sensor image was mounted
     // upside down in the previous bracket.
@@ -86,8 +88,11 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private let cameraWarmupTimeout: TimeInterval = 1.8
     private var captureFrameWaitDeadline: Date?
     private var hardwareTorchGeneration = 0
+    private var torchDisplayGeneration = 0
+    private var hardwareSteadyTorchRequested = false
     private var shutterSoundPlayer: AVAudioPlayer?
     private var effectSoundLevel: Float = 0.7
+    private let torchDisplaySleepDelay: TimeInterval = 10
 
     func preparePreview() {
         requestCameraPermission { [weak self] granted in
@@ -265,6 +270,12 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             guard let self else { return }
             self.hardwareTorchGeneration &+= 1
             let generation = self.hardwareTorchGeneration
+            self.torchDisplayGeneration &+= 1
+            let displayGeneration = self.torchDisplayGeneration
+            self.hardwareSteadyTorchRequested = steady && !blinking
+            if !self.hardwareSteadyTorchRequested {
+                self.leaveTorchSleepDisplay()
+            }
 
             guard steady || blinking else {
                 self.applyTorch(false)
@@ -289,9 +300,27 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                         self.runHardwareTorchBlink(generation: generation, turnOn: true)
                     } else {
                         self.applyTorch(steady)
+                        self.scheduleTorchDisplaySleep(generation: displayGeneration)
                     }
                 }
             }
+        }
+    }
+
+    /// The left rotary position is a flashlight mode. iOS does not allow an
+    /// app to terminate or lock the phone and keep using the torch, so SE keeps
+    /// the capture session alive and makes the OLED fully black after 10 s.
+    /// A tap wakes the controls for another 10 s without interrupting light.
+    func wakeTorchDisplayTemporarily() {
+        sessionQueue.async { [weak self] in
+            guard let self, self.hardwareSteadyTorchRequested else { return }
+            self.torchDisplayGeneration &+= 1
+            let generation = self.torchDisplayGeneration
+            self.publishOnMain {
+                self.isTorchSleepDisplayActive = false
+                self.showMonitorDisplay()
+            }
+            self.scheduleTorchDisplaySleep(generation: generation)
         }
     }
 
@@ -715,16 +744,101 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             historyObstruction = 0
         }
         let obstructionPenalty = max(medianObstruction, historyObstruction * 0.9)
+        // The H2D carriage enters from an outer edge. A whole/centre average
+        // can miss a small protruding nozzle, so inspect all edge corridors
+        // separately and reject even a bright (not only dark) intrusion.
+        let medianEdgeIntrusion = localizedEdgeIntrusion(
+            frame,
+            reference: medianSignature,
+            referenceMeanLuma: medianMeanLuma
+        )
+        let historyEdgeIntrusion: Double
+        if let previousAcceptedSignature {
+            historyEdgeIntrusion = localizedEdgeIntrusion(
+                frame,
+                reference: previousAcceptedSignature,
+                referenceMeanLuma: previousAcceptedMeanLuma
+            )
+        } else {
+            historyEdgeIntrusion = 0
+        }
+        let edgeIntrusionPenalty = max(
+            medianEdgeIntrusion,
+            historyEdgeIntrusion * 0.82
+        )
         let motionPenalty = max(0, frame.motionScore - quietestMotion)
 
-        // After obstruction and motion are rejected, prefer the middle of the
-        // 0.9-second pre-transition window. It is safely before the layer edge
-        // without depending on the duration of the next layer.
+        // After obstruction and motion are rejected, prefer the older clean
+        // side of the 0.9-second window. This is before the layer transition,
+        // while Smooth has already parked the carriage near its wipe tower.
         let age = max(0, CMTimeGetSeconds(newestTimestamp - frame.timestamp))
-        let timingPenalty = abs(age - 0.45) * 0.35
+        let timingPenalty = abs(age - 0.75) * 0.8
         return averageDifference * 0.15 + referencePenalty * 2.2 +
             centerBrightnessPenalty + centerDarkPenalty + wholeFramePenalty +
-            obstructionPenalty * 2.6 + motionPenalty * 1.4 + timingPenalty
+            obstructionPenalty * 3.2 + edgeIntrusionPenalty * 4.8 +
+            motionPenalty * 1.8 + timingPenalty
+    }
+
+    private func localizedEdgeIntrusion(
+        _ frame: BufferedFrame,
+        reference: [UInt8],
+        referenceMeanLuma: Double
+    ) -> Double {
+        localizedEdgeIntrusion(
+            signature: frame.lumaSignature,
+            meanLuma: frame.meanLuma,
+            reference: reference,
+            referenceMeanLuma: referenceMeanLuma
+        )
+    }
+
+    private func localizedEdgeIntrusion(
+        signature: [UInt8],
+        meanLuma: Double,
+        reference: [UInt8],
+        referenceMeanLuma: Double
+    ) -> Double {
+        let gridSize = 48
+        let count = min(signature.count, reference.count)
+        guard count >= gridSize * gridSize else { return 0 }
+        let exposureShift = meanLuma - referenceMeanLuma
+        var residual = [Double](repeating: 0, count: gridSize * gridSize)
+        for index in 0..<(gridSize * gridSize) {
+            residual[index] = abs(
+                Double(signature[index]) -
+                    (Double(reference[index]) + exposureShift)
+            )
+        }
+
+        let windowSize = 6
+        let corridorWidth = 17
+        var strongestWindow = 0.0
+        for row in stride(from: 1, through: gridSize - windowSize - 1, by: 2) {
+            for column in stride(from: 1, through: gridSize - windowSize - 1, by: 2) {
+                let touchesEntryCorridor =
+                    column < corridorWidth ||
+                    column + windowSize > gridSize - corridorWidth ||
+                    row < 12 || row + windowSize > gridSize - 12
+                guard touchesEntryCorridor else { continue }
+                var total = 0.0
+                var changedSamples = 0
+                for localRow in 0..<windowSize {
+                    for localColumn in 0..<windowSize {
+                        let value = residual[
+                            (row + localRow) * gridSize + column + localColumn
+                        ]
+                        total += value
+                        if value > 16 { changedSamples += 1 }
+                    }
+                }
+                let samples = Double(windowSize * windowSize)
+                strongestWindow = max(
+                    strongestWindow,
+                    total / samples + Double(changedSamples) / samples * 28.0
+                )
+            }
+        }
+        return strongestWindow
     }
 
     private func localizedDarkIntrusion(
@@ -927,6 +1041,13 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             return
         }
 
+        // A final temporal pass catches an occasional carriage frame even if
+        // every one of the seven live candidates was imperfect. Isolated
+        // outliers are replaced by the nearest clean neighbouring layer; the
+        // frame count/timing stays unchanged, so print progress remains smooth.
+        publishStatus("Đang lọc rung và đầu in khỏi video...")
+        let renderFrameURLs = curatedFrameURLs(frameURLs)
+
         let landscape = firstCGImage.width >= firstCGImage.height
         let outputWidth = landscape ? 1920 : 1080
         let outputHeight = landscape ? 1080 : 1920
@@ -965,25 +1086,56 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             writer.startSession(atSourceTime: .zero)
 
             let frameRate: Int32 = 30
-            for (index, url) in frameURLs.enumerated() {
+            var previousRegistrationImage: CGImage?
+            var accumulatedTranslation = CGPoint.zero
+            for (index, url) in renderFrameURLs.enumerated() {
                 while !input.isReadyForMoreMediaData { Thread.sleep(forTimeInterval: 0.003) }
                 autoreleasepool {
                     guard let image = UIImage(contentsOfFile: url.path),
                           let cgImage = normalizedCGImage(image),
                           let pool = adaptor.pixelBufferPool,
-                          let buffer = makePixelBuffer(
-                            image: cgImage,
-                            width: outputWidth,
-                            height: outputHeight,
-                            pool: pool
-                          ) else { return }
+                          let buffer: CVPixelBuffer = {
+                              if let previousRegistrationImage,
+                                 let step = stabilizationTranslation(
+                                    floating: cgImage,
+                                    reference: previousRegistrationImage
+                                 ) {
+                                  // Reject a registration result that is too
+                                  // large to be phone vibration. This prevents
+                                  // growing model geometry from causing drift.
+                                  let maxStepX = CGFloat(cgImage.width) * 0.035
+                                  let maxStepY = CGFloat(cgImage.height) * 0.035
+                                  if abs(step.x) <= maxStepX, abs(step.y) <= maxStepY {
+                                      accumulatedTranslation.x += step.x
+                                      accumulatedTranslation.y += step.y
+                                  }
+                                  let maxTotalX = CGFloat(cgImage.width) * 0.055
+                                  let maxTotalY = CGFloat(cgImage.height) * 0.055
+                                  accumulatedTranslation.x = min(
+                                      maxTotalX,
+                                      max(-maxTotalX, accumulatedTranslation.x)
+                                  )
+                                  accumulatedTranslation.y = min(
+                                      maxTotalY,
+                                      max(-maxTotalY, accumulatedTranslation.y)
+                                  )
+                              }
+                              previousRegistrationImage = cgImage
+                              return makePixelBuffer(
+                                image: cgImage,
+                                width: outputWidth,
+                                height: outputHeight,
+                                pool: pool,
+                                stabilizationTranslation: accumulatedTranslation
+                              )
+                          }() else { return }
                     adaptor.append(
                         buffer,
                         withPresentationTime: CMTime(value: Int64(index), timescale: frameRate)
                     )
                 }
-                let progress = Double(index + 1) / Double(max(1, frameURLs.count))
-                if index % 12 == 0 || index == frameURLs.count - 1 {
+                let progress = Double(index + 1) / Double(max(1, renderFrameURLs.count))
+                if index % 12 == 0 || index == renderFrameURLs.count - 1 {
                     publishStatus("Đang ghép video • \(Int(progress * 100))%")
                 }
             }
@@ -1019,11 +1171,244 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         return renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: image.size)) }.cgImage
     }
 
+    private func stabilizationTranslation(
+        floating: CGImage,
+        reference: CGImage
+    ) -> CGPoint? {
+        let request = VNTranslationalImageRegistrationRequest(
+            targetedCGImage: reference,
+            options: [:]
+        )
+        let handler = VNImageRequestHandler(cgImage: floating, options: [:])
+        do {
+            try handler.perform([request])
+            guard let observation = request.results?.first else { return nil }
+            let transform = observation.alignmentTransform
+            return CGPoint(x: transform.tx, y: transform.ty)
+        } catch {
+            return nil
+        }
+    }
+
+    private func curatedFrameURLs(_ frameURLs: [URL]) -> [URL] {
+        guard frameURLs.count >= 7 else { return frameURLs }
+        var signatures: [[UInt8]] = []
+        var means: [Double] = []
+        signatures.reserveCapacity(frameURLs.count)
+        means.reserveCapacity(frameURLs.count)
+
+        for url in frameURLs {
+            let signature: [UInt8] = autoreleasepool {
+                guard let image = UIImage(contentsOfFile: url.path),
+                      let cgImage = normalizedCGImage(image) else { return [] }
+                return makeLumaSignature(from: cgImage)
+            }
+            guard !signature.isEmpty else { return frameURLs }
+            signatures.append(signature)
+            means.append(signature.reduce(0.0) { $0 + Double($1) } /
+                         Double(signature.count))
+        }
+
+        var rejected = Set<Int>()
+        // Early layers can change a very large percentage of the tiny model
+        // from one frame to the next. Let geometric stabilization handle that
+        // opening section instead of mistaking real growth for an obstruction.
+        let outlierFilterStart = max(3, Int(Double(signatures.count) * 0.20))
+        for index in signatures.indices {
+            guard index >= outlierFilterStart else { continue }
+            let lower = max(0, index - 4)
+            let upper = min(signatures.count - 1, index + 4)
+            let neighbourIndices = (lower...upper).filter { $0 != index }
+            guard neighbourIndices.count >= 4 else { continue }
+            let median = temporalMedianSignature(
+                indices: neighbourIndices,
+                signatures: signatures
+            )
+            guard !median.isEmpty else { continue }
+            let medianMean = median.reduce(0.0) { $0 + Double($1) } /
+                Double(median.count)
+            // Remove a small whole-frame camera shift before deciding that a
+            // local object entered. Otherwise OIS vibration can look like a
+            // toolhead along every high-contrast edge.
+            let alignedCurrent = translationAlignedSignature(
+                signatures[index],
+                reference: median
+            )
+            let alignedMean = alignedCurrent.reduce(0.0) { $0 + Double($1) } /
+                Double(alignedCurrent.count)
+            let edgeIntrusion = localizedEdgeIntrusion(
+                signature: alignedCurrent,
+                meanLuma: alignedMean,
+                reference: median,
+                referenceMeanLuma: medianMean
+            )
+            let globalDifference = normalizedSignatureDifference(
+                alignedCurrent,
+                meanLuma: alignedMean,
+                reference: median,
+                referenceMeanLuma: medianMean
+            )
+
+            var temporalSpike = 0.0
+            if index > 0, index + 1 < signatures.count {
+                let beforeDifference = translationInvariantDifference(
+                    signatures[index],
+                    reference: signatures[index - 1]
+                )
+                let afterDifference = translationInvariantDifference(
+                    signatures[index],
+                    reference: signatures[index + 1]
+                )
+                let neighbourDifference = translationInvariantDifference(
+                    signatures[index - 1],
+                    reference: signatures[index + 1]
+                )
+                temporalSpike = min(beforeDifference, afterDifference) -
+                    neighbourDifference * 0.58
+            }
+
+            // Two independent gates avoid deleting real geometry growth: a
+            // large edge-local change must also be globally unusual, or it
+            // must appear as an isolated temporal spike between clean layers.
+            if (edgeIntrusion > 58 && globalDifference > 10) ||
+                (edgeIntrusion > 42 && temporalSpike > 10) {
+                rejected.insert(index)
+            }
+        }
+
+        guard !rejected.isEmpty else { return frameURLs }
+        var curated = frameURLs
+        for index in rejected {
+            for distance in 1...5 {
+                let candidates = [index - distance, index + distance]
+                if let replacement = candidates.first(where: {
+                    $0 >= 0 && $0 < frameURLs.count && !rejected.contains($0)
+                }) {
+                    curated[index] = frameURLs[replacement]
+                    break
+                }
+            }
+        }
+        return curated
+    }
+
+    private func temporalMedianSignature(
+        indices: [Int],
+        signatures: [[UInt8]]
+    ) -> [UInt8] {
+        guard let firstIndex = indices.first else { return [] }
+        let count = signatures[firstIndex].count
+        guard count > 0 else { return [] }
+        var result = [UInt8](repeating: 0, count: count)
+        for sample in 0..<count {
+            let values = indices.map { signatures[$0][sample] }.sorted()
+            result[sample] = values[values.count / 2]
+        }
+        return result
+    }
+
+    private func translationInvariantDifference(
+        _ signature: [UInt8],
+        reference: [UInt8]
+    ) -> Double {
+        let aligned = translationAlignedSignature(signature, reference: reference)
+        guard !aligned.isEmpty, !reference.isEmpty else { return 0 }
+        let alignedMean = aligned.reduce(0.0) { $0 + Double($1) } /
+            Double(aligned.count)
+        let referenceMean = reference.reduce(0.0) { $0 + Double($1) } /
+            Double(reference.count)
+        return normalizedSignatureDifference(
+            aligned,
+            meanLuma: alignedMean,
+            reference: reference,
+            referenceMeanLuma: referenceMean
+        )
+    }
+
+    private func translationAlignedSignature(
+        _ signature: [UInt8],
+        reference: [UInt8]
+    ) -> [UInt8] {
+        let gridSize = 48
+        guard signature.count >= gridSize * gridSize,
+              reference.count >= gridSize * gridSize else { return signature }
+        let signatureMean = signature.reduce(0.0) { $0 + Double($1) } /
+            Double(signature.count)
+        let referenceMean = reference.reduce(0.0) { $0 + Double($1) } /
+            Double(reference.count)
+        let exposureShift = signatureMean - referenceMean
+        var bestOffset = (x: 0, y: 0)
+        var bestDifference = Double.greatestFiniteMagnitude
+        let margin = 5
+
+        for offsetY in -2...2 {
+            for offsetX in -2...2 {
+                var difference = 0.0
+                var samples = 0
+                for row in margin..<(gridSize - margin) {
+                    let sourceRow = row + offsetY
+                    guard sourceRow >= 0, sourceRow < gridSize else { continue }
+                    for column in margin..<(gridSize - margin) {
+                        let sourceColumn = column + offsetX
+                        guard sourceColumn >= 0, sourceColumn < gridSize else { continue }
+                        difference += abs(
+                            Double(signature[sourceRow * gridSize + sourceColumn]) -
+                                exposureShift -
+                                Double(reference[row * gridSize + column])
+                        )
+                        samples += 1
+                    }
+                }
+                guard samples > 0 else { continue }
+                let average = difference / Double(samples)
+                if average < bestDifference {
+                    bestDifference = average
+                    bestOffset = (offsetX, offsetY)
+                }
+            }
+        }
+
+        var aligned = reference
+        for row in 0..<gridSize {
+            let sourceRow = row + bestOffset.y
+            guard sourceRow >= 0, sourceRow < gridSize else { continue }
+            for column in 0..<gridSize {
+                let sourceColumn = column + bestOffset.x
+                guard sourceColumn >= 0, sourceColumn < gridSize else { continue }
+                aligned[row * gridSize + column] =
+                    signature[sourceRow * gridSize + sourceColumn]
+            }
+        }
+        return aligned
+    }
+
+    private func makeLumaSignature(from image: CGImage) -> [UInt8] {
+        let width = 48
+        let height = 48
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        let rendered = pixels.withUnsafeMutableBytes { storage -> Bool in
+            guard let context = CGContext(
+                data: storage.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+            context.interpolationQuality = .medium
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return rendered ? pixels : []
+    }
+
     private func makePixelBuffer(
         image: CGImage,
         width: Int,
         height: Int,
-        pool: CVPixelBufferPool
+        pool: CVPixelBufferPool,
+        stabilizationTranslation: CGPoint = .zero
     ) -> CVPixelBuffer? {
         var optionalBuffer: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &optionalBuffer) == kCVReturnSuccess,
@@ -1044,13 +1429,16 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
 
         context.setFillColor(UIColor.black.cgColor)
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        // A small invisible overscan provides room for translation correction
+        // without exposing black edges. It is only 4.5%, on top of the user's
+        // existing 1.5x camera zoom.
         let scale = max(CGFloat(width) / CGFloat(image.width),
-                        CGFloat(height) / CGFloat(image.height))
+                        CGFloat(height) / CGFloat(image.height)) * 1.045
         let drawWidth = CGFloat(image.width) * scale
         let drawHeight = CGFloat(image.height) * scale
         let rect = CGRect(
-            x: (CGFloat(width) - drawWidth) / 2,
-            y: (CGFloat(height) - drawHeight) / 2,
+            x: (CGFloat(width) - drawWidth) / 2 + stabilizationTranslation.x * scale,
+            y: (CGFloat(height) - drawHeight) / 2 - stabilizationTranslation.y * scale,
             width: drawWidth,
             height: drawHeight
         )
@@ -1137,6 +1525,36 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         sessionQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, generation == self.hardwareTorchGeneration else { return }
             self.runHardwareTorchBlink(generation: generation, turnOn: !turnOn)
+        }
+    }
+
+    private func scheduleTorchDisplaySleep(generation: Int) {
+        sessionQueue.asyncAfter(deadline: .now() + torchDisplaySleepDelay) { [weak self] in
+            guard let self,
+                  generation == self.torchDisplayGeneration,
+                  self.hardwareSteadyTorchRequested,
+                  self.isTorchEnabled else { return }
+            self.publishOnMain {
+                if self.originalBrightness == nil {
+                    self.originalBrightness = UIScreen.main.brightness
+                }
+                // Keep iOS awake so the AVCapture torch remains powered while
+                // the OLED itself is visually and electrically near-off.
+                UIApplication.shared.isIdleTimerDisabled = true
+                UIScreen.main.brightness = 0.0
+                self.isTorchSleepDisplayActive = true
+            }
+        }
+    }
+
+    private func leaveTorchSleepDisplay() {
+        publishOnMain {
+            self.isTorchSleepDisplayActive = false
+            if self.isArmed {
+                self.setDimmedDisplay()
+            } else {
+                self.restoreDisplay()
+            }
         }
     }
 

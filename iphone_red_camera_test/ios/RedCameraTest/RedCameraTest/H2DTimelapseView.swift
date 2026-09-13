@@ -228,6 +228,18 @@ struct H2DTimelapseView: View {
         .onChange(of: bluetooth.printerAlertText) { _, _ in
             synchronizePrinterAlarm()
         }
+        .overlay {
+            if timelapse.isTorchSleepDisplayActive {
+                Color.black
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        timelapse.wakeTorchDisplayTemporarily()
+                    }
+                    .accessibilityLabel("Chạm để bật màn hình trong 10 giây")
+                    .zIndex(1_000)
+            }
+        }
     }
 
     private enum PrinterIslandState: Equatable {

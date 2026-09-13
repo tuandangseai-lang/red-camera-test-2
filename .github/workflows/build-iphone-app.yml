@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.42 build121 - am bao loi khong bi tat
+name: Tao IPA SE v9.43 build122 - timelapse chong rung va loc dau in
 
 on:
   workflow_dispatch:
@@ -82,6 +82,11 @@ jobs:
           grep -q "normalizedReferenceDifference" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "camera.videoZoomFactor = min" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "setTorchEnabled" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "VNTranslationalImageRegistrationRequest" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "curatedFrameURLs" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "localizedEdgeIntrusion" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "torchDisplaySleepDelay: TimeInterval = 10" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "isTorchSleepDisplayActive" "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'bolt.fill' "RedCameraTest/H2DTimelapseView.swift"
           grep -q "isStoppingPrint" "RedCameraTest/H2DBLEManager.swift"
           grep -q "isPausedPrint" "RedCameraTest/H2DBLEManager.swift"
@@ -173,19 +178,19 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.42"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "121"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.43"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "122"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.42-build121-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.43-build122-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.42-build121-unsigned-ipa
-          path: SE-v9.42-build121-unsigned.ipa
+          name: SE-v9.43-build122-unsigned-ipa
+          path: SE-v9.43-build122-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
