@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.12.10
+// SE Bambu Timelapse Bridge for classic ESP32 v1.12.11
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -63,6 +63,7 @@ constexpr uint32_t FLEET_MONITOR_DWELL_MS = 4500;
 // until it can be moved to a separate worker without affecting timelapse.
 constexpr bool FLEET_BACKGROUND_MQTT_ENABLED = false;
 constexpr uint32_t PRINT_COMPLETE_BLUE_MS = 3UL * 60UL * 60UL * 1000UL;
+constexpr uint32_t PRINT_COMPLETE_PULSE_MS = 4000;
 constexpr uint32_t STATUS_PERIOD_MS = 2000;
 constexpr uint32_t TELEMETRY_PERIOD_MS = 1000;
 constexpr uint32_t STATUS_REQUEST_RETRY_MS = 3500;
@@ -113,6 +114,7 @@ constexpr uint16_t LEVEL_POT_STABLE_SPAN = 180;
 constexpr uint8_t LED_MIN_BRIGHTNESS = 0;
 constexpr uint8_t LED_MAX_BRIGHTNESS = 255;
 constexpr uint8_t LED_FIXED_BRIGHTNESS_PERCENT = 95;
+constexpr uint8_t LED_IDLE_MAX_SCALE = 102;  // 40% of the normal LED level.
 constexpr uint32_t LED_REFRESH_MS = 35;
 constexpr uint32_t INPUT_REFRESH_MS = 20;
 constexpr uint32_t INPUT_DEBOUNCE_MS = 80;
@@ -2047,6 +2049,12 @@ void handlePhoneCommand(String command) {
       timelapseArmed = false;
       reportStatus("DISARMED");
     }
+  } else if (head == "H2D_COMPLETE_ACK") {
+    // Tapping the completed state on iPhone dismisses the blue indication on
+    // both devices immediately. The printer remains FINISH/IDLE; only the
+    // presentation timer is cleared.
+    printCompleteBlueUntil = 0;
+    queuePhoneEvent("H2D,COMPLETE_ACK");
   } else if (head == "H2D_STATUS" || head == "APP_READY" || head == "PING") {
     sendCurrentStatus();
     // The command callback runs on NimBLE's host task. Defer publishStatus-
@@ -2315,6 +2323,18 @@ uint8_t breathingScale(uint32_t now) {
   return 35 + static_cast<uint32_t>(ramp) * 220 / 1000;
 }
 
+uint8_t smoothPulseScale(uint32_t now, uint32_t period, uint8_t minimum,
+                         uint8_t maximum) {
+  const uint32_t halfPeriod = period < 2 ? 1 : period / 2;
+  const uint32_t phase = now % period;
+  const float ramp = phase <= halfPeriod
+      ? static_cast<float>(phase) / halfPeriod
+      : static_cast<float>(period - phase) / halfPeriod;
+  const float eased = ramp * ramp * (3.0f - 2.0f * ramp);
+  return minimum + static_cast<uint8_t>(
+      eased * static_cast<float>(maximum - minimum));
+}
+
 float smoothLedProgress(uint32_t now) {
   const float target = constrain(static_cast<float>(printPercent), 0.0f, 100.0f);
   if (lastProgressTickAt == 0 || target + 2.0f < displayedPrintPercent) {
@@ -2367,11 +2387,12 @@ void updateLedStrip() {
   } else if (printCompleteBlueUntil != 0 &&
              static_cast<int32_t>(printCompleteBlueUntil - now) > 0) {
     // Completion is blue for three hours. The leading three stay blue while
-    // the four effect LEDs use the requested one-second-on/one-second-off cycle.
-    const bool blueOn = (now % 2000) < 1000;
+    // the four effect LEDs fade smoothly in and out over a slow four-second
+    // cycle instead of switching abruptly.
     fillStatusLeds(ledColor(0, 105, 255));
-    fillAnimatedLeds(blueOn ? ledColor(0, 105, 255)
-                            : ledStrip.Color(0, 0, 0));
+    fillAnimatedLeds(scaledLedColor(
+        0, 105, 255,
+        smoothPulseScale(now, Config::PRINT_COMPLETE_PULSE_MS, 0, 255)));
   } else if (static_cast<int32_t>(modeEntryFlashUntil - now) > 0) {
     // Entering timelapse is acknowledged at the fixed 95% LED power for one
     // complete second, independently of the potentiometer.
@@ -2421,10 +2442,12 @@ void updateLedStrip() {
     }
   } else if (hardwareMode == 0) {
     // Centre is the normal waiting position. Match the iPhone standby effect
-    // with one smooth yellow rise/fall every two seconds. An active print has
-    // already taken the green/red/blue branches above.
-    fillStatusLeds(ledColor(255, 190, 0));
-    fillAnimatedLeds(scaledLedColor(255, 190, 0, breathingScale(now)));
+    // with one smooth yellow rise/fall every two seconds, capped at 40% of the
+    // normal 95% LED power. An active print has already taken a branch above.
+    fillStatusLeds(scaledLedColor(255, 190, 0, Config::LED_IDLE_MAX_SCALE));
+    fillAnimatedLeds(scaledLedColor(
+        255, 190, 0,
+        smoothPulseScale(now, 2000, 18, Config::LED_IDLE_MAX_SCALE)));
   } else {
     // Torch (-1) is steady yellow until a printer session takes over above.
     // Timelapse (+1) also remains visibly yellow before its first print state.
@@ -2445,7 +2468,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.10");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.11");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

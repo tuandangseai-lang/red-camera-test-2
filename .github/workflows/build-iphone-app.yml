@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.44 build123 - quan ly ba may va buzzer ESP32
+name: Tao IPA SE v9.45 build124 - hieu ung hoan thanh dong bo
 
 on:
   workflow_dispatch:
@@ -125,6 +125,9 @@ jobs:
           grep -q "attemptAutomaticConfigurationIfNeeded" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "lanAccessCode.recovery" "RedCameraTest/BambuCredentialStore.swift"
           grep -q "ScreenEdgeLEDStrip" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q 'case completed' "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "acknowledgePrintCompletion" "RedCameraTest/H2DBLEManager.swift"
+          grep -q "breathingPeriod" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "preservesProgressWhenHidden" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "ClockwiseScreenBorderShape" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "UIScreen.main.brightness = 0.0" "RedCameraTest/H2DTimelapseManager.swift"
@@ -181,19 +184,19 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.44"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "123"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.45"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "124"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.44-build123-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.45-build124-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.44-build123-unsigned-ipa
-          path: SE-v9.44-build123-unsigned.ipa
+          name: SE-v9.45-build124-unsigned-ipa
+          path: SE-v9.45-build124-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -262,8 +265,10 @@ jobs:
           grep -q 'isPausedState' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'LED_STRIP_PIN = 5' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'LED_STATUS_COUNT = 3' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'LED_ANIMATED_COUNT = 5' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'LED_PHYSICAL_COUNT = 8' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'LED_ANIMATED_COUNT = 4' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'LED_PHYSICAL_COUNT = 10' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'LED_IDLE_MAX_SCALE = 102' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'H2D_COMPLETE_ACK' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'LED_FIXED_BRIGHTNESS_PERCENT = 95' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'fixedLedBrightness' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'acceptStablePotentiometerReading' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
@@ -285,7 +290,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.12.0
+          name: SE-Bambu-ESP32-v1.12.11
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

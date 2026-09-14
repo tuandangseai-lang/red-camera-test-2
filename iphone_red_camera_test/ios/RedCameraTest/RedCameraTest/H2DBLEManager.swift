@@ -515,6 +515,10 @@ final class H2DBLEManager: NSObject, ObservableObject {
         send("H2D_ACK,\(max(0, layer)),\(success ? 1 : 0)")
     }
 
+    func acknowledgePrintCompletion() {
+        send("H2D_COMPLETE_ACK")
+    }
+
     func suspendForBackground() {
         lifecycleActive = false
         reconnectWorkItem?.cancel()
@@ -834,6 +838,10 @@ final class H2DBLEManager: NSObject, ObservableObject {
             guard fields.count >= 3 else { return }
             hasBridgeError = false
             acceptConfigurationAcknowledgement(fields[2])
+        case "COMPLETE_ACK":
+            // The view already dismisses its blue completion presentation
+            // locally. This packet confirms that ESP32 cleared the same timer.
+            break
         case "STATUS":
             guard fields.count >= 3 else { return }
             let status = fields[2].uppercased()

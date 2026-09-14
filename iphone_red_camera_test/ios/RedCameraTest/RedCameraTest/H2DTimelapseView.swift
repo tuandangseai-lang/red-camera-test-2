@@ -27,6 +27,8 @@ struct H2DTimelapseView: View {
     @State private var hardwareStartedCapture = false
     @State private var hardwareModeOneLatched = false
     @State private var hardwareControlGeneration = 0
+    @State private var completionBlueActive = false
+    @State private var completionDismissWorkItem: DispatchWorkItem?
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -124,6 +126,7 @@ struct H2DTimelapseView: View {
             withAnimation(.linear(duration: 0.18).repeatForever(autoreverses: true)) {
                 idlePulse = true
             }
+            updateCompletionPresentation(for: bluetooth.h2dPrintState)
             timelapse.didStoreFrame = { layer, success in
                 bluetooth.acknowledgeH2DFrame(layer: layer, success: success)
             }
@@ -207,6 +210,9 @@ struct H2DTimelapseView: View {
                 syncFleetWhenPossible()
             }
         }
+        .onChange(of: bluetooth.h2dPrintState) { _, state in
+            updateCompletionPresentation(for: state)
+        }
         .onChange(of: bluetooth.isH2DBridge) { _, recognized in
             if recognized {
                 reconcileBridgeWithSelectedProfile()
@@ -262,6 +268,7 @@ struct H2DTimelapseView: View {
         case connecting
         case stopping
         case paused
+        case completed
         case error
 
         var color: Color {
@@ -270,6 +277,7 @@ struct H2DTimelapseView: View {
             case .printing: return .green
             case .capturing: return .blue
             case .stopping, .paused: return .red
+            case .completed: return .blue
             case .error: return .red
             }
         }
@@ -283,6 +291,7 @@ struct H2DTimelapseView: View {
         if !bluetooth.isConnected { return .connecting }
         if timelapse.isCapturing { return .capturing }
         if !bluetooth.isH2DReady { return .connecting }
+        if completionBlueActive { return .completed }
         switch bluetooth.h2dPrintState.uppercased() {
         // A failed/cancelled job without a real printer alarm is a deliberate
         // stop: show the red breathing state without starting the siren.
@@ -308,6 +317,7 @@ struct H2DTimelapseView: View {
         case .connecting: return "ESP32 • ĐANG KẾT NỐI \(printerName)"
         case .stopping: return "\(printerName) • ĐANG DỪNG"
         case .paused: return "\(printerName) • ĐANG TẠM DỪNG"
+        case .completed: return "\(printerName) • ĐÃ IN XONG • CHẠM ĐỂ TẮT"
         case .error:
             if bluetooth.hasActiveCriticalPrinterAlert { return "\(printerName) • CÓ LỖI" }
             return bluetooth.isConnected ? "\(printerName) • CÓ LỖI" : "ESP32 • MẤT KẾT NỐI"
@@ -342,7 +352,17 @@ struct H2DTimelapseView: View {
         // content instead of stretching across the entire screen.
         .fixedSize(horizontal: true, vertical: false)
         .shadow(color: printerIslandState.color.opacity(0.16), radius: 10, y: 3)
+        .contentShape(Capsule())
+        .onTapGesture {
+            guard printerIslandState == .completed else { return }
+            dismissCompletionPresentation(notifyBridge: true)
+        }
         .accessibilityLabel(printerIslandTitle)
+        .accessibilityHint(
+            printerIslandState == .completed
+                ? "Chạm để tắt hiệu ứng hoàn thành"
+                : ""
+        )
     }
 
     /// A low-cost status light that hugs the physical screen edge.  The
@@ -352,6 +372,8 @@ struct H2DTimelapseView: View {
     private var screenEdgeLEDStrip: some View {
         let isPrinting = printerIslandState == .printing
         let isBlinking = printerIslandState == .error
+        let isCompleted = printerIslandState == .completed
+        let isIdle = printerIslandState == .idle
         let progress: Double? = isPrinting ? min(1, max(0, printerProgress)) : nil
         // Capturing temporarily paints the whole edge blue. Keep the green
         // printing animation's anchor alive underneath so it resumes from the
@@ -366,6 +388,9 @@ struct H2DTimelapseView: View {
                 ? Double(bluetooth.h2dRemainingMinutes) * 60.0
                 : nil,
             blinks: isBlinking,
+            breathingPeriod: isCompleted ? 4.0 : isIdle ? 2.0 : nil,
+            minimumOpacity: isCompleted ? 0.02 : isIdle ? 0.08 : 1.0,
+            maximumOpacity: isIdle ? 0.40 : 1.0,
             preservesProgressWhenHidden: preservesPrintingProgress
         )
         .padding(.horizontal, 4)
@@ -387,6 +412,32 @@ struct H2DTimelapseView: View {
     private var isLayerPrintingOrChangingFilament: Bool {
         bluetooth.h2dPrintState.uppercased() == "RUNNING" &&
             (bluetooth.isActuallyPrinting || bluetooth.h2dCurrentLayer > 0)
+    }
+
+    private func updateCompletionPresentation(for state: String) {
+        let normalized = state.uppercased()
+        if ["FINISH", "COMPLETE", "COMPLETED"].contains(normalized) {
+            guard !completionBlueActive else { return }
+            completionDismissWorkItem?.cancel()
+            completionBlueActive = true
+            let workItem = DispatchWorkItem {
+                completionBlueActive = false
+            }
+            completionDismissWorkItem = workItem
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + 3 * 60 * 60,
+                execute: workItem
+            )
+        } else if ["RUNNING", "PREPARE", "PREPARING", "SLICING", "INIT", "HEATING"].contains(normalized) {
+            dismissCompletionPresentation(notifyBridge: false)
+        }
+    }
+
+    private func dismissCompletionPresentation(notifyBridge: Bool) {
+        completionDismissWorkItem?.cancel()
+        completionDismissWorkItem = nil
+        completionBlueActive = false
+        if notifyBridge { bluetooth.acknowledgePrintCompletion() }
     }
 
     private var setupView: some View {
@@ -1288,6 +1339,9 @@ private struct ScreenEdgeLEDStrip: View {
     let progress: Double?
     let remainingSeconds: TimeInterval?
     let blinks: Bool
+    let breathingPeriod: TimeInterval?
+    let minimumOpacity: Double
+    let maximumOpacity: Double
     let preservesProgressWhenHidden: Bool
 
     @State private var pulse = true
@@ -1299,10 +1353,15 @@ private struct ScreenEdgeLEDStrip: View {
     private let correctionDuration: TimeInterval = 1.2
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: progress == nil)) { context in
+        TimelineView(.animation(
+            minimumInterval: 1.0 / 30.0,
+            paused: progress == nil && breathingPeriod == nil
+        )) { context in
             let liveProgress = progress == nil ? nil : interpolatedProgress(at: context.date)
             let shimmer = (sin(context.date.timeIntervalSinceReferenceDate * 3.2) + 1.0) / 2.0
+            let breathingOpacity = smoothBreathingOpacity(at: context.date)
             stripContent(progress: liveProgress, shimmer: shimmer)
+                .opacity(breathingOpacity)
         }
         .opacity(blinks && !pulse ? 0.22 : 1)
         .onAppear {
@@ -1330,6 +1389,16 @@ private struct ScreenEdgeLEDStrip: View {
             }
         }
         .accessibilityHidden(true)
+    }
+
+    private func smoothBreathingOpacity(at date: Date) -> Double {
+        guard let breathingPeriod, breathingPeriod > 0 else {
+            return maximumOpacity
+        }
+        let radians = date.timeIntervalSinceReferenceDate * 2.0 * .pi / breathingPeriod
+        let unit = (sin(radians) + 1.0) / 2.0
+        let eased = unit * unit * (3.0 - 2.0 * unit)
+        return minimumOpacity + (maximumOpacity - minimumOpacity) * eased
     }
 
     @ViewBuilder
