@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.12.5
+// SE Bambu Timelapse Bridge for classic ESP32 v1.12.6
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -62,6 +62,7 @@ constexpr uint32_t FLEET_MONITOR_DWELL_MS = 4500;
 // remains active for all profiles; background MQTT sampling stays disabled
 // until it can be moved to a separate worker without affecting timelapse.
 constexpr bool FLEET_BACKGROUND_MQTT_ENABLED = false;
+constexpr uint32_t PRINT_COMPLETE_BLUE_MS = 3UL * 60UL * 60UL * 1000UL;
 constexpr uint32_t STATUS_PERIOD_MS = 2000;
 constexpr uint32_t TELEMETRY_PERIOD_MS = 1000;
 constexpr uint32_t STATUS_REQUEST_RETRY_MS = 3500;
@@ -80,7 +81,10 @@ constexpr uint8_t LED_STRIP_PIN = 5;
 constexpr uint16_t LED_STATUS_COUNT = 3;
 constexpr uint16_t LED_ANIMATED_COUNT = 5;
 constexpr uint16_t LED_ACTIVE_COUNT = LED_STATUS_COUNT + LED_ANIMATED_COUNT;
-constexpr uint16_t LED_PHYSICAL_COUNT = 8;
+// The installed strip contains ten packages, but only the first eight are in
+// use. Keep the final two in each transmitted frame so they are actively
+// cleared instead of retaining a colour from an earlier firmware build.
+constexpr uint16_t LED_PHYSICAL_COUNT = 10;
 // Controls use INPUT_PULLUP: each button/switch contact closes to GND.
 constexpr uint8_t HOLD_BUTTON_PIN = 27;
 constexpr uint8_t MODE_TIMELAPSE_PIN = 25;
@@ -253,6 +257,7 @@ uint32_t sequenceId = 0;
 uint32_t captureFlashUntil = 0;
 uint32_t lastLedRefreshAt = 0;
 uint32_t modeEntryFlashUntil = 0;
+uint32_t printCompleteBlueUntil = 0;
 uint32_t lastInputRefreshAt = 0;
 uint32_t lastLevelNotifyAt = 0;
 uint32_t modeCandidateSince = 0;
@@ -349,6 +354,10 @@ bool isActivePrintState(const String &state) {
 bool isStoppedPrintState(const String &state) {
   return state == "STOP" || state == "STOPPED" || state == "CANCEL" ||
          state == "CANCELED" || state == "CANCELLED";
+}
+
+bool isCompletedPrintState(const String &state) {
+  return state == "FINISH" || state == "COMPLETE" || state == "COMPLETED";
 }
 
 bool fleetRuntimeCritical(const FleetRuntime &runtime) {
@@ -1288,6 +1297,10 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
   if (newStage != -999) currentStage = newStage;
   if (newRemainingMinutes >= 0) remainingMinutes = newRemainingMinutes;
 
+  // A real preparation/running state means a new print command has arrived,
+  // so the previous job's three-hour blue completion indication ends now.
+  if (isActivePrintState(printState)) printCompleteBlueUntil = 0;
+
   // PREPARE may already report layer 0/1 while the bed is heating. Baseline
   // only on the first real RUNNING packet, otherwise layer 1 is photographed
   // before it has actually finished.
@@ -1314,7 +1327,8 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
     printWasRunning = true;
   }
 
-  if (printState == "FINISH" && (wasRunning || previousState == "RUNNING") &&
+  if (isCompletedPrintState(printState) &&
+      (wasRunning || previousState == "RUNNING") &&
       !finishSent) {
     const int finalLayer = max(max(currentLayer, totalLayers), lastObservedLayer);
     sendSnapshot(finalLayer, false);
@@ -1322,6 +1336,7 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
                     max(finalLayer, totalLayers) + "," + activeJob);
     finishSent = true;
     printWasRunning = false;
+    printCompleteBlueUntil = millis() + Config::PRINT_COMPLETE_BLUE_MS;
     Serial.printf("[PRINT] finished at layer %d\n", finalLayer);
   } else if (printState == "FAILED" || printState == "ERROR" ||
              printState == "IDLE" || printState == "STOP" ||
@@ -1857,7 +1872,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.12.5");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.12.6");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2367,6 +2382,14 @@ void updateLedStrip() {
     // the error (or an intentional STOP/CANCEL state is received).
     const bool alarmOn = (now % 260) < 150;
     fillLedStrip(alarmOn ? ledColor(255, 0, 0) : ledStrip.Color(0, 0, 0));
+  } else if (printCompleteBlueUntil != 0 &&
+             static_cast<int32_t>(printCompleteBlueUntil - now) > 0) {
+    // A genuinely completed job owns all eight active pixels for three hours.
+    // One second blue plus one second off gives the requested two-second cycle.
+    // This timer intentionally lives only in RAM, so reboot returns to yellow.
+    const bool blueOn = (now % 2000) < 1000;
+    fillLedStrip(blueOn ? ledColor(0, 105, 255)
+                        : ledStrip.Color(0, 0, 0));
   } else if (static_cast<int32_t>(modeEntryFlashUntil - now) > 0) {
     // Entering timelapse is acknowledged at the fixed 95% LED power for one
     // complete second, independently of the potentiometer.
@@ -2439,7 +2462,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.5");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.6");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
