@@ -1849,6 +1849,10 @@ void handlePhoneCommand(String command) {
       fleetAssignmentsPending = true;
       syncSelectedFleetRuntime(true);
       queuePhoneEvent("H2D,CFG_ACK,SELECT");
+      // H2D_PROFILE is persisted before SELECT is sent. If the selected
+      // profile was already active there is no network restart to protect;
+      // do not leave the normal 8-second configuration quiet period behind.
+      lastConfigurationCommandAt = 0;
     }
   } else if (head == "H2D_ARM") {
     const bool requestedArmed = argument == "1";
