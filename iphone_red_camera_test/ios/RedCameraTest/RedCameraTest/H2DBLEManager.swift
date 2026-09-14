@@ -18,6 +18,15 @@ struct H2DTimelapseEvent: Identifiable, Equatable {
     let playsShutterSound: Bool
 }
 
+struct BambuFleetStatus: Equatable {
+    var isConfigured = false
+    var isOnline = false
+    var hasActivePrintJob = false
+    var hasCriticalError = false
+    var printState = "OFFLINE"
+    var printPercent = 0
+}
+
 final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var connectionText = "Đang bật Bluetooth..."
     @Published private(set) var isConnected = false
@@ -33,6 +42,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var h2dTimelapseEvent: H2DTimelapseEvent?
     @Published private(set) var isConfiguring = false
     @Published private(set) var configurationProgress = 0
+    @Published private(set) var configurationTotal = 6
     @Published private(set) var hasBridgeError = false
     @Published private(set) var hasPrinterAlert = false
     @Published private(set) var hasCriticalPrinterAlert = false
@@ -56,6 +66,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var hardwareLevelPercent = 70
     @Published private(set) var hardwareControlRevision = 0
     @Published private(set) var hardwareLastControl = ""
+    @Published private(set) var fleetStatuses: [BambuPrinterKind: BambuFleetStatus] = [:]
 
     private var expectedPrinterSerial = ""
 
@@ -80,6 +91,12 @@ final class H2DBLEManager: NSObject, ObservableObject {
     var hasFanTelemetry: Bool {
         [partFanPercent, auxiliaryFanPercent, exhaustFanPercent]
             .contains(where: { $0 >= 0 })
+    }
+
+    func fleetStatus(for kind: BambuPrinterKind) -> BambuFleetStatus {
+        fleetStatuses[kind] ?? BambuFleetStatus(
+            isConfigured: BambuPrinterProfileStore.profile(for: kind) != nil
+        )
     }
 
     func prepareForPrinterProfile(_ kind: BambuPrinterKind, serial: String) {
@@ -196,6 +213,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private var reconnectWorkItem: DispatchWorkItem?
     private var recognitionWorkItem: DispatchWorkItem?
     private var statusRefreshWorkItems: [DispatchWorkItem] = []
+    private var fleetSyncWorkItems: [DispatchWorkItem] = []
     private var configurationTimeoutWorkItem: DispatchWorkItem?
     private var mqttLossWorkItem: DispatchWorkItem?
     private var armSyncWorkItems: [DispatchWorkItem] = []
@@ -252,13 +270,17 @@ final class H2DBLEManager: NSObject, ObservableObject {
         }
 
         let requestedKind = BambuPrinterKind.detect(serial: values[3])
+        guard requestedKind != .unknown else {
+            h2dBridgeStatus = "Serial chưa khớp hồ sơ A1, H2D hoặc P2S"
+            return
+        }
         prepareForPrinterProfile(
-            requestedKind == .unknown ? .unknown : requestedKind,
+            requestedKind,
             serial: values[3]
         )
 
         configurationTimeoutWorkItem?.cancel()
-        configurationCommands = [
+        var commands = [
             ConfigurationCommand(payload: "H2D_WIFI_SSID,\(base64(values[0]))", acknowledgement: "SSID", label: "tên Wi-Fi"),
             ConfigurationCommand(payload: "H2D_WIFI_PASS,\(base64(values[1]))", acknowledgement: "PASS", label: "mật khẩu Wi-Fi"),
             ConfigurationCommand(payload: "H2D_IP,\(values[2])", acknowledgement: "IP", label: "địa chỉ máy in"),
@@ -266,9 +288,31 @@ final class H2DBLEManager: NSObject, ObservableObject {
             ConfigurationCommand(payload: "H2D_CODE,\(base64(values[4]))", acknowledgement: "CODE", label: "Access Code"),
             ConfigurationCommand(payload: "H2D_SAVE", acknowledgement: "SAVE", label: "lưu cấu hình")
         ]
+        let storedProfiles = BambuPrinterProfileStore.load()
+        for kind in [BambuPrinterKind.a1, .h2d, .p2s] {
+            guard let profile = storedProfiles.first(where: { $0.kind == kind }) else { continue }
+            let storedCode = normalizeAccessCode(H2DAccessCodeStore.load(for: kind))
+            guard !profile.ip.isEmpty, !profile.serial.isEmpty, !storedCode.isEmpty else { continue }
+            commands.append(
+                ConfigurationCommand(
+                    payload: "H2D_PROFILE,\(kind.rawValue),\(base64(profile.ip)),\(base64(profile.serial)),\(base64(storedCode))",
+                    acknowledgement: "PROFILE_\(kind.rawValue)",
+                    label: "hồ sơ \(kind.rawValue)"
+                )
+            )
+        }
+        commands.append(
+            ConfigurationCommand(
+                payload: "H2D_SELECT,\(requestedKind.rawValue)",
+                acknowledgement: "SELECT",
+                label: "máy chụp timelapse"
+            )
+        )
+        configurationCommands = commands
         configurationIndex = 0
         configurationRetryCount = 0
         configurationProgress = 0
+        configurationTotal = configurationCommands.count
         isConfiguring = true
         sendNextConfigurationCommand()
     }
@@ -317,6 +361,44 @@ final class H2DBLEManager: NSObject, ObservableObject {
         }
     }
 
+    /// Keeps the ESP32's three-printer watch list in sync without changing the
+    /// full telemetry/timelapse connection that belongs to the selected tab.
+    func syncFleetProfiles(selectedKind: BambuPrinterKind) {
+        guard isConnected, isH2DBridge, !isConfiguring else { return }
+        fleetSyncWorkItems.forEach { $0.cancel() }
+        fleetSyncWorkItems.removeAll()
+
+        let storedProfiles = BambuPrinterProfileStore.load()
+        var payloads: [String] = []
+        for kind in [BambuPrinterKind.a1, .h2d, .p2s] {
+            if let profile = storedProfiles.first(where: { $0.kind == kind }) {
+                let code = normalizeAccessCode(H2DAccessCodeStore.load(for: kind))
+                if !profile.ip.isEmpty, !profile.serial.isEmpty, !code.isEmpty {
+                    payloads.append(
+                        "H2D_PROFILE,\(kind.rawValue),\(base64(profile.ip)),\(base64(profile.serial)),\(base64(code))"
+                    )
+                    continue
+                }
+            }
+            payloads.append("H2D_PROFILE_CLEAR,\(kind.rawValue)")
+        }
+        if selectedKind != .unknown {
+            payloads.append("H2D_SELECT,\(selectedKind.rawValue)")
+        }
+
+        for (index, payload) in payloads.enumerated() {
+            let item = DispatchWorkItem { [weak self] in
+                guard let self, self.isConnected, !self.isConfiguring else { return }
+                _ = self.send(payload)
+            }
+            fleetSyncWorkItems.append(item)
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + 0.12 * Double(index),
+                execute: item
+            )
+        }
+    }
+
     private func cancelStatusRefreshes() {
         statusRefreshWorkItems.forEach { $0.cancel() }
         statusRefreshWorkItems.removeAll()
@@ -330,6 +412,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
         lifecycleActive = false
         reconnectWorkItem?.cancel()
         cancelStatusRefreshes()
+        fleetSyncWorkItems.forEach { $0.cancel() }
+        fleetSyncWorkItems.removeAll()
         central.stopScan()
     }
 
@@ -453,6 +537,14 @@ final class H2DBLEManager: NSObject, ObservableObject {
         hasPrinterAlert = false
         hasCriticalPrinterAlert = false
         printerAlertText = ""
+        fleetStatuses = fleetStatuses.mapValues { status in
+            var offline = status
+            offline.isOnline = false
+            offline.hasActivePrintJob = false
+            offline.hasCriticalError = false
+            offline.printState = "OFFLINE"
+            return offline
+        }
     }
 
     private func beginMqttLossGrace() {
@@ -563,6 +655,18 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 expectedPrinterSerial = ""
             }
             connectionText = "Đã kết nối ESP32 • \(printerDisplayName)"
+        case "FLEET":
+            guard fields.count >= 9,
+                  let kind = BambuPrinterKind(rawValue: fields[2]),
+                  kind != .unknown else { return }
+            fleetStatuses[kind] = BambuFleetStatus(
+                isConfigured: fields[3] == "1",
+                isOnline: fields[4] == "1",
+                hasActivePrintJob: fields[5] == "1",
+                hasCriticalError: fields[6] == "1",
+                printState: fields[7].uppercased(),
+                printPercent: min(100, max(0, Int(fields[8]) ?? 0))
+            )
         case "MATERIAL":
             guard !isSwitchingPrinter else { return }
             guard fields.count >= 3 else { return }

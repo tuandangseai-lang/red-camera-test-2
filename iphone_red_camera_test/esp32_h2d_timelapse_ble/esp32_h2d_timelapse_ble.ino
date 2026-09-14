@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.11.1
+// SE Bambu Timelapse Bridge for classic ESP32 v1.12.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -27,6 +27,9 @@ constexpr uint16_t MQTT_PORT = 8883;
 // warnings are present. PubSubClient silently drops packets larger than this
 // buffer, which used to hide printer alerts from the iPhone.
 constexpr uint16_t MQTT_BUFFER_BYTES = 49152;
+// The selected timelapse printer keeps the large full-state buffer above. The
+// two background connections only parse state/progress/error fields.
+constexpr uint16_t FLEET_MQTT_BUFFER_BYTES = 14336;
 constexpr uint32_t WIFI_RETRY_MS = 12000;
 constexpr uint32_t MQTT_RETRY_MS = 10000;
 constexpr uint32_t STATUS_PERIOD_MS = 2000;
@@ -53,6 +56,12 @@ constexpr uint8_t MODE_TIMELAPSE_PIN = 25;
 constexpr uint8_t MODE_TORCH_PIN = 26;
 // GPIO34 is ADC1, so the potentiometer keeps working while Wi-Fi is active.
 constexpr uint8_t LEVEL_POT_PIN = 34;
+// Three-pin active buzzer module: S -> GPIO33, + -> module supply, - -> GND.
+// Use a common ground with ESP32. Set false for modules whose input is active LOW.
+constexpr uint8_t BUZZER_PIN = 33;
+constexpr bool BUZZER_ACTIVE_HIGH = true;
+constexpr uint32_t BUZZER_ON_MS = 180;
+constexpr uint32_t BUZZER_OFF_MS = 100;
 // Reserve a small dead zone at both physical ends. Real ESP32 ADCs and common
 // panel potentiometers rarely reach the ideal 0/4095 endpoints, so these
 // calibrated limits make fully counter-clockwise exactly 0% and fully
@@ -91,11 +100,54 @@ struct BridgeSettings {
   }
 };
 
+constexpr uint8_t FLEET_PRINTER_COUNT = 3;
+constexpr uint8_t BACKGROUND_MONITOR_COUNT = 2;
+
+struct FleetProfile {
+  String kind;
+  String printerIp;
+  String printerSerial;
+  String accessCode;
+
+  bool complete() const {
+    IPAddress address;
+    return (kind == "A1" || kind == "H2D" || kind == "P2S") &&
+           address.fromString(printerIp) && !printerSerial.isEmpty() &&
+           !accessCode.isEmpty();
+  }
+};
+
+struct FleetRuntime {
+  String state = "OFFLINE";
+  int percent = 0;
+  bool online = false;
+  bool printErrorActive = false;
+  bool criticalLatched = false;
+  uint32_t printErrorCode = 0;
+  uint32_t lastMessageAt = 0;
+  bool lastReportedConfigured = false;
+  bool lastReportedOnline = false;
+  bool lastReportedActive = false;
+  bool lastReportedCritical = false;
+  String lastReportedState = "";
+  int lastReportedPercent = -1;
+};
+
 Preferences preferences;
 BridgeSettings settings;
 BridgeSettings pendingSettings;
 WiFiClientSecure tlsClient;
 PubSubClient mqtt(tlsClient);
+WiFiClientSecure fleetTls0;
+WiFiClientSecure fleetTls1;
+PubSubClient fleetMqtt0(fleetTls0);
+PubSubClient fleetMqtt1(fleetTls1);
+FleetProfile fleetProfiles[FLEET_PRINTER_COUNT];
+FleetRuntime fleetRuntimes[FLEET_PRINTER_COUNT];
+int8_t selectedFleetIndex = -1;
+int8_t monitorProfileIndex[BACKGROUND_MONITOR_COUNT] = {-1, -1};
+uint32_t monitorLastAttemptAt[BACKGROUND_MONITOR_COUNT] = {0, 0};
+uint32_t monitorSequenceId[BACKGROUND_MONITOR_COUNT] = {0, 0};
 Adafruit_NeoPixel ledStrip(
     Config::LED_PHYSICAL_COUNT, Config::LED_STRIP_PIN, NEO_GRB + NEO_KHZ800);
 NimBLECharacteristic *eventCharacteristic = nullptr;
@@ -113,6 +165,7 @@ bool finishSent = false;
 bool printWasRunning = false;
 bool hmsAlertActive = false;
 bool printErrorActive = false;
+bool criticalAlarmLatched = false;
 bool lastReportedPrinterAlert = false;
 bool lastReportedPrinterAlertCritical = false;
 uint32_t printErrorCode = 0;
@@ -228,6 +281,103 @@ String printerModelFromSerial(const String &serial) {
   return "Bambu";
 }
 
+int8_t fleetIndexForKind(String kind) {
+  kind.trim();
+  kind.toUpperCase();
+  if (kind == "A1") return 0;
+  if (kind == "H2D") return 1;
+  if (kind == "P2S") return 2;
+  return -1;
+}
+
+int8_t fleetIndexForSerial(const String &serial) {
+  return fleetIndexForKind(printerModelFromSerial(serial));
+}
+
+bool isActivePrintState(const String &state) {
+  return state == "RUNNING" || state == "PREPARE" ||
+         state == "PREPARING" || state == "PAUSE" ||
+         state == "PAUSED" || state == "SLICING" || state == "INIT" ||
+         state == "HEATING";
+}
+
+bool isStoppedPrintState(const String &state) {
+  return state == "STOP" || state == "STOPPED" || state == "CANCEL" ||
+         state == "CANCELED" || state == "CANCELLED";
+}
+
+bool fleetRuntimeCritical(const FleetRuntime &runtime) {
+  return !isStoppedPrintState(runtime.state) && runtime.criticalLatched;
+}
+
+void reportFleetStatus(uint8_t index, bool force = false) {
+  if (index >= FLEET_PRINTER_COUNT) return;
+  FleetProfile &profile = fleetProfiles[index];
+  FleetRuntime &runtime = fleetRuntimes[index];
+  const bool configured = profile.complete();
+  const bool online = configured && runtime.online;
+  const bool active = online && isActivePrintState(runtime.state);
+  const bool critical = configured && fleetRuntimeCritical(runtime);
+  if (!force && configured == runtime.lastReportedConfigured &&
+      online == runtime.lastReportedOnline &&
+      active == runtime.lastReportedActive &&
+      critical == runtime.lastReportedCritical &&
+      runtime.state == runtime.lastReportedState &&
+      runtime.percent == runtime.lastReportedPercent) {
+    return;
+  }
+  const String kind = profile.kind.isEmpty()
+                          ? (index == 0 ? "A1" : index == 1 ? "H2D" : "P2S")
+                          : profile.kind;
+  queuePhoneEvent(String("H2D,FLEET,") + kind + "," +
+                  (configured ? 1 : 0) + "," + (online ? 1 : 0) + "," +
+                  (active ? 1 : 0) + "," + (critical ? 1 : 0) + "," +
+                  (online ? runtime.state : "OFFLINE") + "," +
+                  constrain(runtime.percent, 0, 100));
+  runtime.lastReportedConfigured = configured;
+  runtime.lastReportedOnline = online;
+  runtime.lastReportedActive = active;
+  runtime.lastReportedCritical = critical;
+  runtime.lastReportedState = runtime.state;
+  runtime.lastReportedPercent = runtime.percent;
+}
+
+void syncSelectedFleetRuntime(bool forceReport = false) {
+  if (selectedFleetIndex < 0 || selectedFleetIndex >= FLEET_PRINTER_COUNT) {
+    selectedFleetIndex = fleetIndexForSerial(settings.printerSerial);
+  }
+  if (selectedFleetIndex < 0) return;
+  FleetRuntime &runtime = fleetRuntimes[selectedFleetIndex];
+  runtime.state = printState;
+  runtime.percent = printPercent;
+  runtime.online = mqtt.connected();
+  runtime.printErrorActive = printErrorActive;
+  runtime.printErrorCode = printErrorCode;
+  runtime.criticalLatched = criticalAlarmLatched;
+  runtime.lastMessageAt = lastMqttMessageAt;
+  reportFleetStatus(selectedFleetIndex, forceReport);
+}
+
+bool hasAnyFleetCriticalError() {
+  if (criticalAlarmLatched && !isStoppedPrintState(printState)) return true;
+  for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
+    if (fleetProfiles[i].complete() && fleetRuntimeCritical(fleetRuntimes[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool hasBackgroundFleetCriticalError() {
+  for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
+    if (static_cast<int8_t>(i) == selectedFleetIndex) continue;
+    if (fleetProfiles[i].complete() && fleetRuntimeCritical(fleetRuntimes[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 String safeEventField(String value) {
   value.replace(",", " ");
   value.replace("\r", " ");
@@ -294,6 +444,7 @@ void resetPrinterRuntimeForProfileSwitch() {
   printWasRunning = false;
   hmsAlertActive = false;
   printErrorActive = false;
+  criticalAlarmLatched = false;
   lastReportedPrinterAlert = false;
   lastReportedPrinterAlertCritical = false;
   printErrorCode = 0;
@@ -339,6 +490,58 @@ String decodeBase64(const String &encoded) {
   return String(reinterpret_cast<char *>(output.get()));
 }
 
+String fleetPreferenceKey(uint8_t index, const char *suffix) {
+  return String("f") + index + suffix;
+}
+
+void loadFleetProfiles() {
+  for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
+    fleetProfiles[i].kind = i == 0 ? "A1" : i == 1 ? "H2D" : "P2S";
+    fleetProfiles[i].printerIp =
+        preferences.getString(fleetPreferenceKey(i, "ip").c_str(), "");
+    fleetProfiles[i].printerSerial =
+        preferences.getString(fleetPreferenceKey(i, "ser").c_str(), "");
+    fleetProfiles[i].accessCode =
+        preferences.getString(fleetPreferenceKey(i, "acc").c_str(), "");
+  }
+}
+
+bool saveFleetProfile(uint8_t index, const FleetProfile &profile) {
+  if (index >= FLEET_PRINTER_COUNT || !profile.complete()) return false;
+  const bool changed = fleetProfiles[index].printerIp != profile.printerIp ||
+                       fleetProfiles[index].printerSerial !=
+                           profile.printerSerial ||
+                       fleetProfiles[index].accessCode != profile.accessCode;
+  const bool wrote =
+      preferences.putString(fleetPreferenceKey(index, "ip").c_str(),
+                            profile.printerIp) == profile.printerIp.length() &&
+      preferences.putString(fleetPreferenceKey(index, "ser").c_str(),
+                            profile.printerSerial) ==
+          profile.printerSerial.length() &&
+      preferences.putString(fleetPreferenceKey(index, "acc").c_str(),
+                            profile.accessCode) == profile.accessCode.length();
+  if (!wrote) return false;
+  if (changed) fleetRuntimes[index] = FleetRuntime();
+  fleetProfiles[index] = profile;
+  fleetProfiles[index].kind =
+      index == 0 ? "A1" : index == 1 ? "H2D" : "P2S";
+  reportFleetStatus(index, true);
+  return true;
+}
+
+void clearFleetProfile(uint8_t index) {
+  if (index >= FLEET_PRINTER_COUNT) return;
+  preferences.remove(fleetPreferenceKey(index, "ip").c_str());
+  preferences.remove(fleetPreferenceKey(index, "ser").c_str());
+  preferences.remove(fleetPreferenceKey(index, "acc").c_str());
+  fleetProfiles[index].kind = index == 0 ? "A1" : index == 1 ? "H2D" : "P2S";
+  fleetProfiles[index].printerIp = "";
+  fleetProfiles[index].printerSerial = "";
+  fleetProfiles[index].accessCode = "";
+  fleetRuntimes[index] = FleetRuntime();
+  reportFleetStatus(index, true);
+}
+
 void loadSettings() {
   preferences.begin("se-h2d-tl", false);
   settings.wifiSsid = preferences.getString("ssid", "");
@@ -347,6 +550,17 @@ void loadSettings() {
   settings.printerSerial = preferences.getString("serial", "");
   settings.accessCode = preferences.getString("access", "");
   pendingSettings = settings;
+  loadFleetProfiles();
+  selectedFleetIndex = fleetIndexForSerial(settings.printerSerial);
+  if (settings.complete() && selectedFleetIndex >= 0 &&
+      !fleetProfiles[selectedFleetIndex].complete()) {
+    FleetProfile migrated;
+    migrated.kind = printerModelFromSerial(settings.printerSerial);
+    migrated.printerIp = settings.printerIp;
+    migrated.printerSerial = settings.printerSerial;
+    migrated.accessCode = settings.accessCode;
+    saveFleetProfile(selectedFleetIndex, migrated);
+  }
 }
 
 bool savePendingSettings() {
@@ -382,6 +596,15 @@ bool savePendingSettings() {
   }
   settings = verified;
   pendingSettings = verified;
+  selectedFleetIndex = fleetIndexForSerial(settings.printerSerial);
+  if (selectedFleetIndex >= 0) {
+    FleetProfile selected;
+    selected.kind = printerModelFromSerial(settings.printerSerial);
+    selected.printerIp = settings.printerIp;
+    selected.printerSerial = settings.printerSerial;
+    selected.accessCode = settings.accessCode;
+    if (!saveFleetProfile(selectedFleetIndex, selected)) return false;
+  }
   return true;
 }
 
@@ -884,14 +1107,7 @@ bool hasCriticalPrinterError() {
   // print_error. ERROR remains critical by itself. Explicit stop/cancel wins
   // even if an older incremental packet left a stale error code in memory.
   if (isExplicitlyStoppedState()) return false;
-  if (printState == "ERROR") return true;
-  const bool activeOrFailed =
-      printState == "RUNNING" || printState == "PREPARE" ||
-      printState == "PREPARING" || printState == "PAUSE" ||
-      printState == "PAUSED" || printState == "SLICING" ||
-      printState == "INIT" || printState == "HEATING" ||
-      printState == "FAILED";
-  return activeOrFailed && printErrorActive;
+  return criticalAlarmLatched;
 }
 
 void reportPrinterAlert(bool force = false) {
@@ -1082,13 +1298,194 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   if (hasPrintError) {
     printErrorCode = incomingPrintError;
     printErrorActive = incomingPrintError != 0;
+    if (incomingPrintError == 0) {
+      // A zero error code is the printer's acknowledgement/clear signal.
+      criticalAlarmLatched = false;
+    } else if (isActivePrintState(printState) || printState == "FAILED" ||
+               printState == "ERROR") {
+      // Ignore old error codes contained in an idle pushall packet, but once a
+      // real job fault is seen keep the alarm latched until the printer clears it.
+      criticalAlarmLatched = true;
+    }
   }
+  if (hasState && printState == "ERROR") criticalAlarmLatched = true;
+  if (hasState && isExplicitlyStoppedState()) criticalAlarmLatched = false;
   if (hasHms) hmsAlertActive = incomingHmsAlert;
   updateActiveMaterial(payload, length);
   updatePrinterTelemetry(payload, length);
   // A state transition to IDLE must clear a previously active warning even
   // when that incremental packet does not contain hms/print_error fields.
   if (hasPrintError || hasHms || hasState) reportPrinterAlert();
+  syncSelectedFleetRuntime();
+}
+
+PubSubClient &fleetMqttForSlot(uint8_t slot) {
+  return slot == 0 ? fleetMqtt0 : fleetMqtt1;
+}
+
+void processFleetMqttMessage(uint8_t monitorSlot, uint8_t *payload,
+                             unsigned int length) {
+  if (monitorSlot >= BACKGROUND_MONITOR_COUNT) return;
+  const int8_t profileIndex = monitorProfileIndex[monitorSlot];
+  if (profileIndex < 0 || profileIndex >= FLEET_PRINTER_COUNT) return;
+  FleetRuntime &runtime = fleetRuntimes[profileIndex];
+  String state;
+  int percent = -1;
+  uint32_t incomingError = 0;
+  const bool hasState = extractLastJsonString(payload, length, "gcode_state", state);
+  const bool hasPercent =
+      extractLastJsonInt(payload, length, "mc_percent", percent);
+  const bool hasPrintError =
+      extractLastJsonUInt32(payload, length, "print_error", incomingError);
+  if (!hasState && !hasPercent && !hasPrintError) return;
+
+  runtime.online = true;
+  runtime.lastMessageAt = millis();
+  if (hasState) {
+    state.trim();
+    state.toUpperCase();
+    runtime.state = state;
+    if (state == "ERROR") runtime.criticalLatched = true;
+    if (isStoppedPrintState(state)) runtime.criticalLatched = false;
+  }
+  if (hasPercent) runtime.percent = constrain(percent, 0, 100);
+  if (hasPrintError) {
+    runtime.printErrorCode = incomingError;
+    runtime.printErrorActive = incomingError != 0;
+    if (incomingError == 0) {
+      runtime.criticalLatched = false;
+    } else if (isActivePrintState(runtime.state) || runtime.state == "FAILED" ||
+               runtime.state == "ERROR") {
+      runtime.criticalLatched = true;
+    }
+  }
+  reportFleetStatus(profileIndex);
+}
+
+void onFleetMqtt0(char *, uint8_t *payload, unsigned int length) {
+  processFleetMqttMessage(0, payload, length);
+}
+
+void onFleetMqtt1(char *, uint8_t *payload, unsigned int length) {
+  processFleetMqttMessage(1, payload, length);
+}
+
+void publishFleetStatusRequest(uint8_t slot) {
+  if (slot >= BACKGROUND_MONITOR_COUNT) return;
+  const int8_t profileIndex = monitorProfileIndex[slot];
+  if (profileIndex < 0 || profileIndex >= FLEET_PRINTER_COUNT) return;
+  PubSubClient &client = fleetMqttForSlot(slot);
+  if (!client.connected()) return;
+  const FleetProfile &profile = fleetProfiles[profileIndex];
+  const String topic = "device/" + profile.printerSerial + "/request";
+  const String pushAll = String("{\"pushing\":{\"sequence_id\":\"") +
+                         ++monitorSequenceId[slot] +
+                         "\",\"command\":\"pushall\",\"version\":1,"
+                         "\"push_target\":1}}";
+  client.publish(topic.c_str(), pushAll.c_str());
+}
+
+void refreshFleetMonitorAssignments() {
+  int8_t desired[BACKGROUND_MONITOR_COUNT] = {-1, -1};
+  uint8_t count = 0;
+  for (uint8_t i = 0; i < FLEET_PRINTER_COUNT && count < BACKGROUND_MONITOR_COUNT;
+       ++i) {
+    if (static_cast<int8_t>(i) == selectedFleetIndex ||
+        !fleetProfiles[i].complete()) {
+      continue;
+    }
+    desired[count++] = i;
+  }
+
+  for (uint8_t slot = 0; slot < BACKGROUND_MONITOR_COUNT; ++slot) {
+    if (monitorProfileIndex[slot] == desired[slot]) continue;
+    PubSubClient &client = fleetMqttForSlot(slot);
+    if (client.connected()) client.disconnect();
+    const int8_t oldIndex = monitorProfileIndex[slot];
+    if (oldIndex >= 0 && oldIndex != selectedFleetIndex) {
+      fleetRuntimes[oldIndex].online = false;
+      reportFleetStatus(oldIndex, true);
+    }
+    monitorProfileIndex[slot] = desired[slot];
+    monitorLastAttemptAt[slot] = 0;
+    if (desired[slot] >= 0) {
+      FleetRuntime &runtime = fleetRuntimes[desired[slot]];
+      runtime.online = false;
+      fleetMqttForSlot(slot).setServer(
+          fleetProfiles[desired[slot]].printerIp.c_str(), Config::MQTT_PORT);
+      reportFleetStatus(desired[slot], true);
+    }
+  }
+}
+
+void disconnectFleetMonitors(bool markOffline = true) {
+  for (uint8_t slot = 0; slot < BACKGROUND_MONITOR_COUNT; ++slot) {
+    PubSubClient &client = fleetMqttForSlot(slot);
+    if (client.connected()) client.disconnect();
+    const int8_t profileIndex = monitorProfileIndex[slot];
+    if (markOffline && profileIndex >= 0 &&
+        fleetRuntimes[profileIndex].online) {
+      fleetRuntimes[profileIndex].online = false;
+      reportFleetStatus(profileIndex, true);
+    }
+    monitorLastAttemptAt[slot] = 0;
+  }
+}
+
+void maintainFleetMonitors() {
+  refreshFleetMonitorAssignments();
+  if (WiFi.status() != WL_CONNECTED) {
+    disconnectFleetMonitors();
+    return;
+  }
+
+  for (uint8_t slot = 0; slot < BACKGROUND_MONITOR_COUNT; ++slot) {
+    const int8_t profileIndex = monitorProfileIndex[slot];
+    if (profileIndex < 0) continue;
+    PubSubClient &client = fleetMqttForSlot(slot);
+    if (client.connected()) {
+      client.loop();
+      if (!fleetRuntimes[profileIndex].online) {
+        fleetRuntimes[profileIndex].online = true;
+        reportFleetStatus(profileIndex, true);
+      }
+      continue;
+    }
+
+    FleetRuntime &runtime = fleetRuntimes[profileIndex];
+    if (runtime.online) {
+      runtime.online = false;
+      reportFleetStatus(profileIndex, true);
+    }
+    const uint32_t now = millis();
+    if (monitorLastAttemptAt[slot] != 0 &&
+        now - monitorLastAttemptAt[slot] < Config::MQTT_RETRY_MS) {
+      continue;
+    }
+    monitorLastAttemptAt[slot] = now;
+    const FleetProfile &profile = fleetProfiles[profileIndex];
+    client.setServer(profile.printerIp.c_str(), Config::MQTT_PORT);
+    char clientId[36];
+    snprintf(clientId, sizeof(clientId), "SE-Fleet-%u-%08lX", slot,
+             static_cast<unsigned long>(ESP.getEfuseMac() & 0xFFFFFFFF));
+    Serial.printf("[FLEET] connecting %s (%s)\n", profile.kind.c_str(),
+                  profile.printerIp.c_str());
+    if (client.connect(clientId, "bblp", profile.accessCode.c_str())) {
+      const String reportTopic =
+          "device/" + profile.printerSerial + "/report";
+      client.subscribe(reportTopic.c_str(), 0);
+      runtime.online = true;
+      runtime.lastMessageAt = now;
+      reportFleetStatus(profileIndex, true);
+      publishFleetStatusRequest(slot);
+      Serial.printf("[FLEET] %s connected\n", profile.kind.c_str());
+    } else {
+      Serial.printf("[FLEET] %s connect failed, state=%d\n",
+                    profile.kind.c_str(), client.state());
+    }
+    // Only one TLS handshake per loop pass. This keeps BLE and LEDs responsive.
+    return;
+  }
 }
 
 void publishStatusRequest() {
@@ -1104,6 +1501,7 @@ void publishStatusRequest() {
 
 void disconnectNetwork() {
   if (mqtt.connected()) mqtt.disconnect();
+  disconnectFleetMonitors();
   WiFi.disconnect(false, false);
   mqttWasConnected = false;
   statusDataSeen = false;
@@ -1113,6 +1511,10 @@ void disconnectNetwork() {
   nozzleSyncRequests = 0;
   lastWifiAttemptAt = 0;
   lastMqttAttemptAt = 0;
+  if (selectedFleetIndex >= 0) {
+    fleetRuntimes[selectedFleetIndex].online = false;
+    reportFleetStatus(selectedFleetIndex, true);
+  }
 }
 
 void maintainWiFi() {
@@ -1136,6 +1538,7 @@ void maintainMqtt() {
     if (!mqttWasConnected) {
       mqttWasConnected = true;
       reportStatus("READY");
+      syncSelectedFleetRuntime(true);
       publishStatusRequest();
       if (activeFilamentType.isEmpty()) ++materialSyncRequests;
       if (printerModelFromSerial(settings.printerSerial) == "H2D" &&
@@ -1177,6 +1580,10 @@ void maintainMqtt() {
     Serial.printf("[MQTT] disconnected, state=%d; reconnecting\n", mqtt.state());
   }
   mqttWasConnected = false;
+  if (selectedFleetIndex >= 0 && fleetRuntimes[selectedFleetIndex].online) {
+    fleetRuntimes[selectedFleetIndex].online = false;
+    reportFleetStatus(selectedFleetIndex, true);
+  }
   const uint32_t now = millis();
   if (lastMqttAttemptAt != 0 &&
       now - lastMqttAttemptAt < Config::MQTT_RETRY_MS) return;
@@ -1211,12 +1618,17 @@ void maintainMqtt() {
   lastPrintDataAt = 0;
   lastStatusRequestAt = 0;
   Serial.println("[MQTT] connected and subscribed to Bambu report topic");
+  syncSelectedFleetRuntime(true);
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.11.1");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.12.0");
   reportHardwareControls();
   reportPrinterIdentity();
+  syncSelectedFleetRuntime(true);
+  for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
+    reportFleetStatus(i, true);
+  }
   if (!activeFilamentType.isEmpty()) reportMaterial();
   reportTelemetry(true);
   if (!settings.complete()) {
@@ -1271,6 +1683,49 @@ void handlePhoneCommand(String command) {
     } else {
       queuePhoneEvent("H2D,ERROR,Cấu hình thiếu hoặc IP máy in chưa đúng");
     }
+  } else if (head == "H2D_PROFILE") {
+    const int first = argument.indexOf(',');
+    const int second = first < 0 ? -1 : argument.indexOf(',', first + 1);
+    const int third = second < 0 ? -1 : argument.indexOf(',', second + 1);
+    if (first <= 0 || second <= first || third <= second) {
+      queuePhoneEvent("H2D,ERROR,Hồ sơ giám sát không đúng định dạng");
+      return;
+    }
+    String requestedKind = argument.substring(0, first);
+    requestedKind.toUpperCase();
+    const int8_t requestedIndex = fleetIndexForKind(requestedKind);
+    FleetProfile profile;
+    profile.kind = requestedKind;
+    profile.printerIp = decodeBase64(argument.substring(first + 1, second));
+    profile.printerSerial =
+        decodeBase64(argument.substring(second + 1, third));
+    profile.accessCode = decodeBase64(argument.substring(third + 1));
+    const int8_t detectedIndex = fleetIndexForSerial(profile.printerSerial);
+    if (requestedIndex < 0 || detectedIndex != requestedIndex ||
+        !saveFleetProfile(requestedIndex, profile)) {
+      queuePhoneEvent(String("H2D,ERROR,Không lưu được hồ sơ ") +
+                      requestedKind + " • kiểm tra serial và Access Code");
+      return;
+    }
+    refreshFleetMonitorAssignments();
+    queuePhoneEvent(String("H2D,CFG_ACK,PROFILE_") + requestedKind);
+  } else if (head == "H2D_PROFILE_CLEAR") {
+    const int8_t index = fleetIndexForKind(argument);
+    if (index >= 0 && index != selectedFleetIndex) {
+      clearFleetProfile(index);
+      refreshFleetMonitorAssignments();
+    }
+    queuePhoneEvent(String("H2D,CFG_ACK,PROFILE_CLEAR_") + argument);
+  } else if (head == "H2D_SELECT") {
+    const int8_t index = fleetIndexForKind(argument);
+    if (index < 0 || !fleetProfiles[index].complete()) {
+      queuePhoneEvent("H2D,ERROR,Chưa có hồ sơ máy được chọn để chụp");
+      return;
+    }
+    selectedFleetIndex = index;
+    refreshFleetMonitorAssignments();
+    syncSelectedFleetRuntime(true);
+    queuePhoneEvent("H2D,CFG_ACK,SELECT");
   } else if (head == "H2D_ARM") {
     const bool requestedArmed = argument == "1";
     if (requestedArmed) {
@@ -1533,6 +1988,25 @@ void fillAnimatedLeds(uint32_t color) {
   }
 }
 
+void setBuzzerOutput(bool enabled) {
+  digitalWrite(Config::BUZZER_PIN,
+               enabled == Config::BUZZER_ACTIVE_HIGH ? HIGH : LOW);
+}
+
+void updateBuzzerAlarm() {
+  // A selected printer uses the iPhone siren while BLE is present. Every
+  // background-printer fault is owned by ESP32; if the phone disconnects,
+  // ESP32 also takes over the selected printer so an error is never silent.
+  const bool shouldSound = hasBackgroundFleetCriticalError() ||
+                           (!phoneConnected && hasCriticalPrinterError());
+  if (!shouldSound) {
+    setBuzzerOutput(false);
+    return;
+  }
+  const uint32_t period = Config::BUZZER_ON_MS + Config::BUZZER_OFF_MS;
+  setBuzzerOutput((millis() % period) < Config::BUZZER_ON_MS);
+}
+
 uint8_t breathingScale(uint32_t now) {
   const uint16_t phase = now % 2000;
   const uint16_t ramp = phase < 1000 ? phase : 2000 - phase;
@@ -1578,14 +2052,17 @@ void updateLedStrip() {
   lastLedRefreshAt = now;
   ledStrip.clear();
 
-  const bool criticalError = hasCriticalPrinterError();
-  if (static_cast<int32_t>(modeEntryFlashUntil - now) > 0) {
+  const bool criticalError = hasAnyFleetCriticalError();
+  if (criticalError) {
+    // A fault in any of the three configured printers always has priority and
+    // reaches the strip immediately. It remains red until that printer clears
+    // the error (or an intentional STOP/CANCEL state is received).
+    const bool alarmOn = (now % 260) < 150;
+    fillLedStrip(alarmOn ? ledColor(255, 0, 0) : ledStrip.Color(0, 0, 0));
+  } else if (static_cast<int32_t>(modeEntryFlashUntil - now) > 0) {
     // Entering timelapse is acknowledged at the fixed 95% LED power for one
     // complete second, independently of the potentiometer.
     fillLedStrip(ledColor(255, 0, 0));
-  } else if (criticalError) {
-    const bool alarmOn = (now % 260) < 150;
-    fillLedStrip(alarmOn ? ledColor(255, 0, 0) : ledStrip.Color(0, 0, 0));
   } else if (static_cast<int32_t>(captureFlashUntil - now) > 0) {
     // Same meaning as the blue border on iPhone: one layer photo was ordered.
     fillLedStrip(ledColor(0, 105, 255));
@@ -1643,6 +2120,8 @@ void updateLedStrip() {
 
 void setup() {
   Serial.begin(115200);
+  pinMode(Config::BUZZER_PIN, OUTPUT);
+  setBuzzerOutput(false);
   // Drive a known waiting colour before Wi-Fi/BLE/MQTT startup. This prevents
   // the strip from briefly retaining the green/red frame shown before reset.
   ledStrip.begin();
@@ -1650,7 +2129,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.11.1");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
@@ -1670,6 +2149,8 @@ void setup() {
   setupBle();
 
   tlsClient.setInsecure();  // Bambu uses a per-device/self-signed LAN certificate.
+  fleetTls0.setInsecure();
+  fleetTls1.setInsecure();
   mqtt.setServer(settings.printerIp.c_str(), Config::MQTT_PORT);
   mqtt.setCallback(onMqttMessage);
   mqtt.setKeepAlive(60);
@@ -1679,6 +2160,17 @@ void setup() {
                   Config::MQTT_BUFFER_BYTES);
     reportStatus("BUFFER_ERROR");
   }
+  fleetMqtt0.setCallback(onFleetMqtt0);
+  fleetMqtt1.setCallback(onFleetMqtt1);
+  fleetMqtt0.setKeepAlive(60);
+  fleetMqtt1.setKeepAlive(60);
+  fleetMqtt0.setSocketTimeout(4);
+  fleetMqtt1.setSocketTimeout(4);
+  if (!fleetMqtt0.setBufferSize(Config::FLEET_MQTT_BUFFER_BYTES) ||
+      !fleetMqtt1.setBufferSize(Config::FLEET_MQTT_BUFFER_BYTES)) {
+    Serial.printf("[FLEET] failed to allocate background MQTT buffers\n");
+  }
+  refreshFleetMonitorAssignments();
   if (settings.complete()) {
     reportStatus("WIFI_CONNECTING");
   } else {
@@ -1692,10 +2184,12 @@ void loop() {
   maintainWiFi();
   maintainMqtt();
   if (mqtt.connected()) mqtt.loop();
+  maintainFleetMonitors();
   reportPrintStatus(false);
   reportTelemetry(false);
   flushPhoneEvents();
   updateHardwareInputs();
   updateLedStrip();
+  updateBuzzerAlarm();
   delay(2);
 }

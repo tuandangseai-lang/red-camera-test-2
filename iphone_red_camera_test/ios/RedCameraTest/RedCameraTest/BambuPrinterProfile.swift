@@ -1,6 +1,6 @@
 import Foundation
 
-enum BambuPrinterKind: String, Codable, CaseIterable, Identifiable {
+enum BambuPrinterKind: String, Codable, CaseIterable, Hashable, Identifiable {
     case a1 = "A1"
     case h2d = "H2D"
     case p2s = "P2S"

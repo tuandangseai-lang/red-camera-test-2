@@ -139,6 +139,7 @@ struct H2DTimelapseView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 reconcileBridgeWithSelectedProfile()
                 attemptAutomaticConfigurationIfNeeded()
+                syncFleetWhenPossible()
                 synchronizePrinterAlarm()
             }
         }
@@ -197,12 +198,18 @@ struct H2DTimelapseView: View {
                 attemptAutomaticConfigurationIfNeeded()
             }
             if bluetooth.isH2DReady { applyHardwareControls(force: true) }
+            if status == "READY" || status == "ARMED" || status == "DISARMED" {
+                syncFleetWhenPossible()
+            }
         }
         .onChange(of: bluetooth.isH2DBridge) { _, recognized in
             if recognized {
                 reconcileBridgeWithSelectedProfile()
                 switchToSelectedProfileIfPossible()
                 attemptAutomaticConfigurationIfNeeded()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    syncFleetWhenPossible()
+                }
             }
         }
         .onChange(of: bluetooth.printerSerial) { _, _ in
@@ -555,16 +562,6 @@ struct H2DTimelapseView: View {
                         .font(.custom("Arial", size: 12).weight(.bold))
                 }
             }
-            HStack(spacing: 8) {
-                Image(systemName: "speaker.wave.2.fill")
-                    .foregroundStyle(.blue)
-                Text("Âm báo lỗi an toàn • tối thiểu 75%")
-                    .font(.custom("Arial", size: 12).weight(.semibold))
-                Spacer()
-                Text("\(bluetooth.hardwareLevelPercent)%")
-                    .font(.custom("Arial", size: 12).monospacedDigit().weight(.bold))
-                    .foregroundStyle(.blue)
-            }
             if bluetooth.hasTemperatureTelemetry || bluetooth.hasFanTelemetry {
                 VStack(alignment: .leading, spacing: 6) {
                     if bluetooth.hasTemperatureTelemetry { temperatureTelemetryRows }
@@ -630,29 +627,12 @@ struct H2DTimelapseView: View {
             }
             .buttonStyle(.plain)
 
+            printerProfileSelector
+
             if showConfiguration {
                 Label("Chọn hồ sơ; SE còn tự kiểm tra đầu serial để nhận đúng A1 / H2D / P2S.", systemImage: "sparkles")
                     .font(.custom("Arial", size: 12).weight(.bold))
                     .foregroundStyle(.orange)
-
-                HStack(spacing: 8) {
-                    ForEach([BambuPrinterKind.a1, .h2d, .p2s]) { kind in
-                        Button {
-                            activateProfile(kind)
-                        } label: {
-                            HStack(spacing: 5) {
-                                Circle()
-                                    .fill(savedProfiles.contains(where: { $0.kind == kind }) ? Color.green : Color.gray)
-                                    .frame(width: 7, height: 7)
-                                Text(kind.rawValue)
-                            }
-                            .font(.custom("Arial", size: 12).weight(.bold))
-                            .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(selectedPrinterKind == kind ? .blue : .gray.opacity(0.34))
-                    }
-                }
 
                 VStack(alignment: .leading, spacing: 12) {
                     configurationLabel("Tên Wi-Fi", detail: "Mạng mà ESP32 sẽ kết nối")
@@ -692,7 +672,10 @@ struct H2DTimelapseView: View {
                 .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
 
                 if bluetooth.isConfiguring {
-                    ProgressView(value: Double(bluetooth.configurationProgress), total: 6)
+                    ProgressView(
+                        value: Double(bluetooth.configurationProgress),
+                        total: Double(max(1, bluetooth.configurationTotal))
+                    )
                         .tint(.blue)
                 }
 
@@ -734,6 +717,37 @@ struct H2DTimelapseView: View {
             }
         }
         .cardStyle()
+    }
+
+    private var printerProfileSelector: some View {
+        HStack(spacing: 8) {
+            ForEach([BambuPrinterKind.a1, .h2d, .p2s]) { kind in
+                let fleet = bluetooth.fleetStatus(for: kind)
+                Button {
+                    activateProfile(kind)
+                } label: {
+                    HStack(spacing: 5) {
+                        PrinterActivityDot(
+                            isConfigured: savedProfiles.contains(where: { $0.kind == kind }),
+                            status: fleet
+                        )
+                        Text(kind.rawValue)
+                    }
+                    .font(.custom("Arial", size: 12).weight(.bold))
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(selectedPrinterKind == kind ? .blue : .gray.opacity(0.34))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(
+                            selectedPrinterKind == kind ? Color.green : .clear,
+                            lineWidth: 2
+                        )
+                }
+                .accessibilityLabel(profileAccessibilityText(kind: kind, status: fleet))
+            }
+        }
     }
 
     private var activeCaptureView: some View {
@@ -888,7 +902,7 @@ struct H2DTimelapseView: View {
                     )
 
                     Button(role: .destructive) {
-                        showStopOptions = true
+                        requestStopCapture()
                     } label: {
                         Label("Dừng quay", systemImage: "stop.fill")
                             .frame(maxWidth: .infinity)
@@ -1003,6 +1017,32 @@ struct H2DTimelapseView: View {
         showConfiguration = !complete
         pendingProfileSwitch = complete
         switchToSelectedProfileIfPossible()
+    }
+
+    private func requestStopCapture() {
+        guard timelapse.capturedFrameCount > 0 else {
+            bluetooth.setH2DTimelapseArmed(false)
+            timelapse.disarm()
+            return
+        }
+        showStopOptions = true
+    }
+
+    private func syncFleetWhenPossible() {
+        guard configurationSaved, bluetooth.isH2DBridge,
+              !bluetooth.isConfiguring, !bluetooth.isSwitchingPrinter else { return }
+        bluetooth.syncFleetProfiles(selectedKind: selectedPrinterKind)
+    }
+
+    private func profileAccessibilityText(
+        kind: BambuPrinterKind,
+        status: BambuFleetStatus
+    ) -> String {
+        let selection = selectedPrinterKind == kind ? "đang được chọn để chụp" : "không được chọn để chụp"
+        if status.hasCriticalError { return "\(kind.rawValue), có lỗi, \(selection)" }
+        if status.hasActivePrintJob { return "\(kind.rawValue), đang in \(status.printPercent) phần trăm, \(selection)" }
+        if status.isOnline { return "\(kind.rawValue), đang trực tuyến, \(selection)" }
+        return "\(kind.rawValue), chưa trực tuyến, \(selection)"
     }
 
     private var hasCompleteSelectedProfile: Bool {
@@ -1191,6 +1231,33 @@ struct H2DTimelapseView: View {
         )
         H2DAccessCodeStore.save(accessCode, for: kind)
         savedProfiles = BambuPrinterProfileStore.load()
+        syncFleetWhenPossible()
+    }
+}
+
+private struct PrinterActivityDot: View {
+    let isConfigured: Bool
+    let status: BambuFleetStatus
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1.0)) { context in
+            let brightHalf = Int(context.date.timeIntervalSinceReferenceDate) % 2 == 0
+            Circle()
+                .fill(dotColor)
+                .frame(width: 9, height: 9)
+                .opacity(shouldBlink ? (brightHalf ? 1 : 0.18) : 1)
+                .shadow(color: dotColor.opacity(shouldBlink && brightHalf ? 0.9 : 0), radius: 4)
+        }
+    }
+
+    private var shouldBlink: Bool {
+        status.hasCriticalError || status.hasActivePrintJob
+    }
+
+    private var dotColor: Color {
+        if status.hasCriticalError { return .red }
+        if status.hasActivePrintJob || status.isOnline { return .green }
+        return isConfigured ? .yellow : .gray
     }
 }
 
