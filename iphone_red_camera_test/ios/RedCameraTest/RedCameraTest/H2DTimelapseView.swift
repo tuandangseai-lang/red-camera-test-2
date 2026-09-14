@@ -40,6 +40,10 @@ struct H2DTimelapseView: View {
 
     private var printerName: String { detectedPrinterKind.rawValue }
 
+    private let cinemaCyan = Color(red: 0.18, green: 0.88, blue: 0.96)
+    private let cinemaAmber = Color(red: 0.96, green: 0.61, blue: 0.20)
+    private let cinemaGreen = Color(red: 0.20, green: 0.94, blue: 0.57)
+
     var body: some View {
         observedContent
             .onChange(of: bluetooth.hardwareControlRevision) { _, _ in
@@ -86,7 +90,8 @@ struct H2DTimelapseView: View {
 
     private var observedContent: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            CinemaTechnologyBackdrop()
+                .ignoresSafeArea()
             if timelapse.isArmed || timelapse.isRendering {
                 activeCaptureView
             } else {
@@ -331,8 +336,12 @@ struct H2DTimelapseView: View {
 
     private var printerStatusIsland: some View {
         HStack(spacing: 10) {
+            Image(systemName: "circle.hexagongrid.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(printerIslandState.color)
+
             Text(printerIslandTitle)
-                .font(.custom("Arial", size: 12).weight(.bold))
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
                 .monospacedDigit()
                 .lineLimit(1)
 
@@ -348,10 +357,18 @@ struct H2DTimelapseView: View {
         }
         .padding(.horizontal, 13)
         .frame(height: 43)
-        .background(.black.opacity(0.94), in: Capsule())
+        .background(.ultraThinMaterial, in: Capsule())
+        .background(.black.opacity(0.76), in: Capsule())
         .overlay {
             Capsule()
-                .stroke(printerIslandState.color.opacity(0.42), lineWidth: 1)
+                .stroke(
+                    LinearGradient(
+                        colors: [printerIslandState.color.opacity(0.75), .white.opacity(0.10)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    ),
+                    lineWidth: 1
+                )
         }
         // Keep the Dynamic Island compact: its width follows the status
         // content instead of stretching across the entire screen.
@@ -449,6 +466,7 @@ struct H2DTimelapseView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
+                    cinemaSystemHeader
                     cameraCard
                     bridgeStatusCard
                     configurationCard
@@ -463,65 +481,137 @@ struct H2DTimelapseView: View {
                         }
                         timelapse.arm(startingAtLayer: bluetooth.h2dCurrentLayer)
                     } label: {
-                        Label("Bật chờ \(printerName) và làm tối màn hình", systemImage: "camera.aperture")
-                            .font(.custom("Arial", size: 16).weight(.bold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 15)
+                        HStack(spacing: 12) {
+                            ZStack {
+                                Circle()
+                                    .fill(.black.opacity(0.24))
+                                    .frame(width: 38, height: 38)
+                                Image(systemName: "record.circle")
+                                    .font(.system(size: 21, weight: .bold))
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("KHỞI ĐỘNG TIMELAPSE")
+                                    .font(.system(size: 14, weight: .black, design: .rounded))
+                                Text("Theo dõi \(printerName) • tự chụp từng lớp")
+                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                    .opacity(0.72)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 13, weight: .black))
+                        }
+                        .padding(.horizontal, 15)
+                        .frame(maxWidth: .infinity, minHeight: 58)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.orange)
+                    .buttonStyle(CinemaLaunchButtonStyle())
                     .disabled(!bluetooth.isH2DReady)
                     .opacity(bluetooth.isH2DReady ? 1 : 0.42)
 
-                    Text("Khi đã bật: giữ SE ở màn hình trước, có thể hạ sáng xuống mức thấp nhất nhưng không khóa iPhone. Camera chỉ thức dậy khi ESP32 báo một lớp vừa hoàn tất.")
-                        .font(.custom("Arial", size: 12))
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.leading)
+                    Label(
+                        "Giữ SE ở màn hình trước. Màn hình sẽ hạ sáng; camera chỉ chụp khi ESP32 báo lớp vừa hoàn tất.",
+                        systemImage: "lock.shield.fill"
+                    )
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.48))
                 }
                 .padding(16)
             }
-            .background(Color.black)
-            .navigationTitle("Timelapse \(printerName)")
-            .navigationBarTitleDisplayMode(.inline)
+            .background(Color.clear)
+            .scrollIndicators(.hidden)
+            .toolbar(.hidden, for: .navigationBar)
         }
     }
 
-    private var cameraCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label("Khung hình iPhone", systemImage: "iphone.gen3")
-                    .font(.custom("Arial", size: 15).weight(.bold))
-                Spacer()
-                Text(
-                    setupCameraEnabled
-                        ? (timelapse.isPreviewRunning ? "Đang hiển thị" : "Đang mở")
-                        : "Đã tắt"
-                )
-                    .font(.custom("Arial", size: 12).weight(.bold))
-                    .foregroundStyle(
-                        !setupCameraEnabled ? Color.secondary :
-                            (timelapse.isPreviewRunning ? .green : .yellow)
+    private var cinemaSystemHeader: some View {
+        HStack(alignment: .center, spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [cinemaAmber.opacity(0.30), cinemaCyan.opacity(0.11)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
                     )
+                    .frame(width: 48, height: 48)
+                Image(systemName: "film.stack.fill")
+                    .font(.system(size: 21, weight: .bold))
+                    .foregroundStyle(cinemaAmber)
+                    .shadow(color: cinemaAmber.opacity(0.65), radius: 8)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("SE CINEMA CONTROL")
+                    .font(.system(size: 16, weight: .black, design: .rounded))
+                    .tracking(0.8)
+                Text("SMART LAYER CAPTURE • \(printerName)")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(cinemaCyan.opacity(0.72))
+                    .tracking(0.7)
+            }
+            Spacer(minLength: 6)
+            VStack(alignment: .trailing, spacing: 5) {
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(bluetooth.isConnected ? cinemaGreen : .red)
+                        .frame(width: 6, height: 6)
+                        .shadow(color: bluetooth.isConnected ? cinemaGreen : .red, radius: 4)
+                    Text(bluetooth.isConnected ? "LINK" : "OFFLINE")
+                }
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.74))
+
+                Text("V9.47")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.34))
+            }
+        }
+        .padding(.horizontal, 2)
+        .padding(.vertical, 5)
+    }
+
+    private var cameraCard: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("OPTICAL VIEWFINDER")
+                        .font(.system(size: 13, weight: .black, design: .monospaced))
+                        .tracking(0.8)
+                    Text("CAMERA IPHONE • 1.5×")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.36))
+                }
+                Spacer()
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(cameraStatusColor)
+                        .frame(width: 6, height: 6)
+                        .shadow(color: cameraStatusColor, radius: 4)
+                    Text(setupCameraEnabled ? (timelapse.isPreviewRunning ? "LIVE" : "WARMING") : "STANDBY")
+                }
+                .font(.system(size: 9, weight: .black, design: .monospaced))
+                .foregroundStyle(cameraStatusColor)
+                .padding(.horizontal, 9)
+                .frame(height: 28)
+                .background(cameraStatusColor.opacity(0.10), in: Capsule())
+                .overlay { Capsule().stroke(cameraStatusColor.opacity(0.30), lineWidth: 1) }
+
                 if setupCameraEnabled {
                     Button {
                         timelapse.rotateCamera180()
                     } label: {
-                        Label("Xoay 180°", systemImage: "rotate.right")
-                            .labelStyle(.iconOnly)
+                        Image(systemName: "rotate.right")
+                            .frame(width: 28, height: 28)
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(CinemaIconButtonStyle(tint: cinemaCyan))
                 }
                 Button {
                     setupCameraEnabled.toggle()
                 } label: {
-                    Label(
-                        setupCameraEnabled ? "Ẩn hình căn khung" : "Hiện hình căn khung",
-                        systemImage: setupCameraEnabled ? "video.slash.fill" : "video.fill"
-                    )
-                        .labelStyle(.iconOnly)
+                    Image(systemName: setupCameraEnabled ? "video.slash.fill" : "video.fill")
+                        .frame(width: 28, height: 28)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(setupCameraEnabled ? .gray : .blue)
+                .buttonStyle(CinemaIconButtonStyle(tint: setupCameraEnabled ? .white.opacity(0.65) : cinemaCyan))
             }
             HStack {
                 Spacer(minLength: 0)
@@ -534,33 +624,21 @@ struct H2DTimelapseView: View {
                         .overlay {
                             ZStack {
                                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                    .stroke(.white.opacity(0.14), lineWidth: 1)
+                                    .stroke(cinemaCyan.opacity(0.36), lineWidth: 1)
+                                CinemaViewfinderOverlay(tint: cinemaCyan)
                                 if !timelapse.isPreviewRunning {
                                     VStack(spacing: 9) {
                                         ProgressView()
-                                            .tint(.orange)
-                                        Text("Đang mở camera iPhone…")
-                                            .font(.custom("Arial", size: 12).weight(.semibold))
-                                            .foregroundStyle(.secondary)
+                                            .tint(cinemaAmber)
+                                        Text("INITIALIZING OPTICS")
+                                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                            .foregroundStyle(.white.opacity(0.55))
                                     }
                                 }
                             }
                         }
                     } else {
-                        ZStack {
-                            Color.white.opacity(0.035)
-                            VStack(spacing: 10) {
-                                Image(systemName: "video.slash.fill")
-                                    .font(.system(size: 30, weight: .semibold))
-                                Text("Hình căn khung đang ẩn")
-                                    .font(.custom("Arial", size: 12).weight(.semibold))
-                            }
-                            .foregroundStyle(.secondary)
-                        }
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .stroke(.white.opacity(0.10), lineWidth: 1)
-                        }
+                        cinemaProjectorStandby
                     }
                 }
                 // Give the portrait viewport an explicit 9.0 / 16.0 size.
@@ -568,51 +646,126 @@ struct H2DTimelapseView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 Spacer(minLength: 0)
             }
-            Text("Nút này chỉ ẩn hình căn khung. Khi bật chờ, camera vẫn tự chụp theo từng lớp.")
-                .font(.custom("Arial", size: 12))
-                .foregroundStyle(.secondary)
+            HStack(spacing: 7) {
+                Image(systemName: "info.circle.fill")
+                    .foregroundStyle(cinemaCyan.opacity(0.72))
+                Text("Ẩn viewfinder không tắt chức năng chụp tự động theo lớp.")
+            }
+            .font(.system(size: 10, weight: .medium, design: .rounded))
+            .foregroundStyle(.white.opacity(0.45))
         }
         .cardStyle()
     }
 
+    private var cameraStatusColor: Color {
+        guard setupCameraEnabled else { return .white.opacity(0.42) }
+        return timelapse.isPreviewRunning ? cinemaGreen : cinemaAmber
+    }
+
+    private var cinemaProjectorStandby: some View {
+        ZStack {
+            LinearGradient(
+                colors: [.black.opacity(0.95), Color(red: 0.025, green: 0.075, blue: 0.09)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            Image("CinemaProjectorOutline")
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(.white.opacity(0.76))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 21)
+                .shadow(color: cinemaCyan.opacity(0.42), radius: 8)
+
+            LinearGradient(
+                colors: [.clear, cinemaCyan.opacity(0.09), .clear],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 34)
+            .offset(y: -62)
+
+            CinemaViewfinderOverlay(tint: cinemaCyan)
+
+            VStack {
+                HStack {
+                    Text("SE // OPTICAL UNIT")
+                    Spacer()
+                    Text("CAM OFF")
+                        .foregroundStyle(cinemaAmber)
+                }
+                Spacer()
+                HStack {
+                    Image(systemName: "viewfinder")
+                    Text("READY FOR LAYER SIGNAL")
+                    Spacer()
+                    Text("9:16")
+                }
+            }
+            .font(.system(size: 7, weight: .bold, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.45))
+            .padding(12)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(cinemaCyan.opacity(0.24), lineWidth: 1)
+        }
+    }
+
     private var bridgeStatusCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 13) {
             HStack(spacing: 10) {
-                Circle()
-                    .fill(
-                        visibleBridgeError
-                            ? Color.red
-                            : bluetooth.hasActiveCriticalPrinterAlert
-                                ? .red
-                                : bluetooth.hasActivePrinterAlert
-                                    ? .orange
-                                    : bluetooth.isH2DReady ? .green : .yellow
-                    )
-                    .frame(width: 10, height: 10)
-                Text(bluetooth.h2dBridgeStatus)
-                    .font(.custom("Arial", size: 14).weight(.semibold))
+                ZStack {
+                    Circle()
+                        .fill(bridgeAccentColor.opacity(0.13))
+                        .frame(width: 38, height: 38)
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(bridgeAccentColor)
+                        .shadow(color: bridgeAccentColor.opacity(0.65), radius: 5)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("PRINTER TELEMETRY")
+                        .font(.system(size: 9, weight: .black, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.38))
+                    Text(bluetooth.h2dBridgeStatus)
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .lineLimit(2)
+                }
                 Spacer()
                 Button {
                     bluetooth.requestH2DStatus()
                 } label: {
                     Image(systemName: "arrow.clockwise")
+                        .frame(width: 28, height: 28)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(CinemaIconButtonStyle(tint: cinemaCyan))
             }
 
             if bluetooth.h2dTotalLayers > 0 {
-                ProgressView(value: printerProgress)
-                .tint(.orange)
-                Text(
-                    isLayerPrintingOrChangingFilament
-                        ? "ĐANG IN • lớp \(bluetooth.h2dCurrentLayer)/\(bluetooth.h2dTotalLayers) • \(bluetooth.h2dPrintPercent)%"
-                        : "\(bluetooth.h2dStageText) • \(bluetooth.h2dPrintPercent)%"
-                )
-                    .font(.custom("Arial", size: 12).monospacedDigit())
-                    .foregroundStyle(.secondary)
+                VStack(spacing: 7) {
+                    HStack(alignment: .lastTextBaseline) {
+                        Text(
+                            isLayerPrintingOrChangingFilament
+                                ? "LAYER \(bluetooth.h2dCurrentLayer) / \(bluetooth.h2dTotalLayers)"
+                                : bluetooth.h2dStageText.uppercased()
+                        )
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.58))
+                        Spacer()
+                        Text("\(bluetooth.h2dPrintPercent)%")
+                            .font(.system(size: 24, weight: .black, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(cinemaGreen)
+                    }
+                    CinemaProgressRail(progress: printerProgress, tint: cinemaGreen)
+                }
+                .padding(.vertical, 2)
             }
             HStack(spacing: 8) {
-                Image(systemName: "cube.fill")
+                Image(systemName: "shippingbox.fill")
                     .foregroundStyle(bluetooth.filamentType.isEmpty ? .gray : .orange)
                 if bluetooth.filamentType.isEmpty {
                     Text("\(printerName) • đang đồng bộ loại nhựa")
@@ -643,6 +796,12 @@ struct H2DTimelapseView: View {
             }
         }
         .cardStyle()
+    }
+
+    private var bridgeAccentColor: Color {
+        if visibleBridgeError || bluetooth.hasActiveCriticalPrinterAlert { return .red }
+        if bluetooth.hasActivePrinterAlert { return cinemaAmber }
+        return bluetooth.isH2DReady ? cinemaGreen : cinemaAmber
     }
 
     private func attemptAutomaticConfigurationIfNeeded() {
@@ -729,8 +888,13 @@ struct H2DTimelapseView: View {
                         .autocorrectionDisabled()
                 }
                 .font(.custom("Arial", size: 14))
+                .textFieldStyle(CinemaTextFieldStyle())
                 .padding(12)
-                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+                .background(.black.opacity(0.26), in: RoundedRectangle(cornerRadius: 14))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(cinemaCyan.opacity(0.12), lineWidth: 1)
+                }
 
                 if bluetooth.isConfiguring {
                     ProgressView(
@@ -845,30 +1009,7 @@ struct H2DTimelapseView: View {
                 }
                 .padding(.horizontal, 18)
             } else {
-                ZStack {
-                    Circle()
-                        .stroke(.white.opacity(0.08), lineWidth: 7)
-                        .frame(width: 150, height: 150)
-                    Circle()
-                        .trim(from: 0, to: min(1, max(0.015,
-                            printerProgress)))
-                        .stroke(
-                            timelapse.isRendering ? Color.cyan : Color.orange,
-                            style: StrokeStyle(lineWidth: 7, lineCap: .round)
-                        )
-                        .frame(width: 150, height: 150)
-                        .rotationEffect(.degrees(-90))
-                        .animation(.linear(duration: 0.3), value: bluetooth.h2dCurrentLayer)
-                    VStack(spacing: 7) {
-                        Image(systemName: timelapse.isRendering ? "film.stack" : "camera.aperture")
-                            .font(.system(size: 30, weight: .semibold))
-                        Text("\(timelapse.capturedFrameCount)")
-                            .font(.custom("Arial", size: 38).monospacedDigit().weight(.bold))
-                        Text("ẢNH ĐÃ CHỤP")
-                            .font(.custom("Arial", size: 11).weight(.bold))
-                            .foregroundStyle(.white.opacity(0.45))
-                    }
-                }
+                activeCinemaStandbyHUD
             }
 
             Text(timelapse.statusText)
@@ -982,7 +1123,60 @@ struct H2DTimelapseView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
         }
-        .background(Color.black)
+        .background(Color.clear)
+    }
+
+    private var activeCinemaStandbyHUD: some View {
+        ZStack {
+            Image("CinemaProjectorOutline")
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(.white.opacity(0.17))
+                .frame(width: 206, height: 366)
+                .shadow(color: cinemaCyan.opacity(0.28), radius: 12)
+
+            Circle()
+                .stroke(.white.opacity(0.07), lineWidth: 7)
+                .frame(width: 150, height: 150)
+            Circle()
+                .trim(from: 0, to: min(1, max(0.015, printerProgress)))
+                .stroke(
+                    AngularGradient(
+                        colors: [cinemaAmber, cinemaCyan, cinemaGreen],
+                        center: .center
+                    ),
+                    style: StrokeStyle(lineWidth: 7, lineCap: .round)
+                )
+                .frame(width: 150, height: 150)
+                .rotationEffect(.degrees(-90))
+                .shadow(color: cinemaCyan.opacity(0.35), radius: 6)
+                .animation(.linear(duration: 0.3), value: bluetooth.h2dCurrentLayer)
+
+            VStack(spacing: 6) {
+                Image(systemName: timelapse.isRendering ? "film.stack.fill" : "camera.aperture")
+                    .font(.system(size: 25, weight: .semibold))
+                    .foregroundStyle(timelapse.isRendering ? cinemaCyan : cinemaAmber)
+                Text("\(timelapse.capturedFrameCount)")
+                    .font(.system(size: 38, weight: .black, design: .rounded))
+                    .monospacedDigit()
+                Text("FRAMES CAPTURED")
+                    .font(.system(size: 8, weight: .black, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.42))
+                    .tracking(0.7)
+            }
+        }
+        .frame(height: 330)
+        .overlay(alignment: .bottom) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(timelapse.isRendering ? cinemaCyan : cinemaGreen)
+                    .frame(width: 5, height: 5)
+                Text(timelapse.isRendering ? "RENDER ENGINE ACTIVE" : "LAYER SENSOR ARMED")
+            }
+            .font(.system(size: 8, weight: .bold, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.46))
+        }
     }
 
     private var capturedFramesCard: some View {
@@ -1041,10 +1235,18 @@ struct H2DTimelapseView: View {
             }
         }
         .padding(12)
-        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(.black.opacity(0.46), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(.white.opacity(0.09), lineWidth: 1)
+                .stroke(
+                    LinearGradient(
+                        colors: [cinemaCyan.opacity(0.26), .white.opacity(0.06)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
         }
         .padding(.horizontal, 18)
     }
@@ -1339,10 +1541,174 @@ private extension View {
         self
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .background(.black.opacity(0.50), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(.white.opacity(0.10), lineWidth: 1)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.18, green: 0.88, blue: 0.96).opacity(0.24),
+                                .white.opacity(0.08),
+                                Color(red: 0.96, green: 0.61, blue: 0.20).opacity(0.15)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+            }
+            .shadow(color: .black.opacity(0.35), radius: 18, y: 10)
+    }
+}
+
+private struct CinemaTechnologyBackdrop: View {
+    var body: some View {
+        ZStack {
+            Color.black
+
+            LinearGradient(
+                colors: [
+                    Color(red: 0.015, green: 0.055, blue: 0.065),
+                    Color(red: 0.025, green: 0.028, blue: 0.045),
+                    .black
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            Canvas { context, size in
+                var path = Path()
+                let spacing: CGFloat = 28
+                for x in stride(from: CGFloat.zero, through: size.width, by: spacing) {
+                    path.move(to: CGPoint(x: x, y: 0))
+                    path.addLine(to: CGPoint(x: x, y: size.height))
+                }
+                for y in stride(from: CGFloat.zero, through: size.height, by: spacing) {
+                    path.move(to: CGPoint(x: 0, y: y))
+                    path.addLine(to: CGPoint(x: size.width, y: y))
+                }
+                context.stroke(path, with: .color(.white.opacity(0.018)), lineWidth: 0.5)
+            }
+
+            RadialGradient(
+                colors: [Color.cyan.opacity(0.10), .clear],
+                center: .topTrailing,
+                startRadius: 0,
+                endRadius: 360
+            )
+
+            RadialGradient(
+                colors: [Color.orange.opacity(0.055), .clear],
+                center: .bottomLeading,
+                startRadius: 0,
+                endRadius: 300
+            )
+        }
+    }
+}
+
+private struct CinemaViewfinderOverlay: View {
+    let tint: Color
+
+    var body: some View {
+        ZStack {
+            Image(systemName: "viewfinder")
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(tint.opacity(0.38))
+                .padding(10)
+
+            HStack(spacing: 5) {
+                Rectangle()
+                    .fill(tint.opacity(0.20))
+                    .frame(width: 28, height: 0.5)
+                Circle()
+                    .stroke(tint.opacity(0.45), lineWidth: 0.7)
+                    .frame(width: 9, height: 9)
+                Rectangle()
+                    .fill(tint.opacity(0.20))
+                    .frame(width: 28, height: 0.5)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+private struct CinemaProgressRail: View {
+    let progress: Double
+    let tint: Color
+
+    var body: some View {
+        GeometryReader { proxy in
+            let fraction = min(1, max(0, progress))
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(.white.opacity(0.065))
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [tint.opacity(0.48), tint, .cyan],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: max(5, proxy.size.width * fraction))
+                    .shadow(color: tint.opacity(0.70), radius: 5)
+            }
+        }
+        .frame(height: 6)
+        .animation(.linear(duration: 0.45), value: progress)
+    }
+}
+
+private struct CinemaLaunchButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(.black.opacity(0.88))
+            .background(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.96, green: 0.61, blue: 0.20),
+                        Color(red: 0.99, green: 0.77, blue: 0.35)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                ),
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(.white.opacity(0.38), lineWidth: 1)
+            }
+            .shadow(color: Color.orange.opacity(configuration.isPressed ? 0.18 : 0.42), radius: 13, y: 5)
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+private struct CinemaIconButtonStyle: ButtonStyle {
+    let tint: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .bold))
+            .foregroundStyle(tint)
+            .background(tint.opacity(configuration.isPressed ? 0.18 : 0.09), in: Circle())
+            .overlay { Circle().stroke(tint.opacity(0.24), lineWidth: 1) }
+            .scaleEffect(configuration.isPressed ? 0.92 : 1)
+    }
+}
+
+private struct CinemaTextFieldStyle: TextFieldStyle {
+    func _body(configuration: TextField<_Label>) -> some View {
+        configuration
+            .padding(.horizontal, 12)
+            .frame(minHeight: 42)
+            .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .stroke(.white.opacity(0.09), lineWidth: 1)
             }
     }
 }
