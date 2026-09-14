@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.12.7
+// SE Bambu Timelapse Bridge for classic ESP32 v1.12.8
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -74,15 +74,15 @@ constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint32_t CONFIG_NETWORK_QUIET_MS = 8000;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
-// Seven WS2812B packages are active: pixels 0...1 hold the selected printer's
-// steady status colour and pixels 2...6 form the real-time effect/progress bar.
+// Eight WS2812B packages are active: pixels 0...2 hold the three printers'
+// steady status colours and pixels 3...7 form the real-time effect/progress bar.
 // DATA -> GPIO5 through 330 ohms; 5V/GND must share GND with the ESP32.
 constexpr uint8_t LED_STRIP_PIN = 5;
-constexpr uint16_t LED_STATUS_COUNT = 2;
+constexpr uint16_t LED_STATUS_COUNT = 3;
 constexpr uint16_t LED_ANIMATED_COUNT = 5;
 constexpr uint16_t LED_ACTIVE_COUNT = LED_STATUS_COUNT + LED_ANIMATED_COUNT;
-// The installed strip contains ten packages, but only the first seven are in
-// use. Keep the final three in each transmitted frame so they are actively
+// The installed strip contains ten packages, but only the first eight are in
+// use. Keep the final two in each transmitted frame so they are actively
 // cleared instead of retaining a colour from an earlier firmware build.
 constexpr uint16_t LED_PHYSICAL_COUNT = 10;
 // Controls use INPUT_PULLUP: each button/switch contact closes to GND.
@@ -2272,23 +2272,20 @@ uint32_t ledColor(uint8_t red, uint8_t green, uint8_t blue) {
   return scaledLedColor(red, green, blue, 255);
 }
 
-void renderSelectedPrinterStatusLeds(uint32_t now) {
-  // The two leading pixels are one compact indicator for the printer selected
-  // by the iPhone: both black when offline, yellow when powered/idle and green
-  // while printing. The iPhone still shows A1/H2D/P2S separately.
-  uint32_t color = ledStrip.Color(0, 0, 0);
-  if (selectedFleetIndex >= 0 && selectedFleetIndex < FLEET_PRINTER_COUNT) {
-    const FleetProfile &profile = fleetProfiles[selectedFleetIndex];
-    const FleetRuntime &runtime = fleetRuntimes[selectedFleetIndex];
-    const bool online = profile.complete() && (runtime.online || mqttWasConnected);
-    if (online) {
-      const bool printing = isActivePrintState(printState) ||
-                            isActivePrintState(runtime.state);
-      color = printing ? ledColor(0, 255, 58) : ledColor(255, 190, 0);
+void renderFleetStatusLeds(uint32_t now) {
+  // Pixels 0...2 permanently represent A1/H2D/P2S in that order. Offline or
+  // unconfigured is black, powered/idle is yellow and active printing is green.
+  // A fault in any printer is handled by the global red-alarm branch.
+  for (uint8_t index = 0; index < Config::LED_STATUS_COUNT; ++index) {
+    const FleetProfile &profile = fleetProfiles[index];
+    const FleetRuntime &runtime = fleetRuntimes[index];
+    uint32_t color = ledStrip.Color(0, 0, 0);
+    if (profile.complete() && runtime.online) {
+      color = isActivePrintState(runtime.state)
+                  ? ledColor(0, 255, 58)
+                  : ledColor(255, 190, 0);
     }
-  }
-  for (uint16_t i = 0; i < Config::LED_STATUS_COUNT; ++i) {
-    ledStrip.setPixelColor(i, color);
+    ledStrip.setPixelColor(index, color);
   }
   (void)now;
 }
@@ -2384,7 +2381,7 @@ void updateLedStrip() {
     fillLedStrip(alarmOn ? ledColor(255, 0, 0) : ledStrip.Color(0, 0, 0));
   } else if (printCompleteBlueUntil != 0 &&
              static_cast<int32_t>(printCompleteBlueUntil - now) > 0) {
-    // A genuinely completed job owns all seven active pixels for three hours.
+    // A genuinely completed job owns all eight active pixels for three hours.
     // One second blue plus one second off gives the requested two-second cycle.
     // This timer intentionally lives only in RAM, so reboot returns to yellow.
     const bool blueOn = (now % 2000) < 1000;
@@ -2409,9 +2406,9 @@ void updateLedStrip() {
              (currentStage == 0 || currentStage == -1 || currentLayer > 0)) {
     // Keep the print-progress colour green through filament changes and every
     // other RUNNING sub-stage. Maintenance stage codes must not turn it yellow.
-    // Pixels 0...1 are the always-on status group. Pixels 2...6 are the five
+    // Pixels 0...2 are the always-on status group. Pixels 3...7 are the five
     // clockwise progress pixels that match the iPhone border.
-    renderSelectedPrinterStatusLeds(now);
+    renderFleetStatusLeds(now);
     const float filledPixels =
         smoothLedProgress(now) * Config::LED_ANIMATED_COUNT / 100.0f;
     for (uint16_t i = 0; i < Config::LED_ANIMATED_COUNT; ++i) {
@@ -2440,12 +2437,12 @@ void updateLedStrip() {
     // Centre is the normal waiting position. Match the iPhone standby effect
     // with one smooth yellow rise/fall every two seconds. An active print has
     // already taken the green/red/blue branches above.
-    renderSelectedPrinterStatusLeds(now);
+    renderFleetStatusLeds(now);
     fillAnimatedLeds(scaledLedColor(255, 190, 0, breathingScale(now)));
   } else {
     // Torch (-1) is steady yellow until a printer session takes over above.
     // Timelapse (+1) also remains visibly yellow before its first print state.
-    renderSelectedPrinterStatusLeds(now);
+    renderFleetStatusLeds(now);
     fillAnimatedLeds(ledColor(255, 190, 0));
   }
   ledStrip.show();
@@ -2462,7 +2459,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.7");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.8");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
