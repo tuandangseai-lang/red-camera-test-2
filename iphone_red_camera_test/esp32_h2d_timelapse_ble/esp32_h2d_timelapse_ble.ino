@@ -38,7 +38,10 @@ constexpr uint16_t MQTT_CONNECT_BUFFER_BYTES = 1024;
 // Two 14-KB buffers beside the selected printer's 49-KB buffer starved mbedTLS.
 constexpr uint16_t FLEET_MQTT_BUFFER_BYTES = 4096;
 constexpr uint32_t WIFI_RETRY_MS = 12000;
-constexpr uint32_t MQTT_RETRY_MS = 10000;
+// A printer profile switch keeps the Wi-Fi association alive and only
+// rebuilds MQTT.  A short retry interval makes an idle/offline target fail
+// quickly without leaving the iPhone waiting through a ten-second dead time.
+constexpr uint32_t MQTT_RETRY_MS = 2500;
 constexpr uint32_t MQTT_TCP_TIMEOUT_MS = 2000;
 constexpr uint32_t FLEET_TCP_TIMEOUT_MS = 1200;
 constexpr uint32_t MQTT_TLS_HANDSHAKE_TIMEOUT_SECONDS = 3;
@@ -171,6 +174,9 @@ uint8_t eventTail = 0;
 
 volatile bool phoneConnected = false;
 volatile bool networkResetPending = false;
+// H2D_SELECT changes only the MQTT target.  H2D_SAVE may change the Wi-Fi
+// network and therefore still performs a full Wi-Fi reset.
+volatile bool keepWifiOnNetworkReset = false;
 volatile bool fleetAssignmentsPending = false;
 volatile bool statusRequestPending = false;
 bool timelapseArmed = false;
@@ -1545,11 +1551,11 @@ void publishStatusRequest() {
   if (!mqtt.publish(topic.c_str(), pushAll.c_str())) mqttWasConnected = false;
 }
 
-void disconnectNetwork() {
+void disconnectNetwork(bool keepWifi = false) {
   if (mqttWasConnected) mqtt.disconnect();
   mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
   disconnectFleetMonitors();
-  WiFi.disconnect(false, false);
+  if (!keepWifi) WiFi.disconnect(false, false);
   mqttWasConnected = false;
   statusDataSeen = false;
   lastPrintDataAt = 0;
@@ -1570,7 +1576,9 @@ void processDeferredNetworkWork() {
   // be inside mqtt.loop(); serialize all network mutations here.
   if (networkResetPending) {
     networkResetPending = false;
-    disconnectNetwork();
+    const bool keepWifi = keepWifiOnNetworkReset;
+    keepWifiOnNetworkReset = false;
+    disconnectNetwork(keepWifi);
   }
   if (fleetAssignmentsPending) {
     fleetAssignmentsPending = false;
@@ -1778,6 +1786,7 @@ void handlePhoneCommand(String command) {
       clearPhoneEventQueue();
       queuePhoneEvent("H2D,CFG_ACK,SAVE");
       reportStatus("CONFIG_SAVED");
+      keepWifiOnNetworkReset = false;
       networkResetPending = true;
     } else {
       queuePhoneEvent("H2D,ERROR,Cấu hình thiếu hoặc IP máy in chưa đúng");
@@ -1841,6 +1850,10 @@ void handlePhoneCommand(String command) {
       resetPrinterRuntimeForProfileSwitch();
       clearPhoneEventQueue();
       queuePhoneEvent("H2D,CFG_ACK,SELECT");
+      // All saved printer profiles share the configured LAN.  Keep the Wi-Fi
+      // association alive during a tab switch; only MQTT needs to move to the
+      // new printer, which removes the several-second reconnect pause.
+      keepWifiOnNetworkReset = true;
       networkResetPending = true;
       // Do not hold the normal configuration quiet period after this direct
       // switch; Wi-Fi/MQTT may reconnect on the next loop immediately.
@@ -2100,6 +2113,27 @@ uint32_t ledColor(uint8_t red, uint8_t green, uint8_t blue) {
   return scaledLedColor(red, green, blue, 255);
 }
 
+void renderFleetStatusLeds(uint32_t now) {
+  // Pixels 0...2 are a permanent three-machine dashboard in A1/H2D/P2S
+  // order.  Keep this independent of the selected timelapse printer so a
+  // user can see another machine start or stop while watching the current
+  // tab.  Offline/unconfigured is true black, online idle is yellow, and an
+  // active print is steady green (faults are handled by the global red alarm
+  // branch in updateLedStrip()).
+  for (uint8_t index = 0; index < Config::LED_STATUS_COUNT; ++index) {
+    const FleetProfile &profile = fleetProfiles[index];
+    const FleetRuntime &runtime = fleetRuntimes[index];
+    uint32_t color = ledStrip.Color(0, 0, 0);
+    if (profile.complete() && runtime.online) {
+      color = isActivePrintState(runtime.state)
+                  ? ledColor(0, 255, 58)
+                  : ledColor(255, 190, 0);
+    }
+    ledStrip.setPixelColor(index, color);
+  }
+  (void)now;
+}
+
 void fillLedStrip(uint32_t color) {
   for (uint16_t i = 0; i < Config::LED_ACTIVE_COUNT; ++i) {
     ledStrip.setPixelColor(i, color);
@@ -2210,7 +2244,7 @@ void updateLedStrip() {
     // other RUNNING sub-stage. Maintenance stage codes must not turn it yellow.
     // Pixels 0...2 are the always-on status group. Pixels 3...7 are the five
     // clockwise progress pixels that match the iPhone border.
-    fillStatusLeds(ledColor(0, 255, 58));
+    renderFleetStatusLeds(now);
     const float filledPixels =
         smoothLedProgress(now) * Config::LED_ANIMATED_COUNT / 100.0f;
     for (uint16_t i = 0; i < Config::LED_ANIMATED_COUNT; ++i) {
@@ -2239,11 +2273,13 @@ void updateLedStrip() {
     // Centre is the normal waiting position. Match the iPhone standby effect
     // with one smooth yellow rise/fall every two seconds. An active print has
     // already taken the green/red/blue branches above.
-    fillLedStrip(scaledLedColor(255, 190, 0, breathingScale(now)));
+    renderFleetStatusLeds(now);
+    fillAnimatedLeds(scaledLedColor(255, 190, 0, breathingScale(now)));
   } else {
     // Torch (-1) is steady yellow until a printer session takes over above.
     // Timelapse (+1) also remains visibly yellow before its first print state.
-    fillLedStrip(ledColor(255, 190, 0));
+    renderFleetStatusLeds(now);
+    fillAnimatedLeds(ledColor(255, 190, 0));
   }
   ledStrip.show();
 }

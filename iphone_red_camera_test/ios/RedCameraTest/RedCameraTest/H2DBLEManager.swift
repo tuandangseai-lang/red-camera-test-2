@@ -100,6 +100,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
     }
 
     func prepareForPrinterProfile(_ kind: BambuPrinterKind, serial: String) {
+        printerSwitchTimeoutWorkItem?.cancel()
+        printerSwitchTimeoutWorkItem = nil
         expectedPrinterSerial = normalizeSerial(serial)
         isSwitchingPrinter = !expectedPrinterSerial.isEmpty
         printerModelCode = kind.rawValue
@@ -238,6 +240,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
     // a block that is already queued may still execute on the main queue.
     private var configurationGeneration: UInt64 = 0
     private var fleetSyncGeneration: UInt64 = 0
+    private var printerSwitchTimeoutWorkItem: DispatchWorkItem?
+    private var printerSwitchGeneration: UInt64 = 0
 
     override init() {
         super.init()
@@ -378,6 +382,20 @@ final class H2DBLEManager: NSObject, ObservableObject {
         configurationProgress = 0
         configurationTotal = configurationCommands.count
         isConfiguring = true
+        printerSwitchGeneration &+= 1
+        let switchGeneration = printerSwitchGeneration
+        printerSwitchTimeoutWorkItem?.cancel()
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.isSwitchingPrinter,
+                  self.printerSwitchGeneration == switchGeneration else { return }
+            self.finishPrinterSwitchAsUnavailable()
+        }
+        printerSwitchTimeoutWorkItem = timeout
+        // A healthy LAN switch normally completes in 1–4 seconds.  Leave room
+        // for a sleeping/offline target, but never leave the UI stuck in
+        // SWITCHING forever.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 18.0, execute: timeout)
         sendNextConfigurationCommand()
     }
 
@@ -565,6 +583,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
 
     private func failConfiguration(_ message: String) {
         configurationTimeoutWorkItem?.cancel()
+        printerSwitchTimeoutWorkItem?.cancel()
+        printerSwitchTimeoutWorkItem = nil
         configurationCommands.removeAll()
         configurationIndex = 0
         configurationRetryCount = 0
@@ -600,21 +620,44 @@ final class H2DBLEManager: NSObject, ObservableObject {
         isH2DReady = true
     }
 
-    private func markH2DUnavailable() {
+    private func cancelPrinterSwitchTimeout() {
+        printerSwitchGeneration &+= 1
+        printerSwitchTimeoutWorkItem?.cancel()
+        printerSwitchTimeoutWorkItem = nil
+    }
+
+    private func finishPrinterSwitchAsUnavailable() {
+        guard isSwitchingPrinter else { return }
+        let target = BambuPrinterKind(rawValue: printerModelCode) ?? .unknown
+        isSwitchingPrinter = false
+        expectedPrinterSerial = ""
+        h2dStatusCode = "PRINTER_OFFLINE"
+        markH2DUnavailable(for: target)
+        h2dBridgeStatus = target == .unknown
+            ? "Máy in không phản hồi • kiểm tra nguồn và IP LAN"
+            : "\(target.rawValue) không phản hồi • kiểm tra nguồn và IP LAN"
+        hasBridgeError = false
+    }
+
+    private func markH2DUnavailable(for selectedKind: BambuPrinterKind? = nil) {
         mqttLossWorkItem?.cancel()
         mqttLossWorkItem = nil
         isH2DReady = false
         hasPrinterAlert = false
         hasCriticalPrinterAlert = false
         printerAlertText = ""
-        fleetStatuses = fleetStatuses.mapValues { status in
-            var offline = status
-            offline.isOnline = false
-            offline.hasActivePrintJob = false
-            offline.hasCriticalError = false
-            offline.printState = "OFFLINE"
-            return offline
-        }
+        // Keep last-known state for the other two printers. A transient
+        // selected-printer reconnect must not turn every fleet indicator black.
+        let kind = selectedKind ?? BambuPrinterKind(rawValue: printerModelCode)
+        guard let kind, kind != .unknown else { return }
+        var offline = fleetStatuses[kind] ?? BambuFleetStatus(
+            isConfigured: BambuPrinterProfileStore.profile(for: kind) != nil
+        )
+        offline.isOnline = false
+        offline.hasActivePrintJob = false
+        offline.hasCriticalError = false
+        offline.printState = "OFFLINE"
+        fleetStatuses[kind] = offline
     }
 
     private func beginMqttLossGrace() {
@@ -723,6 +766,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             if isSwitchingPrinter {
                 isSwitchingPrinter = false
                 expectedPrinterSerial = ""
+                cancelPrinterSwitchTimeout()
             }
             connectionText = "Đã kết nối ESP32 • \(printerDisplayName)"
         case "FLEET":
@@ -775,6 +819,15 @@ final class H2DBLEManager: NSObject, ObservableObject {
             // swallowing status updates behind the SWITCHING placeholder.
             // Surface the real offline state and allow another profile switch.
             if status == "PRINTER_OFFLINE" || status == "MQTT_RETRY" {
+                if isSwitchingPrinter {
+                    // The old MQTT session reports a retry while the bridge is
+                    // moving to the new target. Wait for PRINTER/<target
+                    // serial> or the explicit switch timeout instead of
+                    // failing the tab change on this transient status.
+                    h2dStatusCode = "SWITCHING"
+                    h2dBridgeStatus = "Đang kết nối \(printerModelCode)…"
+                    return
+                }
                 isSwitchingPrinter = false
                 expectedPrinterSerial = ""
                 h2dStatusCode = "PRINTER_OFFLINE"
