@@ -170,6 +170,9 @@ uint8_t eventHead = 0;
 uint8_t eventTail = 0;
 
 volatile bool phoneConnected = false;
+volatile bool networkResetPending = false;
+volatile bool fleetAssignmentsPending = false;
+volatile bool statusRequestPending = false;
 bool timelapseArmed = false;
 bool mqttWasConnected = false;
 bool statusDataSeen = false;
@@ -363,7 +366,7 @@ void syncSelectedFleetRuntime(bool forceReport = false) {
   FleetRuntime &runtime = fleetRuntimes[selectedFleetIndex];
   runtime.state = printState;
   runtime.percent = printPercent;
-  runtime.online = mqtt.connected();
+  runtime.online = mqttWasConnected;
   runtime.printErrorActive = printErrorActive;
   runtime.printErrorCode = printErrorCode;
   runtime.criticalLatched = criticalAlarmLatched;
@@ -1388,7 +1391,7 @@ void publishFleetStatusRequest(uint8_t slot) {
   const int8_t profileIndex = monitorProfileIndex[slot];
   if (profileIndex < 0 || profileIndex >= FLEET_PRINTER_COUNT) return;
   PubSubClient &client = fleetMqttForSlot(slot);
-  if (!client.connected()) return;
+  if (!fleetRuntimes[profileIndex].online) return;
   const FleetProfile &profile = fleetProfiles[profileIndex];
   const String topic = "device/" + profile.printerSerial + "/request";
   const String pushAll = String("{\"pushing\":{\"sequence_id\":\"") +
@@ -1413,8 +1416,12 @@ void refreshFleetMonitorAssignments() {
   for (uint8_t slot = 0; slot < BACKGROUND_MONITOR_COUNT; ++slot) {
     if (monitorProfileIndex[slot] == desired[slot]) continue;
     PubSubClient &client = fleetMqttForSlot(slot);
-    if (client.connected()) client.disconnect();
     const int8_t oldIndex = monitorProfileIndex[slot];
+    if (oldIndex >= 0 && oldIndex < FLEET_PRINTER_COUNT &&
+        fleetRuntimes[oldIndex].online) {
+      client.disconnect();
+      fleetRuntimes[oldIndex].online = false;
+    }
     if (oldIndex >= 0 && oldIndex != selectedFleetIndex) {
       fleetRuntimes[oldIndex].online = false;
       reportFleetStatus(oldIndex, true);
@@ -1434,12 +1441,15 @@ void refreshFleetMonitorAssignments() {
 void disconnectFleetMonitors(bool markOffline = true) {
   for (uint8_t slot = 0; slot < BACKGROUND_MONITOR_COUNT; ++slot) {
     PubSubClient &client = fleetMqttForSlot(slot);
-    if (client.connected()) client.disconnect();
     client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
     const int8_t profileIndex = monitorProfileIndex[slot];
-    if (markOffline && profileIndex >= 0 &&
-        fleetRuntimes[profileIndex].online) {
+    const bool wasOnline = profileIndex >= 0 && profileIndex < FLEET_PRINTER_COUNT &&
+                           fleetRuntimes[profileIndex].online;
+    if (wasOnline) {
+      client.disconnect();
       fleetRuntimes[profileIndex].online = false;
+    }
+    if (markOffline && wasOnline) {
       reportFleetStatus(profileIndex, true);
     }
     monitorLastAttemptAt[slot] = 0;
@@ -1467,9 +1477,12 @@ void maintainFleetMonitors() {
     const int8_t profileIndex = monitorProfileIndex[slot];
     if (profileIndex < 0) continue;
     PubSubClient &client = fleetMqttForSlot(slot);
-    if (client.connected()) {
+    if (fleetRuntimes[profileIndex].online) {
       client.loop();
-      if (!fleetRuntimes[profileIndex].online) {
+      if (client.state() != MQTT_CONNECTED) {
+        fleetRuntimes[profileIndex].online = false;
+        reportFleetStatus(profileIndex, true);
+      } else if (!fleetRuntimes[profileIndex].online) {
         fleetRuntimes[profileIndex].online = true;
         reportFleetStatus(profileIndex, true);
       }
@@ -1522,18 +1535,18 @@ void maintainFleetMonitors() {
 }
 
 void publishStatusRequest() {
-  if (!mqtt.connected()) return;
+  if (!mqttWasConnected) return;
   lastStatusRequestAt = millis();
   const String topic = "device/" + settings.printerSerial + "/request";
   const String pushAll = String("{\"pushing\":{\"sequence_id\":\"") +
                          ++sequenceId +
                          "\",\"command\":\"pushall\",\"version\":1,"
                          "\"push_target\":1}}";
-  mqtt.publish(topic.c_str(), pushAll.c_str());
+  if (!mqtt.publish(topic.c_str(), pushAll.c_str())) mqttWasConnected = false;
 }
 
 void disconnectNetwork() {
-  if (mqtt.connected()) mqtt.disconnect();
+  if (mqttWasConnected) mqtt.disconnect();
   mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
   disconnectFleetMonitors();
   WiFi.disconnect(false, false);
@@ -1548,6 +1561,24 @@ void disconnectNetwork() {
   if (selectedFleetIndex >= 0) {
     fleetRuntimes[selectedFleetIndex].online = false;
     reportFleetStatus(selectedFleetIndex, true);
+  }
+}
+
+void processDeferredNetworkWork() {
+  // NimBLE invokes command callbacks from its host task. Never touch a
+  // PubSubClient/WiFiClientSecure object from that callback while loop() may
+  // be inside mqtt.loop(); serialize all network mutations here.
+  if (networkResetPending) {
+    networkResetPending = false;
+    disconnectNetwork();
+  }
+  if (fleetAssignmentsPending) {
+    fleetAssignmentsPending = false;
+    refreshFleetMonitorAssignments();
+  }
+  if (statusRequestPending && mqttWasConnected) {
+    statusRequestPending = false;
+    publishStatusRequest();
   }
 }
 
@@ -1572,18 +1603,7 @@ void maintainMqtt() {
       millis() - lastConfigurationCommandAt < Config::CONFIG_NETWORK_QUIET_MS) {
     return;
   }
-  if (mqtt.connected()) {
-    if (!mqttWasConnected) {
-      mqttWasConnected = true;
-      reportStatus("READY");
-      syncSelectedFleetRuntime(true);
-      publishStatusRequest();
-      if (activeFilamentType.isEmpty()) ++materialSyncRequests;
-      if (printerModelFromSerial(settings.printerSerial) == "H2D" &&
-          (nozzleTemperature < 0 || leftNozzleTemperature < 0)) {
-        ++nozzleSyncRequests;
-      }
-    }
+  if (mqttWasConnected) {
     // Some H2D firmware revisions do not immediately answer the first
     // pushall sent right after MQTT subscription. Retry only while no fresh
     // print data is arriving, so opening SE in the middle of a job reliably
@@ -1678,7 +1698,15 @@ void maintainMqtt() {
   statusDataSeen = false;
   lastPrintDataAt = 0;
   lastStatusRequestAt = 0;
+  mqttWasConnected = true;
+  reportStatus("READY");
+  if (activeFilamentType.isEmpty()) ++materialSyncRequests;
+  if (printerModelFromSerial(settings.printerSerial) == "H2D" &&
+      (nozzleTemperature < 0 || leftNozzleTemperature < 0)) {
+    ++nozzleSyncRequests;
+  }
   Serial.println("[MQTT] connected and subscribed to Bambu report topic");
+  publishStatusRequest();
   syncSelectedFleetRuntime(true);
 }
 
@@ -1696,7 +1724,7 @@ void sendCurrentStatus() {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
     reportStatus("WIFI_CONNECTING");
-  } else if (!mqtt.connected()) {
+  } else if (!mqttWasConnected) {
     reportStatus("MQTT_CONNECTING");
   } else {
     if (!statusDataSeen) {
@@ -1750,7 +1778,7 @@ void handlePhoneCommand(String command) {
       clearPhoneEventQueue();
       queuePhoneEvent("H2D,CFG_ACK,SAVE");
       reportStatus("CONFIG_SAVED");
-      disconnectNetwork();
+      networkResetPending = true;
     } else {
       queuePhoneEvent("H2D,ERROR,Cấu hình thiếu hoặc IP máy in chưa đúng");
     }
@@ -1778,13 +1806,13 @@ void handlePhoneCommand(String command) {
                       requestedKind + " • kiểm tra serial và Access Code");
       return;
     }
-    refreshFleetMonitorAssignments();
+    fleetAssignmentsPending = true;
     queuePhoneEvent(String("H2D,CFG_ACK,PROFILE_") + requestedKind);
   } else if (head == "H2D_PROFILE_CLEAR") {
     const int8_t index = fleetIndexForKind(argument);
     if (index >= 0 && index != selectedFleetIndex) {
       clearFleetProfile(index);
-      refreshFleetMonitorAssignments();
+      fleetAssignmentsPending = true;
     }
     queuePhoneEvent(String("H2D,CFG_ACK,PROFILE_CLEAR_") + argument);
   } else if (head == "H2D_SELECT") {
@@ -1793,12 +1821,35 @@ void handlePhoneCommand(String command) {
       queuePhoneEvent("H2D,ERROR,Chưa có hồ sơ máy được chọn để chụp");
       return;
     }
+    const FleetProfile &profile = fleetProfiles[index];
+    const bool needsReconnect =
+        selectedFleetIndex != index || settings.printerIp != profile.printerIp ||
+        settings.printerSerial != profile.printerSerial ||
+        settings.accessCode != profile.accessCode;
     selectedFleetIndex = index;
-    refreshFleetMonitorAssignments();
-    syncSelectedFleetRuntime(true);
-    queuePhoneEvent("H2D,CFG_ACK,SELECT");
-    // The loop sends this ACK before allowing another network handshake.
-    lastConfigurationCommandAt = 0;
+    if (needsReconnect) {
+      // Profiles already contain the printer credentials. Switch the primary
+      // MQTT target directly instead of replaying Wi-Fi fields and waiting for
+      // a full configuration transaction on every tab change.
+      settings.printerIp = profile.printerIp;
+      settings.printerSerial = profile.printerSerial;
+      settings.accessCode = profile.accessCode;
+      pendingSettings = settings;
+      preferences.putString("printerIp", settings.printerIp);
+      preferences.putString("serial", settings.printerSerial);
+      preferences.putString("access", settings.accessCode);
+      resetPrinterRuntimeForProfileSwitch();
+      clearPhoneEventQueue();
+      queuePhoneEvent("H2D,CFG_ACK,SELECT");
+      networkResetPending = true;
+      // Do not hold the normal configuration quiet period after this direct
+      // switch; Wi-Fi/MQTT may reconnect on the next loop immediately.
+      lastConfigurationCommandAt = 0;
+    } else {
+      fleetAssignmentsPending = true;
+      syncSelectedFleetRuntime(true);
+      queuePhoneEvent("H2D,CFG_ACK,SELECT");
+    }
   } else if (head == "H2D_ARM") {
     const bool requestedArmed = argument == "1";
     if (requestedArmed) {
@@ -1822,7 +1873,9 @@ void handlePhoneCommand(String command) {
     }
   } else if (head == "H2D_STATUS" || head == "APP_READY" || head == "PING") {
     sendCurrentStatus();
-    if (mqtt.connected()) publishStatusRequest();
+    // The command callback runs on NimBLE's host task. Defer publishStatus-
+    // Request so it cannot race mqtt.loop() on the Arduino loop task.
+    statusRequestPending = true;
   } else if (head == "H2D_ACK") {
     // BLE indications are already ordered. ACK is retained for diagnostics and
     // future retry logic; credentials and camera data never travel in this path.
@@ -2261,11 +2314,18 @@ void loop() {
   updateHardwareInputs();
   updateLedStrip();
   updateBuzzerAlarm();
+  processDeferredNetworkWork();
   // setServer is repeated because the IP can be changed from the app at runtime.
   mqtt.setServer(settings.printerIp.c_str(), Config::MQTT_PORT);
   maintainWiFi();
   maintainMqtt();
-  if (mqtt.connected()) mqtt.loop();
+  if (mqttWasConnected) {
+    mqtt.loop();
+    // PubSubClient changes its state to MQTT_CONNECTION_LOST when available()
+    // detects a remote close. Use state(), not another TLS connected() probe;
+    // the latter can touch an already-freed mbedTLS context on ESP32.
+    if (mqtt.state() != MQTT_CONNECTED) mqttWasConnected = false;
+  }
   maintainFleetMonitors();
   reportPrintStatus(false);
   reportTelemetry(false);

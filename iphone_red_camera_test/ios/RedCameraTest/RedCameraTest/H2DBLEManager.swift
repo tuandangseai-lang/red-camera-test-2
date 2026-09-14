@@ -317,6 +317,51 @@ final class H2DBLEManager: NSObject, ObservableObject {
         sendNextConfigurationCommand()
     }
 
+    /// Switch to a profile that has already been entered on the iPhone.  A
+    /// profile change does not need to resend Wi-Fi credentials or rewrite the
+    /// whole fleet; sending the selected profile followed by SELECT lets the
+    /// ESP32 move its primary MQTT connection immediately.
+    func selectStoredPrinterProfile(
+        _ kind: BambuPrinterKind,
+        printerIP: String,
+        printerSerial: String,
+        accessCode: String
+    ) {
+        guard isConnected, isH2DBridge else {
+            h2dBridgeStatus = "ESP32 chưa sẵn sàng để đổi máy in"
+            requestH2DStatus()
+            return
+        }
+        let ip = printerIP.trimmingCharacters(in: .whitespacesAndNewlines)
+        let serial = printerSerial.trimmingCharacters(in: .whitespacesAndNewlines)
+        let code = normalizeAccessCode(accessCode)
+        guard kind != .unknown, !ip.isEmpty, !serial.isEmpty, !code.isEmpty else {
+            h2dBridgeStatus = "Hồ sơ máy in chưa đủ thông tin"
+            return
+        }
+
+        prepareForPrinterProfile(kind, serial: serial)
+        configurationTimeoutWorkItem?.cancel()
+        configurationCommands = [
+            ConfigurationCommand(
+                payload: "H2D_PROFILE,\(kind.rawValue),\(base64(ip)),\(base64(serial)),\(base64(code))",
+                acknowledgement: "PROFILE_\(kind.rawValue)",
+                label: "hồ sơ \(kind.rawValue)"
+            ),
+            ConfigurationCommand(
+                payload: "H2D_SELECT,\(kind.rawValue)",
+                acknowledgement: "SELECT",
+                label: "chuyển máy chụp timelapse"
+            )
+        ]
+        configurationIndex = 0
+        configurationRetryCount = 0
+        configurationProgress = 0
+        configurationTotal = configurationCommands.count
+        isConfiguring = true
+        sendNextConfigurationCommand()
+    }
+
     func setH2DTimelapseArmed(_ armed: Bool) {
         armSyncWorkItems.forEach { $0.cancel() }
         armSyncWorkItems.removeAll()

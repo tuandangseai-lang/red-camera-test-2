@@ -179,7 +179,8 @@ struct H2DTimelapseView: View {
         }
         .onChange(of: bluetooth.isConfiguring) { wasConfiguring, configuring in
             guard wasConfiguring && !configuring else { return }
-            if bluetooth.configurationProgress >= 6 && !bluetooth.hasBridgeError {
+            if bluetooth.configurationProgress >= bluetooth.configurationTotal &&
+                bluetooth.configurationTotal > 0 && !bluetooth.hasBridgeError {
                 configurationSaved = true
                 showConfiguration = false
                 persistActiveProfile()
@@ -1061,9 +1062,8 @@ struct H2DTimelapseView: View {
         automaticConfigurationAttempted = true
         configurationSaved = true
         showConfiguration = false
-        bluetooth.configureH2DBridge(
-            wifiSSID: wifiSSID,
-            wifiPassword: wifiPassword,
+        bluetooth.selectStoredPrinterProfile(
+            selectedPrinterKind,
             printerIP: printerIP,
             printerSerial: printerSerial,
             accessCode: accessCode
