@@ -233,6 +233,11 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private var configurationCommands: [ConfigurationCommand] = []
     private var configurationIndex = 0
     private var configurationRetryCount = 0
+    // Monotonic tokens invalidate delayed work from an earlier configuration
+    // or fleet-sync pass. DispatchWorkItem.cancel() alone is not sufficient:
+    // a block that is already queued may still execute on the main queue.
+    private var configurationGeneration: UInt64 = 0
+    private var fleetSyncGeneration: UInt64 = 0
 
     override init() {
         super.init()
@@ -279,7 +284,12 @@ final class H2DBLEManager: NSObject, ObservableObject {
             serial: values[3]
         )
 
+        fleetSyncGeneration &+= 1
+        fleetSyncWorkItems.forEach { $0.cancel() }
+        fleetSyncWorkItems.removeAll()
+        cancelStatusRefreshes()
         configurationTimeoutWorkItem?.cancel()
+        configurationGeneration &+= 1
         var commands = [
             ConfigurationCommand(payload: "H2D_WIFI_SSID,\(base64(values[0]))", acknowledgement: "SSID", label: "tên Wi-Fi"),
             ConfigurationCommand(payload: "H2D_WIFI_PASS,\(base64(values[1]))", acknowledgement: "PASS", label: "mật khẩu Wi-Fi"),
@@ -341,7 +351,16 @@ final class H2DBLEManager: NSObject, ObservableObject {
         }
 
         prepareForPrinterProfile(kind, serial: serial)
+        // A profile switch supersedes any delayed all-fleet sync and any
+        // timeout from the previous transaction. Without this guard, an old
+        // H2D_PROFILE/H2D_SELECT can arrive between the two new commands and
+        // make the bridge reconnect to the wrong printer.
+        fleetSyncGeneration &+= 1
+        fleetSyncWorkItems.forEach { $0.cancel() }
+        fleetSyncWorkItems.removeAll()
+        cancelStatusRefreshes()
         configurationTimeoutWorkItem?.cancel()
+        configurationGeneration &+= 1
         configurationCommands = [
             ConfigurationCommand(
                 payload: "H2D_PROFILE,\(kind.rawValue),\(base64(ip)),\(base64(serial)),\(base64(code))",
@@ -410,6 +429,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
     /// full telemetry/timelapse connection that belongs to the selected tab.
     func syncFleetProfiles(selectedKind: BambuPrinterKind) {
         guard isConnected, isH2DBridge, !isConfiguring else { return }
+        fleetSyncGeneration &+= 1
+        let generation = fleetSyncGeneration
         fleetSyncWorkItems.forEach { $0.cancel() }
         fleetSyncWorkItems.removeAll()
 
@@ -433,7 +454,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
 
         for (index, payload) in payloads.enumerated() {
             let item = DispatchWorkItem { [weak self] in
-                guard let self, self.isConnected, !self.isConfiguring else { return }
+                guard let self, self.isConnected, !self.isConfiguring,
+                      self.lifecycleActive,
+                      self.fleetSyncGeneration == generation else { return }
                 _ = self.send(payload)
             }
             fleetSyncWorkItems.append(item)
@@ -493,6 +516,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private func sendNextConfigurationCommand() {
         guard isConfiguring, configurationIndex < configurationCommands.count else { return }
         let item = configurationCommands[configurationIndex]
+        let generation = configurationGeneration
         h2dBridgeStatus = "Đang gửi \(configurationIndex + 1)/\(configurationCommands.count): \(item.label)"
         guard send(item.payload) else {
             failConfiguration("Mất kết nối Bluetooth • hãy thử lưu lại")
@@ -503,7 +527,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
         let expectedIndex = configurationIndex
         let timeout = DispatchWorkItem { [weak self] in
             guard let self, self.isConfiguring,
-                  self.configurationIndex == expectedIndex else { return }
+                  self.configurationIndex == expectedIndex,
+                  self.configurationGeneration == generation else { return }
             if self.configurationRetryCount < 2 {
                 self.configurationRetryCount += 1
                 self.h2dBridgeStatus = "ESP32 chưa xác nhận • đang gửi lại lần \(self.configurationRetryCount)"

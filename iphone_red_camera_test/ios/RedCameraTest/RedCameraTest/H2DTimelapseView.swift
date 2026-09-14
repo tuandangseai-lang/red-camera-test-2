@@ -184,6 +184,10 @@ struct H2DTimelapseView: View {
                 configurationSaved = true
                 showConfiguration = false
                 persistActiveProfile()
+                // If the user tapped another saved profile while the initial
+                // configuration was still running, perform that pending
+                // switch now instead of leaving the app on the old printer.
+                switchToSelectedProfileIfPossible()
             } else if bluetooth.hasBridgeError {
                 configurationSaved = false
                 showConfiguration = true
