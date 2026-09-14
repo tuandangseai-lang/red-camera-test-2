@@ -219,6 +219,36 @@ jobs:
           arduino-cli lib install NimBLE-Arduino@2.5.1
           arduino-cli lib install "Adafruit NeoPixel"
 
+      - name: Tranh double-free khi TLS mat ket noi
+        run: |
+          set -euo pipefail
+          PUBSUB_CPP="$(find "$HOME" -path '*/PubSubClient/src/PubSubClient.cpp' -print -quit)"
+          test -n "$PUBSUB_CPP"
+          python3 - "$PUBSUB_CPP" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          text = path.read_text()
+          old = "            if (this->_state == MQTT_CONNECTED) {\n                this->_state = MQTT_CONNECTION_LOST;\n                _client->flush();\n                _client->stop();\n            }"
+          new = "            if (this->_state == MQTT_CONNECTED) {\n                this->_state = MQTT_CONNECTION_LOST;\n#if !defined(ARDUINO_ARCH_ESP32)\n                _client->flush();\n                _client->stop();\n#endif\n            }"
+          if old not in text:
+              raise SystemExit("PubSubClient connected() block not found")
+          path.write_text(text.replace(old, new, 1))
+          PY
+          NETWORK_SECURE_CPP="$(find "$HOME" -path '*/NetworkClientSecure/src/NetworkClientSecure.cpp' -print -quit)"
+          test -n "$NETWORK_SECURE_CPP"
+          python3 - "$NETWORK_SECURE_CPP" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          text = path.read_text()
+          old = "uint8_t NetworkClientSecure::connected() {\n  if (_connected) {\n    uint8_t dummy = 0;\n    read(&dummy, 0);\n  }\n  return _connected;\n}"
+          new = "uint8_t NetworkClientSecure::connected() {\n  // Avoid the ESP32 TLS read(0) probe; available()/read() owns disconnect cleanup.\n  return _connected;\n}"
+          if old not in text:
+              raise SystemExit("NetworkClientSecure connected() block not found")
+          path.write_text(text.replace(old, new, 1))
+          PY
+
       - name: Bien dich firmware cau noi H2D
         run: |
           set -euo pipefail

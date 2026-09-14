@@ -700,6 +700,19 @@ final class H2DBLEManager: NSObject, ObservableObject {
         case "STATUS":
             guard fields.count >= 3 else { return }
             let status = fields[2].uppercased()
+            // A profile switch is complete only after the bridge reports the
+            // selected printer.  If the target cannot be reached, do not keep
+            // swallowing status updates behind the SWITCHING placeholder.
+            // Surface the real offline state and allow another profile switch.
+            if status == "PRINTER_OFFLINE" || status == "MQTT_RETRY" {
+                isSwitchingPrinter = false
+                expectedPrinterSerial = ""
+                h2dStatusCode = "PRINTER_OFFLINE"
+                markH2DUnavailable()
+                h2dBridgeStatus = "\(printerDisplayName) không phản hồi • kiểm tra nguồn và IP LAN"
+                hasBridgeError = false
+                return
+            }
             if isSwitchingPrinter {
                 if status == "CONFIG_SAVED", isConfiguring {
                     configurationTimeoutWorkItem?.cancel()
@@ -720,6 +733,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 "MQTT_CONNECTING": "Đang xác thực \(printerDisplayName) LAN bằng Access Code",
                 "MQTT_AUTH_FAILED": "Không xác thực được \(printerDisplayName) • kiểm tra Access Code LAN",
                 "MQTT_RETRY": "Mạng đã thấy máy in • đang thử kết nối lại",
+                "PRINTER_OFFLINE": "\(printerDisplayName) không phản hồi • kiểm tra nguồn và IP LAN",
                 "SYNCING": "Đang đồng bộ trạng thái hiện tại từ \(printerDisplayName)",
                 "READY": "\(printerDisplayName) đã sẵn sàng gửi dữ liệu lớp",
                 "ARMED": "Đã bật chụp theo lớp • đang chờ máy in",
@@ -735,7 +749,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 confirmH2DReady()
             case "MQTT_CONNECTING", "MQTT_AUTH_FAILED", "SYNCING":
                 beginMqttLossGrace()
-            case "BOOTING", "CONFIG_REQUIRED", "CONFIG_SAVED", "WIFI_CONNECTING", "WIFI_OK", "BUFFER_ERROR":
+            case "BOOTING", "CONFIG_REQUIRED", "CONFIG_SAVED", "WIFI_CONNECTING", "WIFI_OK", "BUFFER_ERROR", "PRINTER_OFFLINE":
                 markH2DUnavailable()
             default:
                 break

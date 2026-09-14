@@ -740,10 +740,11 @@ struct H2DTimelapseView: View {
                 .tint(selectedPrinterKind == kind ? .blue : .gray.opacity(0.34))
                 .overlay {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(
-                            selectedPrinterKind == kind ? Color.green : .clear,
-                            lineWidth: 2
-                        )
+                        // The blue selected fill is the only selection cue.
+                        // Do not add a second green outline around the active
+                        // profile; green is reserved for a printer that is
+                        // actually printing.
+                        .stroke(.clear, lineWidth: 0)
                 }
                 .accessibilityLabel(profileAccessibilityText(kind: kind, status: fleet))
             }
@@ -1256,8 +1257,12 @@ private struct PrinterActivityDot: View {
 
     private var dotColor: Color {
         if status.hasCriticalError { return .red }
-        if status.hasActivePrintJob || status.isOnline { return .green }
-        return isConfigured ? .yellow : .gray
+        // Green means an active print only.  A powered, idle printer is
+        // reachable but waiting, so it gets yellow.  A configured printer
+        // that is powered off (or has a stale IP) is black, never yellow.
+        if status.hasActivePrintJob { return .green }
+        if status.isOnline { return .yellow }
+        return .black
     }
 }
 

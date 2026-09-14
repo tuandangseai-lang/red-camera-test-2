@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.12.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.12.3
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -27,11 +27,22 @@ constexpr uint16_t MQTT_PORT = 8883;
 // warnings are present. PubSubClient silently drops packets larger than this
 // buffer, which used to hide printer alerts from the iPhone.
 constexpr uint16_t MQTT_BUFFER_BYTES = 49152;
+constexpr uint16_t MQTT_FALLBACK_BUFFER_BYTES = 40960;
+// TLS needs a large contiguous heap block during its handshake. PubSubClient's
+// payload buffer is kept small until TLS is established, then expanded before
+// subscribing to Bambu reports.
+constexpr uint16_t MQTT_CONNECT_BUFFER_BYTES = 1024;
 // The selected timelapse printer keeps the large full-state buffer above. The
 // two background connections only parse state/progress/error fields.
-constexpr uint16_t FLEET_MQTT_BUFFER_BYTES = 14336;
+// Background printers only need compact delta packets for status and errors.
+// Two 14-KB buffers beside the selected printer's 49-KB buffer starved mbedTLS.
+constexpr uint16_t FLEET_MQTT_BUFFER_BYTES = 4096;
 constexpr uint32_t WIFI_RETRY_MS = 12000;
 constexpr uint32_t MQTT_RETRY_MS = 10000;
+constexpr uint32_t MQTT_TCP_TIMEOUT_MS = 2000;
+constexpr uint32_t FLEET_TCP_TIMEOUT_MS = 1200;
+constexpr uint32_t MQTT_TLS_HANDSHAKE_TIMEOUT_SECONDS = 3;
+constexpr uint32_t FLEET_TLS_HANDSHAKE_TIMEOUT_SECONDS = 2;
 constexpr uint32_t STATUS_PERIOD_MS = 2000;
 constexpr uint32_t TELEMETRY_PERIOD_MS = 1000;
 constexpr uint32_t STATUS_REQUEST_RETRY_MS = 3500;
@@ -40,6 +51,7 @@ constexpr uint32_t DATA_TIMEOUT_MS = 45000;
 constexpr uint8_t MATERIAL_SYNC_RETRY_LIMIT = 5;
 constexpr uint8_t NOZZLE_SYNC_RETRY_LIMIT = 8;
 constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
+constexpr uint32_t CONFIG_NETWORK_QUIET_MS = 8000;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
 // All eight WS2812B packages are active: pixels 0...2 hold the printer status
@@ -215,6 +227,7 @@ uint32_t modeCandidateSince = 0;
 uint32_t holdCandidateSince = 0;
 uint32_t levelCandidateSince = 0;
 uint32_t lastProgressTickAt = 0;
+volatile uint32_t lastConfigurationCommandAt = 0;
 int8_t hardwareMode = 0;  // -1 = torch, 0 = normal, +1 = timelapse.
 int8_t modeCandidate = 0;
 bool hardwareHoldPressed = false;
@@ -1422,6 +1435,7 @@ void disconnectFleetMonitors(bool markOffline = true) {
   for (uint8_t slot = 0; slot < BACKGROUND_MONITOR_COUNT; ++slot) {
     PubSubClient &client = fleetMqttForSlot(slot);
     if (client.connected()) client.disconnect();
+    client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
     const int8_t profileIndex = monitorProfileIndex[slot];
     if (markOffline && profileIndex >= 0 &&
         fleetRuntimes[profileIndex].online) {
@@ -1434,6 +1448,16 @@ void disconnectFleetMonitors(bool markOffline = true) {
 
 void maintainFleetMonitors() {
   refreshFleetMonitorAssignments();
+  // The selected connection owns the large full-state buffer. Background
+  // fleet polling is allowed only while it is actually connected; this keeps
+  // an offline A1/P2S from starving H2D reconnects.
+  if (!mqttWasConnected) return;
+  // Bluetooth configuration acknowledgements are time-sensitive. Avoid a
+  // blocking TLS handshake while the iPhone sends a profile command sequence.
+  if (lastConfigurationCommandAt != 0 &&
+      millis() - lastConfigurationCommandAt < Config::CONFIG_NETWORK_QUIET_MS) {
+    return;
+  }
   if (WiFi.status() != WL_CONNECTED) {
     disconnectFleetMonitors();
     return;
@@ -1465,12 +1489,21 @@ void maintainFleetMonitors() {
     monitorLastAttemptAt[slot] = now;
     const FleetProfile &profile = fleetProfiles[profileIndex];
     client.setServer(profile.printerIp.c_str(), Config::MQTT_PORT);
+    // Release the larger receive buffer before TLS needs its temporary bignum
+    // workspace. It is restored immediately after a successful handshake.
+    client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
     char clientId[36];
     snprintf(clientId, sizeof(clientId), "SE-Fleet-%u-%08lX", slot,
              static_cast<unsigned long>(ESP.getEfuseMac() & 0xFFFFFFFF));
     Serial.printf("[FLEET] connecting %s (%s)\n", profile.kind.c_str(),
                   profile.printerIp.c_str());
     if (client.connect(clientId, "bblp", profile.accessCode.c_str())) {
+      if (!client.setBufferSize(Config::FLEET_MQTT_BUFFER_BYTES)) {
+        Serial.printf("[FLEET] %s receive-buffer allocation failed\n",
+                      profile.kind.c_str());
+        client.disconnect();
+        return;
+      }
       const String reportTopic =
           "device/" + profile.printerSerial + "/report";
       client.subscribe(reportTopic.c_str(), 0);
@@ -1501,6 +1534,7 @@ void publishStatusRequest() {
 
 void disconnectNetwork() {
   if (mqtt.connected()) mqtt.disconnect();
+  mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
   disconnectFleetMonitors();
   WiFi.disconnect(false, false);
   mqttWasConnected = false;
@@ -1534,6 +1568,10 @@ void maintainWiFi() {
 
 void maintainMqtt() {
   if (!settings.complete() || WiFi.status() != WL_CONNECTED) return;
+  if (lastConfigurationCommandAt != 0 &&
+      millis() - lastConfigurationCommandAt < Config::CONFIG_NETWORK_QUIET_MS) {
+    return;
+  }
   if (mqtt.connected()) {
     if (!mqttWasConnected) {
       mqttWasConnected = true;
@@ -1580,6 +1618,11 @@ void maintainMqtt() {
     Serial.printf("[MQTT] disconnected, state=%d; reconnecting\n", mqtt.state());
   }
   mqttWasConnected = false;
+  // A fleet TLS context can consume tens of kilobytes. Release every
+  // background connection before rebuilding the selected printer's 49-KB
+  // receive buffer, otherwise a short H2D Wi-Fi drop leaves no contiguous
+  // heap block for the next handshake.
+  disconnectFleetMonitors(false);
   if (selectedFleetIndex >= 0 && fleetRuntimes[selectedFleetIndex].online) {
     fleetRuntimes[selectedFleetIndex].online = false;
     reportFleetStatus(selectedFleetIndex, true);
@@ -1589,6 +1632,9 @@ void maintainMqtt() {
       now - lastMqttAttemptAt < Config::MQTT_RETRY_MS) return;
   lastMqttAttemptAt = now;
   reportStatus("MQTT_CONNECTING");
+  // The 49-KB Bambu receive buffer must not occupy the largest heap block
+  // during TLS certificate/key exchange.
+  mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
   const uint64_t chip = ESP.getEfuseMac();
   char clientId[32];
   snprintf(clientId, sizeof(clientId), "SE-Bambu-%08lX",
@@ -1611,6 +1657,21 @@ void maintainMqtt() {
     }
     return;
   }
+  if (!mqtt.setBufferSize(Config::MQTT_BUFFER_BYTES)) {
+    // Heap fragmentation after a Wi-Fi drop can make the original 49-KB
+    // buffer fail even though a slightly smaller contiguous block is free.
+    // Keep the connection usable with a 40-KB fallback instead of presenting
+    // a false printer error to the iPhone.
+    if (!mqtt.setBufferSize(Config::MQTT_FALLBACK_BUFFER_BYTES)) {
+      Serial.printf("[MQTT] failed to allocate %u-byte receive buffer after TLS\n",
+                    Config::MQTT_FALLBACK_BUFFER_BYTES);
+      reportStatus("BUFFER_ERROR");
+      mqtt.disconnect();
+      return;
+    }
+    Serial.printf("[MQTT] using %u-byte fallback receive buffer\n",
+                  Config::MQTT_FALLBACK_BUFFER_BYTES);
+  }
   const String reportTopic = "device/" + settings.printerSerial + "/report";
   mqtt.subscribe(reportTopic.c_str(), 0);
   lastMqttMessageAt = millis();
@@ -1622,7 +1683,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.12.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.12.3");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -1655,6 +1716,16 @@ void handlePhoneCommand(String command) {
   const int comma = command.indexOf(',');
   const String head = comma < 0 ? command : command.substring(0, comma);
   const String argument = comma < 0 ? "" : command.substring(comma + 1);
+
+  // Keep MQTT/TLS out of the way until the complete iPhone configuration
+  // transaction is acknowledged. The timestamp expires automatically if an
+  // interrupted app never reaches SELECT.
+  if (head == "H2D_WIFI_SSID" || head == "H2D_WIFI_PASS" ||
+      head == "H2D_IP" || head == "H2D_SERIAL" || head == "H2D_CODE" ||
+      head == "H2D_SAVE" || head == "H2D_PROFILE" ||
+      head == "H2D_PROFILE_CLEAR" || head == "H2D_SELECT") {
+    lastConfigurationCommandAt = millis();
+  }
 
   if (head == "H2D_WIFI_SSID") {
     pendingSettings.wifiSsid = decodeBase64(argument);
@@ -1726,6 +1797,8 @@ void handlePhoneCommand(String command) {
     refreshFleetMonitorAssignments();
     syncSelectedFleetRuntime(true);
     queuePhoneEvent("H2D,CFG_ACK,SELECT");
+    // The loop sends this ACK before allowing another network handshake.
+    lastConfigurationCommandAt = 0;
   } else if (head == "H2D_ARM") {
     const bool requestedArmed = argument == "1";
     if (requestedArmed) {
@@ -2129,7 +2202,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.3");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
@@ -2151,25 +2224,28 @@ void setup() {
   tlsClient.setInsecure();  // Bambu uses a per-device/self-signed LAN certificate.
   fleetTls0.setInsecure();
   fleetTls1.setInsecure();
+  // The library defaults to a 30-second TCP wait and a 120-second TLS wait.
+  // An offline A1/P2S would therefore freeze BLE and leave the iPhone stuck on
+  // “đang kết nối”. LAN printers should answer within these short bounds.
+  tlsClient.setConnectionTimeout(Config::MQTT_TCP_TIMEOUT_MS);
+  tlsClient.setHandshakeTimeout(Config::MQTT_TLS_HANDSHAKE_TIMEOUT_SECONDS);
+  fleetTls0.setConnectionTimeout(Config::FLEET_TCP_TIMEOUT_MS);
+  fleetTls1.setConnectionTimeout(Config::FLEET_TCP_TIMEOUT_MS);
+  fleetTls0.setHandshakeTimeout(Config::FLEET_TLS_HANDSHAKE_TIMEOUT_SECONDS);
+  fleetTls1.setHandshakeTimeout(Config::FLEET_TLS_HANDSHAKE_TIMEOUT_SECONDS);
   mqtt.setServer(settings.printerIp.c_str(), Config::MQTT_PORT);
   mqtt.setCallback(onMqttMessage);
   mqtt.setKeepAlive(60);
-  mqtt.setSocketTimeout(5);
-  if (!mqtt.setBufferSize(Config::MQTT_BUFFER_BYTES)) {
-    Serial.printf("[MQTT] failed to allocate %u-byte receive buffer\n",
-                  Config::MQTT_BUFFER_BYTES);
-    reportStatus("BUFFER_ERROR");
-  }
+  mqtt.setSocketTimeout(2);
+  mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
   fleetMqtt0.setCallback(onFleetMqtt0);
   fleetMqtt1.setCallback(onFleetMqtt1);
   fleetMqtt0.setKeepAlive(60);
   fleetMqtt1.setKeepAlive(60);
-  fleetMqtt0.setSocketTimeout(4);
-  fleetMqtt1.setSocketTimeout(4);
-  if (!fleetMqtt0.setBufferSize(Config::FLEET_MQTT_BUFFER_BYTES) ||
-      !fleetMqtt1.setBufferSize(Config::FLEET_MQTT_BUFFER_BYTES)) {
-    Serial.printf("[FLEET] failed to allocate background MQTT buffers\n");
-  }
+  fleetMqtt0.setSocketTimeout(2);
+  fleetMqtt1.setSocketTimeout(2);
+  fleetMqtt0.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+  fleetMqtt1.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
   refreshFleetMonitorAssignments();
   if (settings.complete()) {
     reportStatus("WIFI_CONNECTING");
@@ -2179,6 +2255,12 @@ void setup() {
 }
 
 void loop() {
+  // Pump Bluetooth and physical feedback before any potentially blocking
+  // Wi-Fi/TLS work so the iPhone never mistakes a delayed ACK for old firmware.
+  flushPhoneEvents();
+  updateHardwareInputs();
+  updateLedStrip();
+  updateBuzzerAlarm();
   // setServer is repeated because the IP can be changed from the app at runtime.
   mqtt.setServer(settings.printerIp.c_str(), Config::MQTT_PORT);
   maintainWiFi();
@@ -2188,8 +2270,5 @@ void loop() {
   reportPrintStatus(false);
   reportTelemetry(false);
   flushPhoneEvents();
-  updateHardwareInputs();
-  updateLedStrip();
-  updateBuzzerAlarm();
   delay(2);
 }
