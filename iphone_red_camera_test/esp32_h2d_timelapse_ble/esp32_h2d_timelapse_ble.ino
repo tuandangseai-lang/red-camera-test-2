@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.12.3
+// SE Bambu Timelapse Bridge for classic ESP32 v1.12.4
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -46,6 +46,16 @@ constexpr uint32_t MQTT_TCP_TIMEOUT_MS = 2000;
 constexpr uint32_t FLEET_TCP_TIMEOUT_MS = 1200;
 constexpr uint32_t MQTT_TLS_HANDSHAKE_TIMEOUT_SECONDS = 3;
 constexpr uint32_t FLEET_TLS_HANDSHAKE_TIMEOUT_SECONDS = 2;
+// A lightweight TCP reachability sweep is independent from MQTT. This lets
+// the three status pixels distinguish a powered printer (yellow) from a truly
+// offline printer (black), even while the selected printer is reconnecting.
+constexpr uint32_t FLEET_PROBE_PERIOD_MS = 1400;
+constexpr uint32_t FLEET_PROBE_TIMEOUT_MS = 350;
+constexpr uint32_t FLEET_ONLINE_GRACE_MS = 6500;
+constexpr uint8_t FLEET_OFFLINE_FAILURES = 3;
+// Only one background TLS session is kept alive at a time. Alternating the two
+// non-selected profiles avoids starving the selected 49-KB MQTT connection.
+constexpr uint32_t FLEET_MONITOR_DWELL_MS = 4500;
 constexpr uint32_t STATUS_PERIOD_MS = 2000;
 constexpr uint32_t TELEMETRY_PERIOD_MS = 1000;
 constexpr uint32_t STATUS_REQUEST_RETRY_MS = 3500;
@@ -140,6 +150,8 @@ struct FleetRuntime {
   bool criticalLatched = false;
   uint32_t printErrorCode = 0;
   uint32_t lastMessageAt = 0;
+  uint32_t lastReachableAt = 0;
+  uint8_t consecutiveProbeFailures = 0;
   bool lastReportedConfigured = false;
   bool lastReportedOnline = false;
   bool lastReportedActive = false;
@@ -155,6 +167,7 @@ WiFiClientSecure tlsClient;
 PubSubClient mqtt(tlsClient);
 WiFiClientSecure fleetTls0;
 WiFiClientSecure fleetTls1;
+WiFiClient fleetProbeClient;
 PubSubClient fleetMqtt0(fleetTls0);
 PubSubClient fleetMqtt1(fleetTls1);
 FleetProfile fleetProfiles[FLEET_PRINTER_COUNT];
@@ -163,6 +176,10 @@ int8_t selectedFleetIndex = -1;
 int8_t monitorProfileIndex[BACKGROUND_MONITOR_COUNT] = {-1, -1};
 uint32_t monitorLastAttemptAt[BACKGROUND_MONITOR_COUNT] = {0, 0};
 uint32_t monitorSequenceId[BACKGROUND_MONITOR_COUNT] = {0, 0};
+int8_t activeFleetMonitorSlot = -1;
+uint32_t activeFleetMonitorSince = 0;
+uint32_t lastFleetProbeAt = 0;
+uint8_t nextFleetProbeIndex = 0;
 Adafruit_NeoPixel ledStrip(
     Config::LED_PHYSICAL_COUNT, Config::LED_STRIP_PIN, NEO_GRB + NEO_KHZ800);
 NimBLECharacteristic *eventCharacteristic = nullptr;
@@ -370,13 +387,23 @@ void syncSelectedFleetRuntime(bool forceReport = false) {
   }
   if (selectedFleetIndex < 0) return;
   FleetRuntime &runtime = fleetRuntimes[selectedFleetIndex];
-  runtime.state = printState;
-  runtime.percent = printPercent;
-  runtime.online = mqttWasConnected;
-  runtime.printErrorActive = printErrorActive;
-  runtime.printErrorCode = printErrorCode;
-  runtime.criticalLatched = criticalAlarmLatched;
-  runtime.lastMessageAt = lastMqttMessageAt;
+  // Never turn a reachable printer black merely because the selected MQTT
+  // session is between handshakes. The independent TCP probe owns OFFLINE;
+  // MQTT supplies the authoritative print state whenever data is available.
+  if (mqttWasConnected) {
+    runtime.online = true;
+    runtime.lastReachableAt = millis();
+    runtime.consecutiveProbeFailures = 0;
+    if (runtime.state == "OFFLINE") runtime.state = "IDLE";
+  }
+  if (mqttWasConnected && statusDataSeen) {
+    runtime.state = printState;
+    runtime.percent = printPercent;
+    runtime.printErrorActive = printErrorActive;
+    runtime.printErrorCode = printErrorCode;
+    runtime.criticalLatched = criticalAlarmLatched;
+    runtime.lastMessageAt = lastMqttMessageAt;
+  }
   reportFleetStatus(selectedFleetIndex, forceReport);
 }
 
@@ -1386,6 +1413,8 @@ void processFleetMqttMessage(uint8_t monitorSlot, uint8_t *payload,
 
   runtime.online = true;
   runtime.lastMessageAt = millis();
+  runtime.lastReachableAt = runtime.lastMessageAt;
+  runtime.consecutiveProbeFailures = 0;
   if (hasState) {
     state.trim();
     state.toUpperCase();
@@ -1433,6 +1462,7 @@ void publishFleetStatusRequest(uint8_t slot) {
 void refreshFleetMonitorAssignments() {
   int8_t desired[BACKGROUND_MONITOR_COUNT] = {-1, -1};
   uint8_t count = 0;
+  bool assignmentsChanged = false;
   for (uint8_t i = 0; i < FLEET_PRINTER_COUNT && count < BACKGROUND_MONITOR_COUNT;
        ++i) {
     if (static_cast<int8_t>(i) == selectedFleetIndex ||
@@ -1444,26 +1474,24 @@ void refreshFleetMonitorAssignments() {
 
   for (uint8_t slot = 0; slot < BACKGROUND_MONITOR_COUNT; ++slot) {
     if (monitorProfileIndex[slot] == desired[slot]) continue;
+    assignmentsChanged = true;
     PubSubClient &client = fleetMqttForSlot(slot);
     const int8_t oldIndex = monitorProfileIndex[slot];
-    if (oldIndex >= 0 && oldIndex < FLEET_PRINTER_COUNT &&
-        fleetRuntimes[oldIndex].online) {
-      client.disconnect();
-      fleetRuntimes[oldIndex].online = false;
-    }
-    if (oldIndex >= 0 && oldIndex != selectedFleetIndex) {
-      fleetRuntimes[oldIndex].online = false;
-      reportFleetStatus(oldIndex, true);
-    }
+    // Reassigning a polling socket is deliberate and says nothing about the
+    // printer's power state. Preserve the last confirmed status; the separate
+    // reachability sweep will turn it black only after repeated failures.
+    if (client.connected()) client.disconnect();
+    client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
     monitorProfileIndex[slot] = desired[slot];
     monitorLastAttemptAt[slot] = 0;
     if (desired[slot] >= 0) {
-      FleetRuntime &runtime = fleetRuntimes[desired[slot]];
-      runtime.online = false;
       fleetMqttForSlot(slot).setServer(
           fleetProfiles[desired[slot]].printerIp.c_str(), Config::MQTT_PORT);
-      reportFleetStatus(desired[slot], true);
     }
+  }
+  if (assignmentsChanged) {
+    activeFleetMonitorSlot = -1;
+    activeFleetMonitorSince = 0;
   }
 }
 
@@ -1472,16 +1500,91 @@ void disconnectFleetMonitors(bool markOffline = true) {
     PubSubClient &client = fleetMqttForSlot(slot);
     client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
     const int8_t profileIndex = monitorProfileIndex[slot];
-    const bool wasOnline = profileIndex >= 0 && profileIndex < FLEET_PRINTER_COUNT &&
-                           fleetRuntimes[profileIndex].online;
-    if (wasOnline) {
-      client.disconnect();
+    if (client.connected()) client.disconnect();
+    if (markOffline && profileIndex >= 0 &&
+        profileIndex < FLEET_PRINTER_COUNT) {
       fleetRuntimes[profileIndex].online = false;
-    }
-    if (markOffline && wasOnline) {
+      fleetRuntimes[profileIndex].state = "OFFLINE";
       reportFleetStatus(profileIndex, true);
     }
     monitorLastAttemptAt[slot] = 0;
+  }
+  activeFleetMonitorSlot = -1;
+  activeFleetMonitorSince = 0;
+}
+
+void markFleetReachable(uint8_t profileIndex, uint32_t now) {
+  if (profileIndex >= FLEET_PRINTER_COUNT) return;
+  FleetRuntime &runtime = fleetRuntimes[profileIndex];
+  const bool changed = !runtime.online;
+  runtime.online = true;
+  runtime.lastReachableAt = now;
+  runtime.consecutiveProbeFailures = 0;
+  if (runtime.state == "OFFLINE" || runtime.state.isEmpty()) {
+    runtime.state = "IDLE";
+  }
+  reportFleetStatus(profileIndex, changed);
+}
+
+void maintainFleetReachability() {
+  const uint32_t now = millis();
+  if (now - lastFleetProbeAt < Config::FLEET_PROBE_PERIOD_MS) return;
+  lastFleetProbeAt = now;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
+      if (!fleetRuntimes[i].online) continue;
+      fleetRuntimes[i].online = false;
+      fleetRuntimes[i].state = "OFFLINE";
+      reportFleetStatus(i, true);
+    }
+    return;
+  }
+
+  uint8_t profileIndex = nextFleetProbeIndex;
+  bool found = false;
+  for (uint8_t attempt = 0; attempt < FLEET_PRINTER_COUNT; ++attempt) {
+    profileIndex = (nextFleetProbeIndex + attempt) % FLEET_PRINTER_COUNT;
+    if (fleetProfiles[profileIndex].complete()) {
+      found = true;
+      nextFleetProbeIndex = (profileIndex + 1) % FLEET_PRINTER_COUNT;
+      break;
+    }
+  }
+  if (!found) return;
+
+  // The selected MQTT connection itself is stronger proof of reachability and
+  // avoids opening a redundant socket to that printer.
+  if (static_cast<int8_t>(profileIndex) == selectedFleetIndex &&
+      mqttWasConnected) {
+    markFleetReachable(profileIndex, now);
+    return;
+  }
+
+  IPAddress address;
+  if (!address.fromString(fleetProfiles[profileIndex].printerIp)) return;
+  fleetProbeClient.stop();
+  const bool reachable = fleetProbeClient.connect(
+      address, Config::MQTT_PORT, Config::FLEET_PROBE_TIMEOUT_MS);
+  fleetProbeClient.stop();
+  FleetRuntime &runtime = fleetRuntimes[profileIndex];
+  if (reachable) {
+    markFleetReachable(profileIndex, now);
+    return;
+  }
+
+  if (runtime.consecutiveProbeFailures < 255) {
+    ++runtime.consecutiveProbeFailures;
+  }
+  const bool graceExpired = runtime.lastReachableAt == 0 ||
+                            now - runtime.lastReachableAt >=
+                                Config::FLEET_ONLINE_GRACE_MS;
+  if (runtime.online && graceExpired &&
+      runtime.consecutiveProbeFailures >= Config::FLEET_OFFLINE_FAILURES) {
+    runtime.online = false;
+    runtime.state = "OFFLINE";
+    runtime.percent = 0;
+    reportFleetStatus(profileIndex, true);
   }
 }
 
@@ -1498,67 +1601,66 @@ void maintainFleetMonitors() {
     return;
   }
   if (WiFi.status() != WL_CONNECTED) {
-    disconnectFleetMonitors();
+    disconnectFleetMonitors(false);
     return;
   }
 
-  for (uint8_t slot = 0; slot < BACKGROUND_MONITOR_COUNT; ++slot) {
+  const uint32_t now = millis();
+  if (activeFleetMonitorSlot >= 0) {
+    const uint8_t slot = static_cast<uint8_t>(activeFleetMonitorSlot);
+    PubSubClient &client = fleetMqttForSlot(slot);
+    if (client.connected()) client.loop();
+    const bool rotate = !client.connected() ||
+                        now - activeFleetMonitorSince >=
+                            Config::FLEET_MONITOR_DWELL_MS;
+    if (!rotate) return;
+    if (client.connected()) client.disconnect();
+    client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+    activeFleetMonitorSlot = -1;
+    activeFleetMonitorSince = 0;
+  }
+
+  // Round-robin the two non-selected printers. Only one TLS context owns a
+  // receive buffer at a time; the other printer remains yellow/green from its
+  // last confirmed sample instead of falsely flashing black between samples.
+  static uint8_t nextSlot = 0;
+  for (uint8_t attempt = 0; attempt < BACKGROUND_MONITOR_COUNT; ++attempt) {
+    const uint8_t slot = (nextSlot + attempt) % BACKGROUND_MONITOR_COUNT;
     const int8_t profileIndex = monitorProfileIndex[slot];
     if (profileIndex < 0) continue;
-    PubSubClient &client = fleetMqttForSlot(slot);
-    if (fleetRuntimes[profileIndex].online) {
-      client.loop();
-      if (client.state() != MQTT_CONNECTED) {
-        fleetRuntimes[profileIndex].online = false;
-        reportFleetStatus(profileIndex, true);
-      } else if (!fleetRuntimes[profileIndex].online) {
-        fleetRuntimes[profileIndex].online = true;
-        reportFleetStatus(profileIndex, true);
-      }
-      continue;
-    }
-
-    FleetRuntime &runtime = fleetRuntimes[profileIndex];
-    if (runtime.online) {
-      runtime.online = false;
-      reportFleetStatus(profileIndex, true);
-    }
-    const uint32_t now = millis();
     if (monitorLastAttemptAt[slot] != 0 &&
         now - monitorLastAttemptAt[slot] < Config::MQTT_RETRY_MS) {
       continue;
     }
+    nextSlot = (slot + 1) % BACKGROUND_MONITOR_COUNT;
     monitorLastAttemptAt[slot] = now;
+    PubSubClient &client = fleetMqttForSlot(slot);
     const FleetProfile &profile = fleetProfiles[profileIndex];
     client.setServer(profile.printerIp.c_str(), Config::MQTT_PORT);
-    // Release the larger receive buffer before TLS needs its temporary bignum
-    // workspace. It is restored immediately after a successful handshake.
     client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
     char clientId[36];
     snprintf(clientId, sizeof(clientId), "SE-Fleet-%u-%08lX", slot,
              static_cast<unsigned long>(ESP.getEfuseMac() & 0xFFFFFFFF));
-    Serial.printf("[FLEET] connecting %s (%s)\n", profile.kind.c_str(),
+    Serial.printf("[FLEET] sampling %s (%s)\n", profile.kind.c_str(),
                   profile.printerIp.c_str());
-    if (client.connect(clientId, "bblp", profile.accessCode.c_str())) {
-      if (!client.setBufferSize(Config::FLEET_MQTT_BUFFER_BYTES)) {
-        Serial.printf("[FLEET] %s receive-buffer allocation failed\n",
-                      profile.kind.c_str());
-        client.disconnect();
-        return;
-      }
-      const String reportTopic =
-          "device/" + profile.printerSerial + "/report";
-      client.subscribe(reportTopic.c_str(), 0);
-      runtime.online = true;
-      runtime.lastMessageAt = now;
-      reportFleetStatus(profileIndex, true);
-      publishFleetStatusRequest(slot);
-      Serial.printf("[FLEET] %s connected\n", profile.kind.c_str());
-    } else {
-      Serial.printf("[FLEET] %s connect failed, state=%d\n",
+    if (!client.connect(clientId, "bblp", profile.accessCode.c_str())) {
+      Serial.printf("[FLEET] %s sample failed, state=%d\n",
                     profile.kind.c_str(), client.state());
+      return;
     }
-    // Only one TLS handshake per loop pass. This keeps BLE and LEDs responsive.
+    if (!client.setBufferSize(Config::FLEET_MQTT_BUFFER_BYTES)) {
+      Serial.printf("[FLEET] %s receive-buffer allocation failed\n",
+                    profile.kind.c_str());
+      client.disconnect();
+      return;
+    }
+    const String reportTopic = "device/" + profile.printerSerial + "/report";
+    client.subscribe(reportTopic.c_str(), 0);
+    markFleetReachable(profileIndex, now);
+    activeFleetMonitorSlot = slot;
+    activeFleetMonitorSince = now;
+    publishFleetStatusRequest(slot);
+    Serial.printf("[FLEET] %s sample connected\n", profile.kind.c_str());
     return;
   }
 }
@@ -1577,7 +1679,10 @@ void publishStatusRequest() {
 void disconnectNetwork(bool keepWifi = false) {
   if (mqttWasConnected) mqtt.disconnect();
   mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
-  disconnectFleetMonitors();
+  // Switching the selected profile intentionally closes sockets. Preserve the
+  // last confirmed fleet state; reachability probes decide whether a printer
+  // is actually powered off.
+  disconnectFleetMonitors(false);
   if (!keepWifi) WiFi.disconnect(false, false);
   mqttWasConnected = false;
   statusDataSeen = false;
@@ -1587,10 +1692,6 @@ void disconnectNetwork(bool keepWifi = false) {
   nozzleSyncRequests = 0;
   lastWifiAttemptAt = 0;
   lastMqttAttemptAt = 0;
-  if (selectedFleetIndex >= 0) {
-    fleetRuntimes[selectedFleetIndex].online = false;
-    reportFleetStatus(selectedFleetIndex, true);
-  }
 }
 
 void processDeferredNetworkWork() {
@@ -1674,10 +1775,6 @@ void maintainMqtt() {
   // receive buffer, otherwise a short H2D Wi-Fi drop leaves no contiguous
   // heap block for the next handshake.
   disconnectFleetMonitors(false);
-  if (selectedFleetIndex >= 0 && fleetRuntimes[selectedFleetIndex].online) {
-    fleetRuntimes[selectedFleetIndex].online = false;
-    reportFleetStatus(selectedFleetIndex, true);
-  }
   const uint32_t now = millis();
   if (lastMqttAttemptAt != 0 &&
       now - lastMqttAttemptAt < Config::MQTT_RETRY_MS) return;
@@ -1742,7 +1839,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.12.3");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.12.4");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2324,7 +2421,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.3");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.4");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
@@ -2396,6 +2493,7 @@ void loop() {
     if (mqtt.state() != MQTT_CONNECTED) mqttWasConnected = false;
   }
   maintainFleetMonitors();
+  maintainFleetReachability();
   reportPrintStatus(false);
   reportTelemetry(false);
   flushPhoneEvents();
