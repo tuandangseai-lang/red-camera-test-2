@@ -99,6 +99,26 @@ final class H2DBLEManager: NSObject, ObservableObject {
         )
     }
 
+    private func applyCachedFleetStatus(_ status: BambuFleetStatus, for kind: BambuPrinterKind) {
+        guard kind.rawValue == printerModelCode else { return }
+        guard status.isOnline else { return }
+
+        // The selected printer can be watched by one of the background MQTT
+        // connections while the primary connection is switching. Keep the
+        // live card truthful instead of resetting it to IDLE until pushall
+        // arrives on the new primary connection.
+        if status.hasActivePrintJob {
+            h2dPrintState = status.printState
+            h2dPrintPercent = min(100, max(0, status.printPercent))
+            h2dBridgeStatus = isSwitchingPrinter
+                ? "\(kind.rawValue) đang in • đang đồng bộ tiến trình"
+                : "\(kind.rawValue) đang in • \(h2dPrintPercent)%"
+        } else if isSwitchingPrinter {
+            h2dPrintState = status.printState
+            h2dPrintPercent = min(100, max(0, status.printPercent))
+        }
+    }
+
     func prepareForPrinterProfile(_ kind: BambuPrinterKind, serial: String) {
         printerSwitchTimeoutWorkItem?.cancel()
         printerSwitchTimeoutWorkItem = nil
@@ -130,6 +150,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         h2dBridgeStatus = isSwitchingPrinter
             ? "Đang chuyển ESP32 sang \(kind.rawValue)…"
             : "Đã chọn \(kind.rawValue) • chờ gửi cấu hình"
+        applyCachedFleetStatus(fleetStatus(for: kind), for: kind)
     }
 
     private func normalizeSerial(_ value: String) -> String {
@@ -773,7 +794,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
             guard fields.count >= 9,
                   let kind = BambuPrinterKind(rawValue: fields[2]),
                   kind != .unknown else { return }
-            fleetStatuses[kind] = BambuFleetStatus(
+            let status = BambuFleetStatus(
                 isConfigured: fields[3] == "1",
                 isOnline: fields[4] == "1",
                 hasActivePrintJob: fields[5] == "1",
@@ -781,6 +802,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 printState: fields[7].uppercased(),
                 printPercent: min(100, max(0, Int(fields[8]) ?? 0))
             )
+            fleetStatuses[kind] = status
+            applyCachedFleetStatus(status, for: kind)
         case "MATERIAL":
             guard !isSwitchingPrinter else { return }
             guard fields.count >= 3 else { return }
