@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.12.4
+// SE Bambu Timelapse Bridge for classic ESP32 v1.12.5
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -49,13 +49,19 @@ constexpr uint32_t FLEET_TLS_HANDSHAKE_TIMEOUT_SECONDS = 2;
 // A lightweight TCP reachability sweep is independent from MQTT. This lets
 // the three status pixels distinguish a powered printer (yellow) from a truly
 // offline printer (black), even while the selected printer is reconnecting.
-constexpr uint32_t FLEET_PROBE_PERIOD_MS = 1400;
+constexpr uint32_t FLEET_PROBE_PERIOD_MS = 900;
 constexpr uint32_t FLEET_PROBE_TIMEOUT_MS = 350;
 constexpr uint32_t FLEET_ONLINE_GRACE_MS = 6500;
 constexpr uint8_t FLEET_OFFLINE_FAILURES = 3;
 // Only one background TLS session is kept alive at a time. Alternating the two
 // non-selected profiles avoids starving the selected 49-KB MQTT connection.
 constexpr uint32_t FLEET_MONITOR_DWELL_MS = 4500;
+// Classic ESP32 cannot reliably hold the selected H2D TLS session plus a
+// second Bambu TLS handshake: the latter fragments heap and disconnects the
+// selected printer, leaving the app stuck at layer 0/1. Reachability polling
+// remains active for all profiles; background MQTT sampling stays disabled
+// until it can be moved to a separate worker without affecting timelapse.
+constexpr bool FLEET_BACKGROUND_MQTT_ENABLED = false;
 constexpr uint32_t STATUS_PERIOD_MS = 2000;
 constexpr uint32_t TELEMETRY_PERIOD_MS = 1000;
 constexpr uint32_t STATUS_REQUEST_RETRY_MS = 3500;
@@ -1523,6 +1529,11 @@ void markFleetReachable(uint8_t profileIndex, uint32_t now) {
   if (runtime.state == "OFFLINE" || runtime.state.isEmpty()) {
     runtime.state = "IDLE";
   }
+  if (changed) {
+    Serial.printf("[FLEET] %s reachable at %s\n",
+                  fleetProfiles[profileIndex].kind.c_str(),
+                  fleetProfiles[profileIndex].printerIp.c_str());
+  }
   reportFleetStatus(profileIndex, changed);
 }
 
@@ -1584,12 +1595,19 @@ void maintainFleetReachability() {
     runtime.online = false;
     runtime.state = "OFFLINE";
     runtime.percent = 0;
+    Serial.printf("[FLEET] %s offline after %u probes\n",
+                  fleetProfiles[profileIndex].kind.c_str(),
+                  runtime.consecutiveProbeFailures);
     reportFleetStatus(profileIndex, true);
   }
 }
 
 void maintainFleetMonitors() {
   refreshFleetMonitorAssignments();
+  if (!Config::FLEET_BACKGROUND_MQTT_ENABLED) {
+    if (activeFleetMonitorSlot >= 0) disconnectFleetMonitors(false);
+    return;
+  }
   // The selected connection owns the large full-state buffer. Background
   // fleet polling is allowed only while it is actually connected; this keeps
   // an offline A1/P2S from starving H2D reconnects.
@@ -1839,7 +1857,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.12.4");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.12.5");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2421,7 +2439,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.4");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.5");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
@@ -2492,8 +2510,8 @@ void loop() {
     // the latter can touch an already-freed mbedTLS context on ESP32.
     if (mqtt.state() != MQTT_CONNECTED) mqttWasConnected = false;
   }
-  maintainFleetMonitors();
   maintainFleetReachability();
+  maintainFleetMonitors();
   reportPrintStatus(false);
   reportTelemetry(false);
   flushPhoneEvents();
