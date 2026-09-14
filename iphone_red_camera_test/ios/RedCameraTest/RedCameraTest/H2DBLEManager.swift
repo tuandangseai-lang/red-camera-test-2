@@ -884,7 +884,15 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     : known[status] ?? fields.dropFirst(2).joined(separator: " • ")
             }
         case "PRINT":
-            guard !isSwitchingPrinter else { return }
+            if isSwitchingPrinter {
+                // A background monitor can provide a provisional PRINT packet
+                // for the new target before its primary MQTT connection has
+                // completed. Accept it only when the packet carries the
+                // serial we requested; late packets from the old printer are
+                // still ignored while switching.
+                guard fields.count >= 9,
+                      normalizeSerial(fields[8]) == expectedPrinterSerial else { return }
+            }
             guard fields.count >= 6 else { return }
             confirmH2DReady()
             h2dPrintState = fields[2].uppercased()

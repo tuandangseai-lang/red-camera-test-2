@@ -290,7 +290,7 @@ void reportPrintStatus(bool force = false) {
   lastStatusNotifyAt = now;
   queuePhoneEvent(String("H2D,PRINT,") + printState + "," + currentLayer +
                   "," + totalLayers + "," + printPercent + "," + currentStage +
-                  "," + remainingMinutes);
+                  "," + remainingMinutes + "," + settings.printerSerial);
 }
 
 String printerModelFromSerial(const String &serial) {
@@ -496,6 +496,29 @@ void resetPrinterRuntimeForProfileSwitch() {
   exhaustFanPercent = -1;
   telemetryDirty = false;
   lastTelemetryNotifyAt = 0;
+}
+
+bool primeSelectedPrintFromFleet(int8_t profileIndex) {
+  if (profileIndex < 0 || profileIndex >= FLEET_PRINTER_COUNT) return false;
+  const FleetRuntime &cached = fleetRuntimes[profileIndex];
+  if (!cached.online || !isActivePrintState(cached.state)) return false;
+
+  // The selected MQTT connection is rebuilt during a profile switch. If this
+  // printer was already monitored in the background, expose its last known
+  // active state immediately instead of showing IDLE until the next pushall.
+  // The following primary MQTT packet replaces this provisional layer/percent
+  // data with the printer's authoritative values.
+  printState = cached.state;
+  printState.toUpperCase();
+  printPercent = constrain(cached.percent, 0, 100);
+  currentStage = printState == "RUNNING" ? 0 : -1;
+  currentLayer = 0;
+  totalLayers = 0;
+  remainingMinutes = -1;
+  statusDataSeen = true;
+  printWasRunning = true;
+  lastMqttMessageAt = millis();
+  return true;
 }
 
 String decodeBase64(const String &encoded) {
@@ -1850,6 +1873,12 @@ void handlePhoneCommand(String command) {
       resetPrinterRuntimeForProfileSwitch();
       clearPhoneEventQueue();
       queuePhoneEvent("H2D,CFG_ACK,SELECT");
+      if (primeSelectedPrintFromFleet(index)) {
+        // reportPrintStatus() includes the selected serial so the iPhone can
+        // safely accept this provisional state while the profile switch is in
+        // progress and ignore any late packet from the previous printer.
+        reportPrintStatus(true);
+      }
       // All saved printer profiles share the configured LAN.  Keep the Wi-Fi
       // association alive during a tab switch; only MQTT needs to move to the
       // new printer, which removes the several-second reconnect pause.
