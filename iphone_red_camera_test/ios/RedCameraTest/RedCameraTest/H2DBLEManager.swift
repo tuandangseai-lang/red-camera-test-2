@@ -25,6 +25,7 @@ struct BambuFleetStatus: Equatable {
     var hasCriticalError = false
     var printState = "OFFLINE"
     var printPercent = 0
+    var printErrorCode: UInt32 = 0
 }
 
 final class H2DBLEManager: NSObject, ObservableObject {
@@ -191,10 +192,49 @@ final class H2DBLEManager: NSObject, ObservableObject {
         hasPrinterAlert && isPrintSessionActive
     }
 
-    var hasActiveCriticalPrinterAlert: Bool {
+    private var selectedCriticalAlertIsActive: Bool {
         guard hasCriticalPrinterAlert else { return false }
         let failedState = ["FAILED", "ERROR"].contains(h2dPrintState.uppercased())
         return isPrintSessionActive || failedState
+    }
+
+    var activeCriticalPrinterKind: BambuPrinterKind? {
+        let selected = printerKind
+        if selected != .unknown &&
+            (selectedCriticalAlertIsActive || fleetStatus(for: selected).hasCriticalError) {
+            return selected
+        }
+        return [BambuPrinterKind.a1, .h2d, .p2s].first {
+            fleetStatus(for: $0).hasCriticalError
+        }
+    }
+
+    var hasActiveCriticalPrinterAlert: Bool {
+        activeCriticalPrinterKind != nil
+    }
+
+    var shouldPlayPhonePrinterAlarm: Bool {
+        guard let criticalKind = activeCriticalPrinterKind else { return false }
+        // ESP32 owns the buzzer for a non-selected printer. The iPhone keeps
+        // showing that printer in red, but only plays its siren for the profile
+        // currently selected for timelapse.
+        return criticalKind == printerKind
+    }
+
+    var activeCriticalPrinterDisplayName: String {
+        activeCriticalPrinterKind?.rawValue ?? printerDisplayName
+    }
+
+    var activeCriticalPrinterAlertText: String {
+        guard let kind = activeCriticalPrinterKind else { return printerAlertText }
+        if kind == printerKind && !printerAlertText.isEmpty {
+            return printerAlertText
+        }
+        let code = fleetStatus(for: kind).printErrorCode
+        if code > 0 {
+            return String(format: "%@ báo lỗi máy in • mã 0x%08X • xem màn hình máy in", kind.rawValue, code)
+        }
+        return "\(kind.rawValue) đang có lỗi • xem màn hình máy in"
     }
 
     var h2dStageText: String {
@@ -804,7 +844,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 hasActivePrintJob: fields[5] == "1",
                 hasCriticalError: fields[6] == "1",
                 printState: fields[7].uppercased(),
-                printPercent: min(100, max(0, Int(fields[8]) ?? 0))
+                printPercent: min(100, max(0, Int(fields[8]) ?? 0)),
+                printErrorCode: fields.count >= 10 ? (UInt32(fields[9]) ?? 0) : 0
             )
             fleetStatuses[kind] = status
             applyCachedFleetStatus(status, for: kind)

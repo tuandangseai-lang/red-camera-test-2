@@ -55,15 +55,15 @@ struct H2DTimelapseView: View {
             .onChange(of: timelapse.isRendering) { _, rendering in
                 if !rendering { applyHardwareControls(force: true) }
             }
-            .alert("\(printerName) đang có lỗi", isPresented: $showCriticalPrinterAlarm) {
+            .alert("\(bluetooth.activeCriticalPrinterDisplayName) đang có lỗi", isPresented: $showCriticalPrinterAlarm) {
                 Button("OK") {
                     acknowledgedAlarmID = currentAlarmID
                     printerAlarm.stop()
                 }
             } message: {
-                Text(bluetooth.printerAlertText.isEmpty
+                Text(bluetooth.activeCriticalPrinterAlertText.isEmpty
                     ? "Hãy kiểm tra màn hình máy in. Âm báo sẽ tự tắt khi lỗi được xử lý."
-                    : bluetooth.printerAlertText)
+                    : bluetooth.activeCriticalPrinterAlertText)
             }
             .confirmationDialog(
                 "Bạn muốn xử lý các ảnh đã chụp thế nào?",
@@ -243,7 +243,10 @@ struct H2DTimelapseView: View {
         .onChange(of: bluetooth.hasActiveCriticalPrinterAlert) { _, _ in
             synchronizePrinterAlarm()
         }
-        .onChange(of: bluetooth.printerAlertText) { _, _ in
+        .onChange(of: bluetooth.activeCriticalPrinterKind) { _, _ in
+            synchronizePrinterAlarm()
+        }
+        .onChange(of: bluetooth.activeCriticalPrinterAlertText) { _, _ in
             synchronizePrinterAlarm()
         }
         .overlay {
@@ -273,8 +276,8 @@ struct H2DTimelapseView: View {
 
         var color: Color {
             switch self {
-            case .idle, .preparing, .connecting: return .yellow
-            case .printing: return .green
+            case .idle, .connecting: return .yellow
+            case .preparing, .printing: return .green
             case .capturing: return .blue
             case .stopping, .paused: return .red
             case .completed: return .blue
@@ -319,7 +322,9 @@ struct H2DTimelapseView: View {
         case .paused: return "\(printerName) • ĐANG TẠM DỪNG"
         case .completed: return "\(printerName) • ĐÃ IN XONG • CHẠM ĐỂ TẮT"
         case .error:
-            if bluetooth.hasActiveCriticalPrinterAlert { return "\(printerName) • CÓ LỖI" }
+            if bluetooth.hasActiveCriticalPrinterAlert {
+                return "\(bluetooth.activeCriticalPrinterDisplayName) • CÓ LỖI"
+            }
             return bluetooth.isConnected ? "\(printerName) • CÓ LỖI" : "ESP32 • MẤT KẾT NỐI"
         }
     }
@@ -1195,9 +1200,9 @@ struct H2DTimelapseView: View {
     }
 
     private var currentAlarmID: String {
-        let detail = bluetooth.printerAlertText
+        let detail = bluetooth.activeCriticalPrinterAlertText
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return "\(bluetooth.printerSerial)|\(detail.isEmpty ? "critical" : detail)"
+        return "\(bluetooth.activeCriticalPrinterDisplayName)|\(detail.isEmpty ? "critical" : detail)"
     }
 
     private func applyHardwareControls(force: Bool = false) {
@@ -1270,6 +1275,14 @@ struct H2DTimelapseView: View {
             printerAlarm.stop()
             showCriticalPrinterAlarm = false
             acknowledgedAlarmID = ""
+            return
+        }
+        // A fault on another profile remains visible in red on the iPhone,
+        // while ESP32's own buzzer handles it. Moving to that profile transfers
+        // the audible/modal alarm to the phone without losing the fault.
+        guard bluetooth.shouldPlayPhonePrinterAlarm else {
+            printerAlarm.stop()
+            showCriticalPrinterAlarm = false
             return
         }
         guard acknowledgedAlarmID != currentAlarmID else { return }
