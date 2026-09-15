@@ -325,7 +325,7 @@ struct H2DTimelapseView: View {
         case .connecting: return "ESP32 • ĐANG KẾT NỐI \(printerName)"
         case .stopping: return "\(printerName) • ĐANG DỪNG"
         case .paused: return "\(printerName) • ĐANG TẠM DỪNG"
-        case .completed: return "\(printerName) • ĐÃ IN XONG • CHẠM ĐỂ TẮT"
+        case .completed: return "\(printerName) • ĐÃ IN XONG"
         case .error:
             if bluetooth.hasActiveCriticalPrinterAlert {
                 return "\(bluetooth.activeCriticalPrinterDisplayName) • CÓ LỖI"
@@ -374,17 +374,7 @@ struct H2DTimelapseView: View {
         // content instead of stretching across the entire screen.
         .fixedSize(horizontal: true, vertical: false)
         .shadow(color: printerIslandState.color.opacity(0.16), radius: 10, y: 3)
-        .contentShape(Capsule())
-        .onTapGesture {
-            guard printerIslandState == .completed else { return }
-            dismissCompletionPresentation(notifyBridge: true)
-        }
         .accessibilityLabel(printerIslandTitle)
-        .accessibilityHint(
-            printerIslandState == .completed
-                ? "Chạm để tắt hiệu ứng hoàn thành"
-                : ""
-        )
     }
 
     /// A low-cost status light that hugs the physical screen edge.  The
@@ -395,7 +385,7 @@ struct H2DTimelapseView: View {
         let isPrinting = printerIslandState == .printing
         let isBlinking = printerIslandState == .error
         let isCompleted = printerIslandState == .completed
-        let isIdle = printerIslandState == .idle
+        let shouldShowEdge = printerIslandState != .idle && printerIslandState != .connecting
         let progress: Double? = isPrinting ? min(1, max(0, printerProgress)) : nil
         // Capturing temporarily paints the whole edge blue. Keep the green
         // printing animation's anchor alive underneath so it resumes from the
@@ -410,11 +400,12 @@ struct H2DTimelapseView: View {
                 ? Double(bluetooth.h2dRemainingMinutes) * 60.0
                 : nil,
             blinks: isBlinking,
-            breathingPeriod: isCompleted ? 4.0 : isIdle ? 2.0 : nil,
-            minimumOpacity: isCompleted ? 0.02 : isIdle ? 0.08 : 1.0,
-            maximumOpacity: isIdle ? 0.40 : 1.0,
+            breathingPeriod: isCompleted ? 4.0 : nil,
+            minimumOpacity: isCompleted ? 0.02 : 1.0,
+            maximumOpacity: 1.0,
             preservesProgressWhenHidden: preservesPrintingProgress
         )
+        .opacity(shouldShowEdge ? 1 : 0)
         .padding(.horizontal, 4)
         .padding(.vertical, 6)
     }
@@ -444,10 +435,13 @@ struct H2DTimelapseView: View {
             completionBlueActive = true
             let workItem = DispatchWorkItem {
                 completionBlueActive = false
+                bluetooth.acknowledgePrintCompletion()
             }
             completionDismissWorkItem = workItem
             DispatchQueue.main.asyncAfter(
-                deadline: .now() + 3 * 60 * 60,
+                // Show one complete slow blue breath, then return to the
+                // borderless standby state without requiring a tap.
+                deadline: .now() + 4.0,
                 execute: workItem
             )
         } else if ["RUNNING", "PREPARE", "PREPARING", "SLICING", "INIT", "HEATING"].contains(normalized) {
@@ -484,10 +478,12 @@ struct H2DTimelapseView: View {
                         HStack(spacing: 12) {
                             ZStack {
                                 Circle()
-                                    .fill(.black.opacity(0.24))
+                                    .fill(.black.opacity(0.72))
                                     .frame(width: 38, height: 38)
-                                Image(systemName: "record.circle")
-                                    .font(.system(size: 21, weight: .bold))
+                                Image(systemName: "record.circle.fill")
+                                    .font(.system(size: 23, weight: .black))
+                                    .foregroundStyle(.red)
+                                    .shadow(color: .red.opacity(0.75), radius: 6)
                             }
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("KHỞI ĐỘNG TIMELAPSE")
@@ -561,7 +557,7 @@ struct H2DTimelapseView: View {
                 .font(.system(size: 9, weight: .bold, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.74))
 
-                Text("V9.47")
+                Text("V9.48")
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.34))
             }
@@ -670,14 +666,23 @@ struct H2DTimelapseView: View {
                 endPoint: .bottom
             )
 
-            Image("CinemaProjectorOutline")
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .foregroundStyle(.white.opacity(0.76))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 21)
-                .shadow(color: cinemaCyan.opacity(0.42), radius: 8)
+            if isFlashArtworkActive {
+                CinemaLightningArtwork(
+                    tint: cinemaAmber,
+                    isPulsing: bluetooth.hardwareHoldActive
+                )
+                .padding(.horizontal, 30)
+                .padding(.vertical, 54)
+            } else {
+                Image("CinemaProjectorOutline")
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(.white.opacity(0.76))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 21)
+                    .shadow(color: cinemaCyan.opacity(0.42), radius: 8)
+            }
 
             LinearGradient(
                 colors: [.clear, cinemaCyan.opacity(0.09), .clear],
@@ -687,19 +692,17 @@ struct H2DTimelapseView: View {
             .frame(height: 34)
             .offset(y: -62)
 
-            CinemaViewfinderOverlay(tint: cinemaCyan)
-
             VStack {
                 HStack {
                     Text("SE // OPTICAL UNIT")
                     Spacer()
-                    Text("CAM OFF")
+                    Text(isFlashArtworkActive ? (bluetooth.hardwareHoldActive ? "FLASH PULSE" : "FLASH ON") : "CAM OFF")
                         .foregroundStyle(cinemaAmber)
                 }
                 Spacer()
                 HStack {
-                    Image(systemName: "viewfinder")
-                    Text("READY FOR LAYER SIGNAL")
+                    Image(systemName: isFlashArtworkActive ? "bolt.fill" : "viewfinder")
+                    Text(isFlashArtworkActive ? "ILLUMINATION ACTIVE" : "READY FOR LAYER SIGNAL")
                     Spacer()
                     Text("9:16")
                 }
@@ -712,6 +715,10 @@ struct H2DTimelapseView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(cinemaCyan.opacity(0.24), lineWidth: 1)
         }
+    }
+
+    private var isFlashArtworkActive: Bool {
+        timelapse.isTorchEnabled || bluetooth.hardwareMode == -1 || bluetooth.hardwareHoldActive
     }
 
     private var bridgeStatusCard: some View {
@@ -1128,13 +1135,21 @@ struct H2DTimelapseView: View {
 
     private var activeCinemaStandbyHUD: some View {
         ZStack {
-            Image("CinemaProjectorOutline")
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .foregroundStyle(.white.opacity(0.17))
-                .frame(width: 206, height: 366)
-                .shadow(color: cinemaCyan.opacity(0.28), radius: 12)
+            if isFlashArtworkActive {
+                CinemaLightningArtwork(
+                    tint: cinemaAmber,
+                    isPulsing: bluetooth.hardwareHoldActive
+                )
+                .frame(width: 170, height: 270)
+            } else {
+                Image("CinemaProjectorOutline")
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(.white.opacity(0.17))
+                    .frame(width: 206, height: 366)
+                    .shadow(color: cinemaCyan.opacity(0.28), radius: 12)
+            }
 
             Circle()
                 .stroke(.white.opacity(0.07), lineWidth: 7)
@@ -1632,6 +1647,59 @@ private struct CinemaViewfinderOverlay: View {
             }
         }
         .allowsHitTesting(false)
+    }
+}
+
+private struct CinemaLightningArtwork: View {
+    let tint: Color
+    let isPulsing: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: !isPulsing)) { context in
+            let phase = isPulsing
+                ? (sin(context.date.timeIntervalSinceReferenceDate * 15.0) + 1.0) / 2.0
+                : 1.0
+            ZStack {
+                Circle()
+                    .trim(from: 0.08, to: 0.42)
+                    .stroke(tint.opacity(0.30), style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
+                    .rotationEffect(.degrees(-28))
+                Circle()
+                    .trim(from: 0.55, to: 0.90)
+                    .stroke(.white.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [3, 6]))
+                    .rotationEffect(.degrees(24))
+                    .padding(13)
+
+                Image(systemName: "bolt.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(tint.opacity(0.08 + phase * 0.10))
+                    .padding(24)
+
+                Image(systemName: "bolt")
+                    .resizable()
+                    .scaledToFit()
+                    .fontWeight(.ultraLight)
+                    .foregroundStyle(.white.opacity(0.72 + phase * 0.22))
+                    .padding(24)
+                    .shadow(color: tint.opacity(0.32 + phase * 0.38), radius: 9)
+
+                VStack {
+                    HStack(spacing: 5) {
+                        Rectangle().frame(width: 20, height: 1)
+                        Circle().frame(width: 3, height: 3)
+                    }
+                    Spacer()
+                    HStack(spacing: 5) {
+                        Circle().frame(width: 3, height: 3)
+                        Rectangle().frame(width: 20, height: 1)
+                    }
+                }
+                .foregroundStyle(tint.opacity(0.36))
+                .padding(.vertical, 26)
+            }
+        }
+        .accessibilityHidden(true)
     }
 }
 
