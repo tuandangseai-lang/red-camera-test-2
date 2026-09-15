@@ -62,6 +62,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var auxiliaryFanPercent = -1
     @Published private(set) var exhaustFanPercent = -1
     @Published private(set) var isSwitchingPrinter = false
+    @Published private(set) var printerSwitchProgress = 0.0
+    @Published private(set) var printerSwitchPhaseText = ""
     @Published private(set) var hardwareMode = 0
     @Published private(set) var hardwareHoldActive = false
     @Published private(set) var hardwareLevelPercent = 70
@@ -70,6 +72,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var fleetStatuses: [BambuPrinterKind: BambuFleetStatus] = [:]
 
     private var expectedPrinterSerial = ""
+    private var printerSwitchIdentityConfirmed = false
 
     var printerKind: BambuPrinterKind {
         let reported = BambuPrinterKind(rawValue: printerModelCode)
@@ -103,28 +106,32 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private func applyCachedFleetStatus(_ status: BambuFleetStatus, for kind: BambuPrinterKind) {
         guard kind.rawValue == printerModelCode else { return }
         guard status.isOnline else { return }
+        // Fleet monitoring continues in the background during a profile
+        // change, but it is not proof that the primary MQTT session has moved
+        // to the selected printer. Applying these provisional packets used to
+        // make the iPhone LEDs jump between the old and new machine states.
+        guard !isSwitchingPrinter else { return }
 
-        // The selected printer can be watched by one of the background MQTT
-        // connections while the primary connection is switching. Keep the
-        // live card truthful instead of resetting it to IDLE until pushall
-        // arrives on the new primary connection.
+        // Once the switch is complete, a fleet packet can refresh the compact
+        // selected-printer card while its detailed telemetry is arriving.
         if status.hasActivePrintJob {
             h2dPrintState = status.printState
             h2dPrintPercent = min(100, max(0, status.printPercent))
-            h2dBridgeStatus = isSwitchingPrinter
-                ? "\(kind.rawValue) đang in • đang đồng bộ tiến trình"
-                : "\(kind.rawValue) đang in • \(h2dPrintPercent)%"
-        } else if isSwitchingPrinter {
-            h2dPrintState = status.printState
-            h2dPrintPercent = min(100, max(0, status.printPercent))
+            h2dBridgeStatus = "\(kind.rawValue) đang in • \(h2dPrintPercent)%"
         }
     }
 
     func prepareForPrinterProfile(_ kind: BambuPrinterKind, serial: String) {
+        printerSwitchGeneration &+= 1
         printerSwitchTimeoutWorkItem?.cancel()
         printerSwitchTimeoutWorkItem = nil
         expectedPrinterSerial = normalizeSerial(serial)
         isSwitchingPrinter = !expectedPrinterSerial.isEmpty
+        printerSwitchIdentityConfirmed = false
+        printerSwitchProgress = isSwitchingPrinter ? 0.08 : 0
+        printerSwitchPhaseText = isSwitchingPrinter
+            ? "Đang chuẩn bị hồ sơ \(kind.rawValue)"
+            : ""
         printerModelCode = kind.rawValue
         printerSerial = serial.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         filamentType = ""
@@ -149,9 +156,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
         printerAlertText = ""
         h2dStatusCode = isSwitchingPrinter ? "SWITCHING" : "BOOTING"
         h2dBridgeStatus = isSwitchingPrinter
-            ? "Đang chuyển ESP32 sang \(kind.rawValue)…"
+            ? printerSwitchPhaseText
             : "Đã chọn \(kind.rawValue) • chờ gửi cấu hình"
-        applyCachedFleetStatus(fleetStatus(for: kind), for: kind)
     }
 
     private func normalizeSerial(_ value: String) -> String {
@@ -443,6 +449,10 @@ final class H2DBLEManager: NSObject, ObservableObject {
         configurationProgress = 0
         configurationTotal = configurationCommands.count
         isConfiguring = true
+        updatePrinterSwitchProgress(
+            0.14,
+            message: "Đang gửi hồ sơ \(kind.rawValue) tới ESP32"
+        )
         printerSwitchGeneration &+= 1
         let switchGeneration = printerSwitchGeneration
         printerSwitchTimeoutWorkItem?.cancel()
@@ -600,7 +610,15 @@ final class H2DBLEManager: NSObject, ObservableObject {
         guard isConfiguring, configurationIndex < configurationCommands.count else { return }
         let item = configurationCommands[configurationIndex]
         let generation = configurationGeneration
-        h2dBridgeStatus = "Đang gửi \(configurationIndex + 1)/\(configurationCommands.count): \(item.label)"
+        if isSwitchingPrinter {
+            let progress = configurationIndex == 0 ? 0.18 : 0.42
+            updatePrinterSwitchProgress(
+                progress,
+                message: "Đang gửi \(configurationIndex + 1)/\(configurationCommands.count): \(item.label)"
+            )
+        } else {
+            h2dBridgeStatus = "Đang gửi \(configurationIndex + 1)/\(configurationCommands.count): \(item.label)"
+        }
         guard send(item.payload) else {
             failConfiguration("Mất kết nối Bluetooth • hãy thử lưu lại")
             return
@@ -629,13 +647,29 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private func acceptConfigurationAcknowledgement(_ value: String) {
         guard isConfiguring, configurationIndex < configurationCommands.count,
               configurationCommands[configurationIndex].acknowledgement == value.uppercased() else { return }
+        let acknowledgement = configurationCommands[configurationIndex].acknowledgement
         configurationTimeoutWorkItem?.cancel()
         configurationIndex += 1
         configurationRetryCount = 0
         configurationProgress = configurationIndex
+        if isSwitchingPrinter {
+            if acknowledgement.hasPrefix("PROFILE_") {
+                updatePrinterSwitchProgress(
+                    0.36,
+                    message: "ESP32 đã nhận hồ sơ • đang chọn máy \(printerModelCode)"
+                )
+            } else if acknowledgement == "SELECT" {
+                updatePrinterSwitchProgress(
+                    0.58,
+                    message: "ESP32 đã chọn \(printerModelCode) • đang kiểm tra serial"
+                )
+            }
+        }
         if configurationIndex == configurationCommands.count {
             isConfiguring = false
-            h2dBridgeStatus = "Đã lưu cấu hình • ESP32 đang kết nối Wi-Fi"
+            if !isSwitchingPrinter {
+                h2dBridgeStatus = "Đã lưu cấu hình • ESP32 đang kết nối Wi-Fi"
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                 self?.requestH2DStatus()
             }
@@ -655,6 +689,11 @@ final class H2DBLEManager: NSObject, ObservableObject {
         configurationRetryCount = 0
         configurationProgress = 0
         isConfiguring = false
+        isSwitchingPrinter = false
+        expectedPrinterSerial = ""
+        printerSwitchIdentityConfirmed = false
+        printerSwitchProgress = 0
+        printerSwitchPhaseText = ""
         hasBridgeError = true
         h2dBridgeStatus = message
     }
@@ -691,11 +730,40 @@ final class H2DBLEManager: NSObject, ObservableObject {
         printerSwitchTimeoutWorkItem = nil
     }
 
+    private func updatePrinterSwitchProgress(_ value: Double, message: String) {
+        guard isSwitchingPrinter else { return }
+        printerSwitchProgress = max(printerSwitchProgress, min(1, max(0, value)))
+        printerSwitchPhaseText = message
+        h2dStatusCode = "SWITCHING"
+        h2dBridgeStatus = message
+    }
+
+    private func finishPrinterSwitchSuccessfully() {
+        guard isSwitchingPrinter else { return }
+        printerSwitchProgress = 1
+        printerSwitchPhaseText = "Đã kết nối \(printerModelCode)"
+        h2dBridgeStatus = printerSwitchPhaseText
+        cancelPrinterSwitchTimeout()
+        let completedGeneration = printerSwitchGeneration
+        isSwitchingPrinter = false
+        expectedPrinterSerial = ""
+        printerSwitchIdentityConfirmed = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { [weak self] in
+            guard let self, !self.isSwitchingPrinter,
+                  self.printerSwitchGeneration == completedGeneration else { return }
+            self.printerSwitchProgress = 0
+            self.printerSwitchPhaseText = ""
+        }
+    }
+
     private func finishPrinterSwitchAsUnavailable() {
         guard isSwitchingPrinter else { return }
         let target = BambuPrinterKind(rawValue: printerModelCode) ?? .unknown
         isSwitchingPrinter = false
         expectedPrinterSerial = ""
+        printerSwitchIdentityConfirmed = false
+        printerSwitchProgress = 0
+        printerSwitchPhaseText = ""
         h2dStatusCode = "PRINTER_OFFLINE"
         markH2DUnavailable(for: target)
         h2dBridgeStatus = target == .unknown
@@ -829,9 +897,11 @@ final class H2DBLEManager: NSObject, ObservableObject {
             printerModelCode = fields[2]
             printerSerial = reportedSerial
             if isSwitchingPrinter {
-                isSwitchingPrinter = false
-                expectedPrinterSerial = ""
-                cancelPrinterSwitchTimeout()
+                printerSwitchIdentityConfirmed = true
+                updatePrinterSwitchProgress(
+                    0.72,
+                    message: "Đúng serial \(printerDisplayName) • đang nhận dữ liệu máy in"
+                )
             }
             connectionText = "Đã kết nối ESP32 • \(printerDisplayName)"
         case "FLEET":
@@ -914,9 +984,36 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     configurationProgress = configurationCommands.count
                     isConfiguring = false
                 }
-                h2dStatusCode = "SWITCHING"
-                h2dBridgeStatus = "Đang chuyển ESP32 sang \(printerModelCode)…"
-                return
+                if printerSwitchIdentityConfirmed {
+                    switch status {
+                    case "MQTT_CONNECTING":
+                        updatePrinterSwitchProgress(
+                            0.80,
+                            message: "Đúng máy \(printerModelCode) • đang xác thực LAN"
+                        )
+                        return
+                    case "SYNCING":
+                        updatePrinterSwitchProgress(
+                            0.90,
+                            message: "Đang đồng bộ dữ liệu thời gian thực từ \(printerModelCode)"
+                        )
+                        return
+                    case "READY", "ARMED", "DISARMED":
+                        finishPrinterSwitchSuccessfully()
+                    default:
+                        updatePrinterSwitchProgress(
+                            0.74,
+                            message: "Đúng máy \(printerModelCode) • đang chờ MQTT sẵn sàng"
+                        )
+                        return
+                    }
+                } else {
+                    updatePrinterSwitchProgress(
+                        0.62,
+                        message: "ESP32 đang chuyển sang \(printerModelCode) • chờ đúng serial"
+                    )
+                    return
+                }
             }
             h2dStatusCode = status
             let known: [String: String] = [
@@ -964,6 +1061,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 // still ignored while switching.
                 guard fields.count >= 9,
                       normalizeSerial(fields[8]) == expectedPrinterSerial else { return }
+                printerSerial = normalizeSerial(fields[8])
+                printerSwitchIdentityConfirmed = true
+                finishPrinterSwitchSuccessfully()
             }
             guard fields.count >= 6 else { return }
             confirmH2DReady()

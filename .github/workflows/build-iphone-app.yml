@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.49 build128 - flash on dinh va luu do sang
+name: Tao IPA SE v9.50 build129 - icon film va chuyen may muot
 
 on:
   workflow_dispatch:
@@ -138,6 +138,9 @@ jobs:
           grep -q 'case "FAILED": return .stopping' "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'Hiện hình xem trước' "RedCameraTest/H2DTimelapseView.swift"
           grep -q "desiredTimelapseArmed" "RedCameraTest/H2DBLEManager.swift"
+          grep -q "printerSwitchProgress" "RedCameraTest/H2DBLEManager.swift"
+          grep -q "printerProfileSwitchProgress" "RedCameraTest/H2DTimelapseView.swift"
+          sips -g hasAlpha "RedCameraTest/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png" | grep -q "hasAlpha: no"
           grep -q "cameraWarmupTimeout" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q 'video.slash.fill' "RedCameraTest/H2DTimelapseView.swift"
           grep -q "Hồ sơ.*đã lưu" "RedCameraTest/H2DTimelapseView.swift"
@@ -187,19 +190,19 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.49"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "128"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.50"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "129"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.49-build128-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.50-build129-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.49-build128-unsigned-ipa
-          path: SE-v9.49-build128-unsigned.ipa
+          name: SE-v9.50-build129-unsigned-ipa
+          path: SE-v9.50-build129-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 

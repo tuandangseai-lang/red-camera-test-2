@@ -269,7 +269,8 @@ struct H2DTimelapseView: View {
 
         var color: Color {
             switch self {
-            case .idle, .connecting: return .yellow
+            case .idle: return .yellow
+            case .connecting: return .blue
             case .preparing, .printing: return .green
             case .capturing: return .blue
             case .stopping, .paused: return .red
@@ -848,6 +849,11 @@ struct H2DTimelapseView: View {
 
             printerProfileSelector
 
+            if bluetooth.isSwitchingPrinter {
+                printerProfileSwitchProgress
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
             if showConfiguration {
                 Label("Chọn hồ sơ; SE còn tự kiểm tra đầu serial để nhận đúng A1 / H2D / P2S.", systemImage: "sparkles")
                     .font(.custom("Arial", size: 12).weight(.bold))
@@ -953,7 +959,8 @@ struct H2DTimelapseView: View {
                     HStack(spacing: 5) {
                         PrinterActivityDot(
                             isConfigured: savedProfiles.contains(where: { $0.kind == kind }),
-                            status: fleet
+                            status: fleet,
+                            isSwitching: bluetooth.isSwitchingPrinter && selectedPrinterKind == kind
                         )
                         Text(kind.rawValue)
                     }
@@ -971,8 +978,54 @@ struct H2DTimelapseView: View {
                         .stroke(.clear, lineWidth: 0)
                 }
                 .accessibilityLabel(profileAccessibilityText(kind: kind, status: fleet))
+                // Keep the current target locked, but allow another tab to
+                // supersede an offline/slow switch without waiting 18 seconds.
+                .disabled(bluetooth.isSwitchingPrinter && selectedPrinterKind == kind)
             }
         }
+        .animation(.easeInOut(duration: 0.25), value: bluetooth.isSwitchingPrinter)
+    }
+
+    private var printerProfileSwitchProgress: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(cinemaCyan)
+
+                Text(bluetooth.printerSwitchPhaseText.isEmpty
+                    ? "Đang chuyển sang \(selectedPrinterKind.rawValue)"
+                    : bluetooth.printerSwitchPhaseText)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                Text("\(Int((bluetooth.printerSwitchProgress * 100).rounded()))%")
+                    .font(.system(size: 10, weight: .black, design: .monospaced))
+                    .foregroundStyle(cinemaCyan)
+                    .monospacedDigit()
+            }
+
+            ProgressView(value: bluetooth.printerSwitchProgress, total: 1)
+                .tint(cinemaCyan)
+                .scaleEffect(x: 1, y: 1.35, anchor: .center)
+                .animation(
+                    .smooth(duration: 0.42),
+                    value: bluetooth.printerSwitchProgress
+                )
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 10)
+        .background(cinemaCyan.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(cinemaCyan.opacity(0.24), lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Đang chuyển máy in \(selectedPrinterKind.rawValue)")
+        .accessibilityValue("\(Int((bluetooth.printerSwitchProgress * 100).rounded())) phần trăm")
     }
 
     private var activeCaptureView: some View {
@@ -1520,6 +1573,7 @@ struct H2DTimelapseView: View {
 private struct PrinterActivityDot: View {
     let isConfigured: Bool
     let status: BambuFleetStatus
+    let isSwitching: Bool
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0)) { context in
@@ -1533,10 +1587,11 @@ private struct PrinterActivityDot: View {
     }
 
     private var shouldBlink: Bool {
-        status.hasCriticalError || status.hasActivePrintJob
+        isSwitching || status.hasCriticalError || status.hasActivePrintJob
     }
 
     private var dotColor: Color {
+        if isSwitching { return .cyan }
         if status.hasCriticalError { return .red }
         // Green means an active print only.  A powered, idle printer is
         // reachable but waiting, so it gets yellow.  A configured printer
