@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.12.13
+// SE Bambu Timelapse Bridge for classic ESP32 v1.12.14
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -47,10 +47,9 @@ constexpr uint32_t MQTT_TCP_TIMEOUT_MS = 2000;
 constexpr uint32_t FLEET_TCP_TIMEOUT_MS = 1200;
 constexpr uint32_t MQTT_TLS_HANDSHAKE_TIMEOUT_SECONDS = 3;
 constexpr uint32_t FLEET_TLS_HANDSHAKE_TIMEOUT_SECONDS = 2;
-// H2D closes an otherwise idle LAN MQTT socket at roughly 30 seconds. Ping
-// well before that boundary so the iPhone remains READY while the printer is
-// waiting, instead of cycling through reconnect states.
-constexpr uint16_t MQTT_KEEPALIVE_SECONDS = 15;
+// Keep Bambu's established 60-second MQTT interval. Active print/status
+// packets keep the session alive; stale writes are closed explicitly below.
+constexpr uint16_t MQTT_KEEPALIVE_SECONDS = 60;
 // A lightweight TCP reachability sweep is independent from MQTT. This lets
 // the three status pixels distinguish a powered printer (yellow) from a truly
 // offline printer (black), even while the selected printer is reconnecting.
@@ -1656,7 +1655,18 @@ void publishStatusRequest() {
                          ++sequenceId +
                          "\",\"command\":\"pushall\",\"version\":1,"
                          "\"push_target\":1}}";
-  if (!mqtt.publish(topic.c_str(), pushAll.c_str())) mqttWasConnected = false;
+  if (!mqtt.publish(topic.c_str(), pushAll.c_str())) {
+    // A failed secure write can leave PubSubClient's MQTT state at CONNECTED
+    // even though the underlying H2D TLS socket is already unusable. Merely
+    // clearing our flag makes the next connect() return a false success and
+    // fragments heap on every retry. Close and shrink the dead session first.
+    Serial.printf("[MQTT] pushall failed, state=%d; closing stale selected "
+                  "session\n",
+                  mqtt.state());
+    mqtt.disconnect();
+    mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+    mqttWasConnected = false;
+  }
 }
 
 void disconnectNetwork(bool keepWifi = false) {
@@ -1807,7 +1817,15 @@ void maintainMqtt() {
                   Config::MQTT_FALLBACK_BUFFER_BYTES);
   }
   const String reportTopic = "device/" + settings.printerSerial + "/report";
-  mqtt.subscribe(reportTopic.c_str(), 0);
+  if (!mqtt.subscribe(reportTopic.c_str(), 0)) {
+    Serial.printf("[MQTT] subscribe failed, state=%d; closing selected "
+                  "session\n",
+                  mqtt.state());
+    mqtt.disconnect();
+    mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+    reportStatus("MQTT_RETRY");
+    return;
+  }
   lastMqttMessageAt = millis();
   statusDataSeen = false;
   lastPrintDataAt = 0;
@@ -1825,7 +1843,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.12.13");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.12.14");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2419,7 +2437,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.13");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.14");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
