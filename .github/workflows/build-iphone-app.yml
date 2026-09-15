@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.48 build127 - tinh chinh cinema HUD va flash art
+name: Tao IPA SE v9.49 build128 - flash on dinh va luu do sang
 
 on:
   workflow_dispatch:
@@ -88,8 +88,11 @@ jobs:
           grep -q "VNTranslationalImageRegistrationRequest" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "curatedFrameURLs" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "localizedEdgeIntrusion" "RedCameraTest/H2DTimelapseManager.swift"
-          grep -q "torchDisplaySleepDelay: TimeInterval = 10" "RedCameraTest/H2DTimelapseManager.swift"
-          grep -q "isTorchSleepDisplayActive" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "isFlashModeActive" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "brightnessBeforeFlashMode" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "enterFlashDisplayMode" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "easeInOut(duration: 0.24)" "RedCameraTest/H2DTimelapseView.swift"
+          ! grep -q "isTorchSleepDisplayActive\|torchDisplaySleepDelay\|isPulsing" "RedCameraTest/H2DTimelapseManager.swift" "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'bolt.fill' "RedCameraTest/H2DTimelapseView.swift"
           grep -q "isStoppingPrint" "RedCameraTest/H2DBLEManager.swift"
           grep -q "isPausedPrint" "RedCameraTest/H2DBLEManager.swift"
@@ -184,19 +187,19 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.48"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "127"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.49"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "128"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.48-build127-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.49-build128-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.48-build127-unsigned-ipa
-          path: SE-v9.48-build127-unsigned.ipa
+          name: SE-v9.49-build128-unsigned-ipa
+          path: SE-v9.49-build128-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 

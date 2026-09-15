@@ -24,7 +24,9 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     @Published private(set) var isLiveMonitorVisible = false
     @Published private(set) var canUseTorch = false
     @Published private(set) var isTorchEnabled = false
-    @Published private(set) var isTorchSleepDisplayActive = false
+    /// Stable UI state for flash mode. Unlike `isTorchEnabled`, this does not
+    /// toggle on every pulse of the physical film-shutter button.
+    @Published private(set) var isFlashModeActive = false
     // The preview is always portrait when the iPhone is mounted vertically.
     // Capture output keeps its own angle because the sensor image was mounted
     // upside down in the previous bracket.
@@ -76,6 +78,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private var sessionDirectory: URL?
     private var finishRequested = false
     private var originalBrightness: CGFloat?
+    private var brightnessBeforeFlashMode: CGFloat?
     private var lastJobID = ""
     private var monitorPreviewRequested = false
     private var captureRotationAngle: CGFloat = 270
@@ -88,11 +91,8 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private let cameraWarmupTimeout: TimeInterval = 1.8
     private var captureFrameWaitDeadline: Date?
     private var hardwareTorchGeneration = 0
-    private var torchDisplayGeneration = 0
-    private var hardwareSteadyTorchRequested = false
     private var shutterSoundPlayer: AVAudioPlayer?
     private var effectSoundLevel: Float = 0.7
-    private let torchDisplaySleepDelay: TimeInterval = 10
 
     func preparePreview() {
         requestCameraPermission { [weak self] granted in
@@ -258,6 +258,11 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self, self.isArmed, !self.isRendering else { return }
             self.hardwareTorchGeneration &+= 1
+            if enabled {
+                self.enterFlashDisplayMode()
+            } else {
+                self.leaveFlashDisplayMode()
+            }
             self.applyTorch(enabled)
         }
     }
@@ -270,14 +275,9 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             guard let self else { return }
             self.hardwareTorchGeneration &+= 1
             let generation = self.hardwareTorchGeneration
-            self.torchDisplayGeneration &+= 1
-            let displayGeneration = self.torchDisplayGeneration
-            self.hardwareSteadyTorchRequested = steady && !blinking
-            if !self.hardwareSteadyTorchRequested {
-                self.leaveTorchSleepDisplay()
-            }
 
             guard steady || blinking else {
+                self.leaveFlashDisplayMode()
                 self.applyTorch(false)
                 if !keepCameraWarm && !self.isArmed && self.previewSession.isRunning {
                     self.previewSession.stopRunning()
@@ -286,11 +286,16 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                 return
             }
 
+            // Dim once when the user enters either steady or pulsing flash.
+            // The pulsing torch itself must never drive the SwiftUI artwork or
+            // repeatedly write screen brightness.
+            self.enterFlashDisplayMode()
             self.requestCameraPermission { [weak self] granted in
                 guard let self else { return }
                 self.sessionQueue.async {
                     guard generation == self.hardwareTorchGeneration else { return }
                     guard granted else {
+                        self.leaveFlashDisplayMode()
                         self.publishStatus("Hãy cấp quyền Camera để công tắc điều khiển đèn flash")
                         return
                     }
@@ -300,27 +305,9 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                         self.runHardwareTorchBlink(generation: generation, turnOn: true)
                     } else {
                         self.applyTorch(steady)
-                        self.scheduleTorchDisplaySleep(generation: displayGeneration)
                     }
                 }
             }
-        }
-    }
-
-    /// The left rotary position is a flashlight mode. iOS does not allow an
-    /// app to terminate or lock the phone and keep using the torch, so SE keeps
-    /// the capture session alive and makes the OLED fully black after 10 s.
-    /// A tap wakes the controls for another 10 s without interrupting light.
-    func wakeTorchDisplayTemporarily() {
-        sessionQueue.async { [weak self] in
-            guard let self, self.hardwareSteadyTorchRequested else { return }
-            self.torchDisplayGeneration &+= 1
-            let generation = self.torchDisplayGeneration
-            self.publishOnMain {
-                self.isTorchSleepDisplayActive = false
-                self.showMonitorDisplay()
-            }
-            self.scheduleTorchDisplaySleep(generation: generation)
         }
     }
 
@@ -1528,32 +1515,24 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         }
     }
 
-    private func scheduleTorchDisplaySleep(generation: Int) {
-        sessionQueue.asyncAfter(deadline: .now() + torchDisplaySleepDelay) { [weak self] in
-            guard let self,
-                  generation == self.torchDisplayGeneration,
-                  self.hardwareSteadyTorchRequested,
-                  self.isTorchEnabled else { return }
-            self.publishOnMain {
-                if self.originalBrightness == nil {
-                    self.originalBrightness = UIScreen.main.brightness
-                }
-                // Keep iOS awake so the AVCapture torch remains powered while
-                // the OLED itself is visually and electrically near-off.
-                UIApplication.shared.isIdleTimerDisabled = true
-                UIScreen.main.brightness = 0.0
-                self.isTorchSleepDisplayActive = true
+    private func enterFlashDisplayMode() {
+        publishOnMain {
+            if !self.isFlashModeActive {
+                self.brightnessBeforeFlashMode = UIScreen.main.brightness
             }
+            self.isFlashModeActive = true
+            UIApplication.shared.isIdleTimerDisabled = true
+            UIScreen.main.brightness = 0.0
         }
     }
 
-    private func leaveTorchSleepDisplay() {
+    private func leaveFlashDisplayMode() {
         publishOnMain {
-            self.isTorchSleepDisplayActive = false
-            if self.isArmed {
-                self.setDimmedDisplay()
-            } else {
-                self.restoreDisplay()
+            guard self.isFlashModeActive || self.brightnessBeforeFlashMode != nil else { return }
+            self.isFlashModeActive = false
+            if let brightness = self.brightnessBeforeFlashMode {
+                UIScreen.main.brightness = brightness
+                self.brightnessBeforeFlashMode = nil
             }
         }
     }
@@ -1790,6 +1769,13 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     }
 
     private func restoreDisplay() {
+        // Leaving the view/app must never strand the phone at the minimum
+        // brightness, even if the physical switch is still in flash mode.
+        isFlashModeActive = false
+        if let brightness = brightnessBeforeFlashMode {
+            UIScreen.main.brightness = brightness
+            brightnessBeforeFlashMode = nil
+        }
         if let brightness = originalBrightness {
             UIScreen.main.brightness = brightness
             originalBrightness = nil

@@ -254,18 +254,6 @@ struct H2DTimelapseView: View {
         .onChange(of: bluetooth.activeCriticalPrinterAlertText) { _, _ in
             synchronizePrinterAlarm()
         }
-        .overlay {
-            if timelapse.isTorchSleepDisplayActive {
-                Color.black
-                    .ignoresSafeArea()
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        timelapse.wakeTorchDisplayTemporarily()
-                    }
-                    .accessibilityLabel("Chạm để bật màn hình trong 10 giây")
-                    .zIndex(1_000)
-            }
-        }
     }
 
     private enum PrinterIslandState: Equatable {
@@ -557,7 +545,7 @@ struct H2DTimelapseView: View {
                 .font(.system(size: 9, weight: .bold, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.74))
 
-                Text("V9.48")
+                Text("V9.49")
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.34))
             }
@@ -666,14 +654,7 @@ struct H2DTimelapseView: View {
                 endPoint: .bottom
             )
 
-            if isFlashArtworkActive {
-                CinemaLightningArtwork(
-                    tint: cinemaAmber,
-                    isPulsing: bluetooth.hardwareHoldActive
-                )
-                .padding(.horizontal, 30)
-                .padding(.vertical, 54)
-            } else {
+            ZStack {
                 Image("CinemaProjectorOutline")
                     .renderingMode(.template)
                     .resizable()
@@ -682,7 +663,18 @@ struct H2DTimelapseView: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 21)
                     .shadow(color: cinemaCyan.opacity(0.42), radius: 8)
+                    .opacity(isFlashArtworkActive ? 0 : 1)
+                    .scaleEffect(isFlashArtworkActive ? 0.97 : 1)
+
+                CinemaLightningArtwork(
+                    tint: cinemaAmber
+                )
+                .padding(.horizontal, 30)
+                .padding(.vertical, 54)
+                .opacity(isFlashArtworkActive ? 1 : 0)
+                .scaleEffect(isFlashArtworkActive ? 1 : 0.97)
             }
+            .animation(.easeInOut(duration: 0.24), value: isFlashArtworkActive)
 
             LinearGradient(
                 colors: [.clear, cinemaCyan.opacity(0.09), .clear],
@@ -696,7 +688,7 @@ struct H2DTimelapseView: View {
                 HStack {
                     Text("SE // OPTICAL UNIT")
                     Spacer()
-                    Text(isFlashArtworkActive ? (bluetooth.hardwareHoldActive ? "FLASH PULSE" : "FLASH ON") : "CAM OFF")
+                    Text(isFlashArtworkActive ? "FLASH ON" : "CAM OFF")
                         .foregroundStyle(cinemaAmber)
                 }
                 Spacer()
@@ -718,7 +710,7 @@ struct H2DTimelapseView: View {
     }
 
     private var isFlashArtworkActive: Bool {
-        timelapse.isTorchEnabled || bluetooth.hardwareMode == -1 || bluetooth.hardwareHoldActive
+        timelapse.isFlashModeActive
     }
 
     private var bridgeStatusCard: some View {
@@ -1092,11 +1084,11 @@ struct H2DTimelapseView: View {
                     )
 
                     Button {
-                        timelapse.setTorchEnabled(!timelapse.isTorchEnabled)
+                        timelapse.setTorchEnabled(!timelapse.isFlashModeActive)
                     } label: {
                         Label(
-                            timelapse.isTorchEnabled ? "Tắt đèn flash" : "Bật đèn flash",
-                            systemImage: timelapse.isTorchEnabled
+                            timelapse.isFlashModeActive ? "Tắt đèn flash" : "Bật đèn flash",
+                            systemImage: timelapse.isFlashModeActive
                                 ? "bolt.fill"
                                 : "bolt.slash.fill"
                         )
@@ -1104,11 +1096,11 @@ struct H2DTimelapseView: View {
                             .frame(width: 44, height: 32)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(timelapse.isTorchEnabled ? .yellow : .gray)
+                    .tint(timelapse.isFlashModeActive ? .yellow : .gray)
                     .disabled(!timelapse.canUseTorch)
                     .opacity(timelapse.canUseTorch ? 1 : 0.42)
                     .accessibilityLabel(
-                        timelapse.isTorchEnabled ? "Tắt đèn flash" : "Bật đèn flash"
+                        timelapse.isFlashModeActive ? "Tắt đèn flash" : "Bật đèn flash"
                     )
 
                     Button(role: .destructive) {
@@ -1135,13 +1127,7 @@ struct H2DTimelapseView: View {
 
     private var activeCinemaStandbyHUD: some View {
         ZStack {
-            if isFlashArtworkActive {
-                CinemaLightningArtwork(
-                    tint: cinemaAmber,
-                    isPulsing: bluetooth.hardwareHoldActive
-                )
-                .frame(width: 170, height: 270)
-            } else {
+            ZStack {
                 Image("CinemaProjectorOutline")
                     .renderingMode(.template)
                     .resizable()
@@ -1149,7 +1135,17 @@ struct H2DTimelapseView: View {
                     .foregroundStyle(.white.opacity(0.17))
                     .frame(width: 206, height: 366)
                     .shadow(color: cinemaCyan.opacity(0.28), radius: 12)
+                    .opacity(isFlashArtworkActive ? 0 : 1)
+                    .scaleEffect(isFlashArtworkActive ? 0.97 : 1)
+
+                CinemaLightningArtwork(
+                    tint: cinemaAmber
+                )
+                .frame(width: 170, height: 270)
+                .opacity(isFlashArtworkActive ? 1 : 0)
+                .scaleEffect(isFlashArtworkActive ? 1 : 0.97)
             }
+            .animation(.easeInOut(duration: 0.24), value: isFlashArtworkActive)
 
             Circle()
                 .stroke(.white.opacity(0.07), lineWidth: 7)
@@ -1652,52 +1648,46 @@ private struct CinemaViewfinderOverlay: View {
 
 private struct CinemaLightningArtwork: View {
     let tint: Color
-    let isPulsing: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: !isPulsing)) { context in
-            let phase = isPulsing
-                ? (sin(context.date.timeIntervalSinceReferenceDate * 15.0) + 1.0) / 2.0
-                : 1.0
-            ZStack {
-                Circle()
-                    .trim(from: 0.08, to: 0.42)
-                    .stroke(tint.opacity(0.30), style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
-                    .rotationEffect(.degrees(-28))
-                Circle()
-                    .trim(from: 0.55, to: 0.90)
-                    .stroke(.white.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [3, 6]))
-                    .rotationEffect(.degrees(24))
-                    .padding(13)
+        ZStack {
+            Circle()
+                .trim(from: 0.08, to: 0.42)
+                .stroke(tint.opacity(0.30), style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
+                .rotationEffect(.degrees(-28))
+            Circle()
+                .trim(from: 0.55, to: 0.90)
+                .stroke(.white.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [3, 6]))
+                .rotationEffect(.degrees(24))
+                .padding(13)
 
-                Image(systemName: "bolt.fill")
-                    .resizable()
-                    .scaledToFit()
-                    .foregroundStyle(tint.opacity(0.08 + phase * 0.10))
-                    .padding(24)
+            Image(systemName: "bolt.fill")
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(tint.opacity(0.18))
+                .padding(24)
 
-                Image(systemName: "bolt")
-                    .resizable()
-                    .scaledToFit()
-                    .fontWeight(.ultraLight)
-                    .foregroundStyle(.white.opacity(0.72 + phase * 0.22))
-                    .padding(24)
-                    .shadow(color: tint.opacity(0.32 + phase * 0.38), radius: 9)
+            Image(systemName: "bolt")
+                .resizable()
+                .scaledToFit()
+                .fontWeight(.ultraLight)
+                .foregroundStyle(.white.opacity(0.94))
+                .padding(24)
+                .shadow(color: tint.opacity(0.70), radius: 9)
 
-                VStack {
-                    HStack(spacing: 5) {
-                        Rectangle().frame(width: 20, height: 1)
-                        Circle().frame(width: 3, height: 3)
-                    }
-                    Spacer()
-                    HStack(spacing: 5) {
-                        Circle().frame(width: 3, height: 3)
-                        Rectangle().frame(width: 20, height: 1)
-                    }
+            VStack {
+                HStack(spacing: 5) {
+                    Rectangle().frame(width: 20, height: 1)
+                    Circle().frame(width: 3, height: 3)
                 }
-                .foregroundStyle(tint.opacity(0.36))
-                .padding(.vertical, 26)
+                Spacer()
+                HStack(spacing: 5) {
+                    Circle().frame(width: 3, height: 3)
+                    Rectangle().frame(width: 20, height: 1)
+                }
             }
+            .foregroundStyle(tint.opacity(0.36))
+            .padding(.vertical, 26)
         }
         .accessibilityHidden(true)
     }
