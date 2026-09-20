@@ -1623,7 +1623,7 @@ private struct PrinterActivityDot: View {
     let showsCompletion: Bool
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.1)) { context in
+        TimelineView(.periodic(from: .now, by: 0.25)) { context in
             let brightHalf = Int(context.date.timeIntervalSinceReferenceDate) % 2 == 0
             let completionPhase = context.date.timeIntervalSinceReferenceDate
                 .truncatingRemainder(dividingBy: 4.0) / 4.0
