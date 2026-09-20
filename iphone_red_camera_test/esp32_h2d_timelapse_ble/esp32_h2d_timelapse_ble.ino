@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.15.1
+// SE Bambu Timelapse Bridge for classic ESP32 v1.15.2
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -106,10 +106,12 @@ constexpr uint8_t BUZZER_PIN = 33;
 constexpr bool BUZZER_ACTIVE_HIGH = true;
 constexpr uint32_t BUZZER_ON_MS = 180;
 constexpr uint32_t BUZZER_OFF_MS = 100;
-// Three-pin active buzzer modules stop oscillating below a minimum input duty.
-// Map every non-zero app volume above that floor so "quiet" remains audible
-// instead of becoming indistinguishable from mute.
-constexpr uint8_t BUZZER_MIN_AUDIBLE_DUTY = 96;
+// A three-pin active buzzer needs a full logic-level pulse to start its own
+// oscillator. High-frequency PWM was interpreted as OFF at every setting
+// below 100%. Keep each pulse at full voltage and control perceived loudness
+// with a slow burst envelope instead. Every non-zero level remains audible.
+constexpr uint32_t BUZZER_VOLUME_GATE_PERIOD_MS = 100;
+constexpr uint32_t BUZZER_MIN_AUDIBLE_ON_MS = 12;
 constexpr uint8_t LED_MIN_BRIGHTNESS = 0;
 constexpr uint8_t LED_MAX_BRIGHTNESS = 255;
 constexpr uint8_t LED_DEFAULT_BRIGHTNESS_PERCENT = 95;
@@ -285,6 +287,8 @@ uint32_t lastLedRefreshAt = 0;
 uint32_t modeEntryFlashUntil = 0;
 uint32_t printCompleteBlueUntil = 0;
 uint32_t buzzerBeepUntil = 0;
+bool buzzerOutputRequested = false;
+uint32_t buzzerVolumeGateStartedAt = 0;
 uint32_t settingsPreviewUntil = 0;
 uint8_t settingsPreviewPercent = 0;
 uint8_t settingsPreviewType = 0;  // 1 = buzzer, 2 = LED brightness.
@@ -1593,8 +1597,11 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
       }
     }
   }
-  if (hasState && isActivePrintState(runtime.state) && !wasActiveSession &&
-      runtime.percent <= 1) {
+  if (hasState && isActivePrintState(runtime.state) && !wasActiveSession) {
+    // A background printer may be discovered up to one fleet-scan interval
+    // after it started, so its first observed percentage is often above 1%.
+    // The IDLE -> active edge is the reliable one-shot signal; do not require
+    // an early percentage or non-selected printers can begin silently.
     requestBuzzerBeep();
   }
   if (hasState && isCompletedPrintState(runtime.state) && wasActiveSession) {
@@ -2170,7 +2177,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.15.1");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.15.2");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2658,15 +2665,34 @@ void drawSettingsLevel() {
 
 void setBuzzerOutput(bool enabled) {
   const uint8_t volume = constrain(buzzerVolumePercent, 0, 100);
-  const uint8_t activeDuty = volume == 0
-      ? 0
-      : Config::BUZZER_MIN_AUDIBLE_DUTY +
-            static_cast<uint16_t>(255 - Config::BUZZER_MIN_AUDIBLE_DUTY) *
-                volume / 100;
-  const uint8_t duty = Config::BUZZER_ACTIVE_HIGH
-      ? (enabled ? activeDuty : 0)
-      : (enabled ? 255 - activeDuty : 255);
-  ledcWrite(Config::BUZZER_PIN, duty);
+  const uint8_t inactiveLevel = Config::BUZZER_ACTIVE_HIGH ? LOW : HIGH;
+  const uint8_t activeLevel = Config::BUZZER_ACTIVE_HIGH ? HIGH : LOW;
+  if (!enabled || volume == 0) {
+    buzzerOutputRequested = false;
+    digitalWrite(Config::BUZZER_PIN, inactiveLevel);
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (!buzzerOutputRequested) {
+    // Start every beep/alarm burst with a guaranteed full-voltage pulse. A
+    // short beep therefore remains audible even at the minimum setting.
+    buzzerOutputRequested = true;
+    buzzerVolumeGateStartedAt = now;
+  }
+  if (volume >= 100) {
+    digitalWrite(Config::BUZZER_PIN, activeLevel);
+    return;
+  }
+
+  const uint32_t onMs = Config::BUZZER_MIN_AUDIBLE_ON_MS +
+      (Config::BUZZER_VOLUME_GATE_PERIOD_MS -
+       Config::BUZZER_MIN_AUDIBLE_ON_MS) *
+          static_cast<uint32_t>(volume) / 100;
+  const uint32_t phase =
+      (now - buzzerVolumeGateStartedAt) %
+      Config::BUZZER_VOLUME_GATE_PERIOD_MS;
+  digitalWrite(Config::BUZZER_PIN, phase < onMs ? activeLevel : inactiveLevel);
 }
 
 void requestBuzzerBeep(uint32_t durationMs) {
@@ -2843,7 +2869,7 @@ void updateLedStrip() {
 
 void setup() {
   Serial.begin(115200);
-  ledcAttach(Config::BUZZER_PIN, 20000, 8);
+  pinMode(Config::BUZZER_PIN, OUTPUT);
   setBuzzerOutput(false);
   // Drive a known waiting colour before Wi-Fi/BLE/MQTT startup. This prevents
   // the strip from briefly retaining the green/red frame shown before reset.
@@ -2852,7 +2878,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.1");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.2");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
