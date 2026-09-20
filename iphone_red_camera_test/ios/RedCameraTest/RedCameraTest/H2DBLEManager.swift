@@ -866,7 +866,11 @@ final class H2DBLEManager: NSObject, ObservableObject {
 
     private func beginMqttLossGrace() {
         guard isH2DReady else {
-            markH2DUnavailable()
+            // MQTT_CONNECTED/SYNCING means the printer has already accepted
+            // the LAN session and the bridge is only waiting for its first
+            // status packet. Do not overwrite the independent fleet probe with
+            // OFFLINE here; that made the selected tab jump black/yellow and
+            // show "chưa bắt đầu" during every harmless resynchronization.
             return
         }
         mqttLossWorkItem?.cancel()
