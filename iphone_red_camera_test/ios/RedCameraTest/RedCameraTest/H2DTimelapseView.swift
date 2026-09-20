@@ -87,6 +87,138 @@ struct H2DTimelapseView: View {
     }
 
     private var observedContent: some View {
+        alarmObservedContent
+            .onChange(of: bluetooth.hasActiveCriticalPrinterAlert) { _, _ in
+                synchronizePrinterAlarm()
+            }
+            .onChange(of: bluetooth.activeCriticalPrinterKind) { _, _ in
+                synchronizePrinterAlarm()
+            }
+            .onChange(of: bluetooth.activeCriticalPrinterAlertText) { _, _ in
+                synchronizePrinterAlarm()
+            }
+            .onChange(of: hardwareBuzzerEnabled) { _, enabled in
+                bluetooth.setHardwareBuzzerEnabled(enabled)
+            }
+    }
+
+    // Keep the modifier tree in small stages. Besides making the individual
+    // responsibilities clearer, this avoids SwiftUI's generic type checker
+    // having to solve the entire screen as one enormous expression.
+    private var alarmObservedContent: some View {
+        bridgeObservedContent
+            .onChange(of: bluetooth.isH2DBridge) { _, recognized in
+                if recognized {
+                    reconcileBridgeWithSelectedProfile()
+                    switchToSelectedProfileIfPossible()
+                    attemptAutomaticConfigurationIfNeeded()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        syncFleetWhenPossible()
+                        bluetooth.setHardwareBuzzerEnabled(hardwareBuzzerEnabled)
+                        bluetooth.requestFleetRefresh()
+                    }
+                }
+            }
+            .task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 60_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    bluetooth.requestFleetRefresh()
+                }
+            }
+            .onChange(of: bluetooth.printerSerial) { _, _ in
+                reconcileBridgeWithSelectedProfile()
+            }
+            .onChange(of: printerSerial) { _, serial in
+                let detected = BambuPrinterKind.detect(serial: serial)
+                guard detected != .unknown, detected != selectedPrinterKind else { return }
+                selectedPrinterKind = detected
+                accessCode = H2DAccessCodeStore.load(for: detected)
+            }
+            .onChange(of: bluetooth.hasBridgeError) { _, hasError in
+                // A bridge/configuration failure means the saved values need to be
+                // editable again. Printer HMS alerts use hasActivePrinterAlert and
+                // do not reopen this form.
+                if hasError && bluetooth.isH2DBridge && !configurationSaved {
+                    showConfiguration = true
+                }
+            }
+    }
+
+    private var bridgeObservedContent: some View {
+        printerObservedContent
+            .onChange(of: bluetooth.isConfiguring) { wasConfiguring, configuring in
+                guard wasConfiguring && !configuring else { return }
+                if bluetooth.configurationProgress >= bluetooth.configurationTotal &&
+                    bluetooth.configurationTotal > 0 && !bluetooth.hasBridgeError {
+                    configurationSaved = true
+                    showConfiguration = false
+                    persistActiveProfile()
+                    // If the user tapped another saved profile while the initial
+                    // configuration was still running, perform that pending
+                    // switch now instead of leaving the app on the old printer.
+                    switchToSelectedProfileIfPossible()
+                } else if bluetooth.hasBridgeError {
+                    configurationSaved = false
+                    showConfiguration = true
+                }
+            }
+            .onChange(of: bluetooth.h2dStatusCode) { _, status in
+                if !bluetooth.isSwitchingPrinter &&
+                    (status == "READY" || status == "ARMED" || status == "DISARMED") {
+                    configurationSaved = true
+                    showConfiguration = false
+                    automaticConfigurationAttempted = false
+                } else {
+                    attemptAutomaticConfigurationIfNeeded()
+                }
+                if bluetooth.isH2DReady { applyHardwareControls() }
+                if status == "READY" || status == "ARMED" || status == "DISARMED" {
+                    syncFleetWhenPossible()
+                }
+            }
+            .onChange(of: bluetooth.h2dPrintState) { _, state in
+                updateCompletionPresentation(for: state)
+            }
+            .onChange(of: bluetooth.fleetStatuses) { _, statuses in
+                updateFleetCompletionPresentations(statuses)
+            }
+    }
+
+    private var printerObservedContent: some View {
+        lifecycleObservedContent
+            .onChange(of: scenePhase) { _, phase in
+                timelapse.handleScenePhase(phase, allowSetupPreview: setupCameraEnabled)
+            }
+            .onChange(of: timelapse.isArmed) { _, armed in
+                bluetooth.setH2DTimelapseArmed(armed)
+                if armed { hardwareArmRequested = false }
+                if !armed {
+                    // Let the capture screen disappear before starting the fairly
+                    // expensive AVCapture session again. This removes the visible
+                    // hitch when leaving capture mode.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        guard !timelapse.isArmed else { return }
+                        if setupCameraEnabled {
+                            timelapse.preparePreview()
+                        } else {
+                            timelapse.stopPreview()
+                        }
+                        applyHardwareControls(force: true)
+                    }
+                }
+            }
+            .onChange(of: setupCameraEnabled) { _, enabled in
+                guard !timelapse.isArmed else { return }
+                if enabled {
+                    timelapse.preparePreview()
+                } else {
+                    timelapse.stopPreview()
+                }
+            }
+    }
+
+    private var lifecycleObservedContent: some View {
         ZStack {
             CinemaTechnologyBackdrop()
                 .ignoresSafeArea()
@@ -155,119 +287,6 @@ struct H2DTimelapseView: View {
             timelapse.restoreDisplayWhenLeaving()
             timelapse.setHardwareTorch(steady: false, blinking: false, keepCameraWarm: false)
             if !timelapse.isArmed { timelapse.stopPreview() }
-        }
-        .onChange(of: scenePhase) { _, phase in
-            timelapse.handleScenePhase(phase, allowSetupPreview: setupCameraEnabled)
-        }
-        .onChange(of: timelapse.isArmed) { _, armed in
-            bluetooth.setH2DTimelapseArmed(armed)
-            if armed { hardwareArmRequested = false }
-            if !armed {
-                // Let the capture screen disappear before starting the fairly
-                // expensive AVCapture session again. This removes the visible
-                // hitch when leaving capture mode.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    guard !timelapse.isArmed else { return }
-                    if setupCameraEnabled {
-                        timelapse.preparePreview()
-                    } else {
-                        timelapse.stopPreview()
-                    }
-                    applyHardwareControls(force: true)
-                }
-            }
-        }
-        .onChange(of: setupCameraEnabled) { _, enabled in
-            guard !timelapse.isArmed else { return }
-            if enabled {
-                timelapse.preparePreview()
-            } else {
-                timelapse.stopPreview()
-            }
-        }
-        .onChange(of: bluetooth.isConfiguring) { wasConfiguring, configuring in
-            guard wasConfiguring && !configuring else { return }
-            if bluetooth.configurationProgress >= bluetooth.configurationTotal &&
-                bluetooth.configurationTotal > 0 && !bluetooth.hasBridgeError {
-                configurationSaved = true
-                showConfiguration = false
-                persistActiveProfile()
-                // If the user tapped another saved profile while the initial
-                // configuration was still running, perform that pending
-                // switch now instead of leaving the app on the old printer.
-                switchToSelectedProfileIfPossible()
-            } else if bluetooth.hasBridgeError {
-                configurationSaved = false
-                showConfiguration = true
-            }
-        }
-        .onChange(of: bluetooth.h2dStatusCode) { _, status in
-            if !bluetooth.isSwitchingPrinter &&
-                (status == "READY" || status == "ARMED" || status == "DISARMED") {
-                configurationSaved = true
-                showConfiguration = false
-                automaticConfigurationAttempted = false
-            } else {
-                attemptAutomaticConfigurationIfNeeded()
-            }
-            if bluetooth.isH2DReady { applyHardwareControls() }
-            if status == "READY" || status == "ARMED" || status == "DISARMED" {
-                syncFleetWhenPossible()
-            }
-        }
-        .onChange(of: bluetooth.h2dPrintState) { _, state in
-            updateCompletionPresentation(for: state)
-        }
-        .onChange(of: bluetooth.fleetStatuses) { _, statuses in
-            updateFleetCompletionPresentations(statuses)
-        }
-        .onChange(of: bluetooth.isH2DBridge) { _, recognized in
-            if recognized {
-                reconcileBridgeWithSelectedProfile()
-                switchToSelectedProfileIfPossible()
-                attemptAutomaticConfigurationIfNeeded()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    syncFleetWhenPossible()
-                    bluetooth.setHardwareBuzzerEnabled(hardwareBuzzerEnabled)
-                    bluetooth.requestFleetRefresh()
-                }
-            }
-        }
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 60_000_000_000)
-                guard !Task.isCancelled else { return }
-                bluetooth.requestFleetRefresh()
-            }
-        }
-        .onChange(of: bluetooth.printerSerial) { _, _ in
-            reconcileBridgeWithSelectedProfile()
-        }
-        .onChange(of: printerSerial) { _, serial in
-            let detected = BambuPrinterKind.detect(serial: serial)
-            guard detected != .unknown, detected != selectedPrinterKind else { return }
-            selectedPrinterKind = detected
-            accessCode = H2DAccessCodeStore.load(for: detected)
-        }
-        .onChange(of: bluetooth.hasBridgeError) { _, hasError in
-            // A bridge/configuration failure means the saved values need to be
-            // editable again. Printer HMS alerts use hasActivePrinterAlert and
-            // do not reopen this form.
-            if hasError && bluetooth.isH2DBridge && !configurationSaved {
-                showConfiguration = true
-            }
-        }
-        .onChange(of: bluetooth.hasActiveCriticalPrinterAlert) { _, _ in
-            synchronizePrinterAlarm()
-        }
-        .onChange(of: bluetooth.activeCriticalPrinterKind) { _, _ in
-            synchronizePrinterAlarm()
-        }
-        .onChange(of: bluetooth.activeCriticalPrinterAlertText) { _, _ in
-            synchronizePrinterAlarm()
-        }
-        .onChange(of: hardwareBuzzerEnabled) { _, enabled in
-            bluetooth.setHardwareBuzzerEnabled(enabled)
         }
     }
 
