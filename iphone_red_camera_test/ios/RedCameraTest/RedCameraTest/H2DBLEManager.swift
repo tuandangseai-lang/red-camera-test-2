@@ -91,6 +91,22 @@ final class H2DBLEManager: NSObject, ObservableObject {
         filamentType.isEmpty ? "Chưa nhận loại nhựa" : filamentType
     }
 
+    var remainingPrintTimeText: String {
+        guard h2dRemainingMinutes >= 0 else { return "Đang tính thời gian còn lại" }
+        if h2dRemainingMinutes == 0 { return "Còn dưới 1 phút" }
+        let hours = h2dRemainingMinutes / 60
+        let minutes = h2dRemainingMinutes % 60
+        if hours == 0 { return "Còn \(minutes) phút" }
+        if minutes == 0 { return "Còn \(hours) giờ" }
+        return "Còn \(hours) giờ \(minutes) phút"
+    }
+
+    var estimatedPrintFinishText: String {
+        guard h2dRemainingMinutes > 0 else { return "" }
+        let finish = Date.now.addingTimeInterval(Double(h2dRemainingMinutes) * 60)
+        return "Xong khoảng \(finish.formatted(date: .omitted, time: .shortened))"
+    }
+
     var hasTemperatureTelemetry: Bool {
         nozzleTemperature >= 0 || leftNozzleTemperature >= 0 || bedTemperature >= 0
     }
@@ -347,6 +363,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private var recognitionWorkItem: DispatchWorkItem?
     private var statusRefreshWorkItems: [DispatchWorkItem] = []
     private var fleetSyncWorkItems: [DispatchWorkItem] = []
+    private var lastFleetSyncSignature = ""
     private var configurationTimeoutWorkItem: DispatchWorkItem?
     private var mqttLossWorkItem: DispatchWorkItem?
     private var armSyncWorkItems: [DispatchWorkItem] = []
@@ -593,6 +610,15 @@ final class H2DBLEManager: NSObject, ObservableObject {
         fleetSyncWorkItems.removeAll()
 
         let storedProfiles = BambuPrinterProfileStore.load()
+        let signature = storedProfiles.enumerated().map { slot, profile in
+            let code = normalizeAccessCode(H2DAccessCodeStore.load(for: profile))
+            return "\(slot)|\(profile.id)|\(profile.kind.rawValue)|\(profile.ip)|\(normalizeSerial(profile.serial))|\(code)"
+        }.joined(separator: ";") + "#selected=\(selectedProfileID)"
+        // READY is emitted after every internal MQTT reconnect. Re-sending an
+        // unchanged fleet inventory there used to restart the ESP32 network
+        // quiet window and produce a reconnect/jitter loop.
+        guard signature != lastFleetSyncSignature else { return }
+        lastFleetSyncSignature = signature
         var payloads: [String] = []
         for slot in 0..<BambuPrinterProfileStore.maximumProfiles {
             if slot < storedProfiles.count {
@@ -889,9 +915,13 @@ final class H2DBLEManager: NSObject, ObservableObject {
             // show "chưa bắt đầu" during every harmless resynchronization.
             return
         }
-        mqttLossWorkItem?.cancel()
+        // Repeated MQTT_RETRY notifications belong to one outage. Do not move
+        // the deadline forward on every retry or the UI may remain falsely
+        // green forever during a real printer outage.
+        guard mqttLossWorkItem == nil else { return }
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
+            self.mqttLossWorkItem = nil
             self.isH2DReady = false
             if !self.hasSelectedCriticalPrinterAlert {
                 self.h2dBridgeStatus = "Mất dữ liệu \(self.printerDisplayName) • ESP32 đang tự kết nối lại"
@@ -904,7 +934,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         // reconnect can legitimately take several seconds on classic ESP32.
         // Keep the last confirmed state long enough to avoid a false Bluetooth/
         // printer outage while that intentional scan is in progress.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 12.0, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15.0, execute: item)
     }
 
     private func activateTransportIfReady(_ peripheral: CBPeripheral) {
@@ -1146,6 +1176,15 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     return
                 }
             }
+            if isH2DReady,
+               ["MQTT_CONNECTING", "MQTT_RETRY", "SYNCING"].contains(status) {
+                // The ESP32 temporarily releases the selected MQTT socket to
+                // inspect one background printer. Keep the last confirmed
+                // print state visible while it returns instead of flashing the
+                // screen between green/yellow/connecting states.
+                beginMqttLossGrace()
+                return
+            }
             h2dStatusCode = status
             let known: [String: String] = [
                 "BOOTING": "ESP32 đang khởi động",
@@ -1378,6 +1417,7 @@ extension H2DBLEManager: CBCentralManagerDelegate {
         hasBridgeError = true
         connectionText = "Kết nối lỗi, đang thử lại..."
         bridgePeripheral = nil
+        lastFleetSyncSignature = ""
         scheduleReconnect()
     }
 
@@ -1395,6 +1435,7 @@ extension H2DBLEManager: CBCentralManagerDelegate {
         eventCharacteristic = nil
         commandCharacteristic = nil
         bridgePeripheral = nil
+        lastFleetSyncSignature = ""
         connectionText = "ESP32 đã ngắt, đang kết nối lại..."
         h2dBridgeStatus = "ESP32 đã ngắt • đang kết nối lại"
         scheduleReconnect()

@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.15.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.15.1
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -61,10 +61,12 @@ constexpr uint32_t FLEET_PROBE_PERIOD_MS = 900;
 constexpr uint32_t FLEET_PROBE_TIMEOUT_MS = 350;
 constexpr uint32_t FLEET_ONLINE_GRACE_MS = 6500;
 constexpr uint8_t FLEET_OFFLINE_FAILURES = 3;
-// Every two minutes the two non-selected profiles are checked one at a time.
-// The UI selection never changes: the scanner reports an active/error state
-// immediately, closes, and the selected printer resumes normal MQTT reads.
+// Every two minutes one non-selected profile is checked, rotating between the
+// two background printers.  Sampling both in one pass kept the selected MQTT
+// session offline for 6+ seconds and made the iPhone status visibly oscillate.
+// One sample per pass returns to the selected printer as soon as possible.
 constexpr uint32_t FLEET_REFRESH_PERIOD_MS = 120000;
+constexpr uint8_t FLEET_SAMPLES_PER_REFRESH = 1;
 // H2D's full 22-KB pushall can arrive noticeably later than A1/P2S. Keep the
 // short-lived scanner open long enough to receive that packet, otherwise an
 // H2D fault could be missed until its profile was selected manually.
@@ -203,6 +205,8 @@ uint32_t activeFleetMonitorSince = 0;
 uint32_t lastFleetRefreshAt = 0;
 uint32_t nextFleetMonitorAttemptAt = 0;
 uint8_t fleetMonitorCursor = 0;
+uint8_t nextFleetMonitorSlot = 0;
+uint8_t fleetSamplesThisRefresh = 0;
 volatile bool fleetRefreshRequested = true;
 bool fleetRefreshInProgress = false;
 uint32_t lastFleetProbeAt = 0;
@@ -1886,13 +1890,23 @@ void maintainFleetMonitors() {
         now - activeFleetMonitorSince < Config::FLEET_MONITOR_DWELL_MS) {
       return;
     }
+    const uint8_t completedSlot = activeFleetMonitorSlot;
     client.disconnect();
     client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
     activeFleetMonitorSlot = -1;
     activeFleetProfileIndex = -1;
     fleetSampleReceived = false;
     activeFleetMonitorSince = 0;
-    ++fleetMonitorCursor;
+    ++fleetSamplesThisRefresh;
+    nextFleetMonitorSlot =
+        (completedSlot + 1) % BACKGROUND_MONITOR_COUNT;
+    // One successful background sample is enough for this pass. Return to the
+    // selected printer immediately; the other slot is sampled next cycle.
+    if (fleetSamplesThisRefresh >= Config::FLEET_SAMPLES_PER_REFRESH) {
+      fleetMonitorCursor = BACKGROUND_MONITOR_COUNT;
+    } else {
+      ++fleetMonitorCursor;
+    }
     nextFleetMonitorAttemptAt = now + Config::FLEET_MONITOR_RETRY_GAP_MS;
   }
 
@@ -1904,6 +1918,7 @@ void maintainFleetMonitors() {
     fleetRefreshRequested = false;
     fleetRefreshInProgress = true;
     fleetMonitorCursor = 0;
+    fleetSamplesThisRefresh = 0;
     nextFleetMonitorAttemptAt = now;
   }
 
@@ -1918,7 +1933,9 @@ void maintainFleetMonitors() {
   }
   if (static_cast<int32_t>(nextFleetMonitorAttemptAt - now) > 0) return;
 
-  const uint8_t slot = fleetMonitorCursor;
+  const uint8_t slot =
+      (nextFleetMonitorSlot + fleetMonitorCursor) %
+      BACKGROUND_MONITOR_COUNT;
   if (!startFleetMonitor(slot)) {
     ++fleetMonitorCursor;
     nextFleetMonitorAttemptAt = millis() + Config::FLEET_MONITOR_RETRY_GAP_MS;
@@ -2153,7 +2170,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.15.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.15.1");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2187,15 +2204,13 @@ void handlePhoneCommand(String command) {
   const String head = comma < 0 ? command : command.substring(0, comma);
   const String argument = comma < 0 ? "" : command.substring(comma + 1);
 
-  // Keep MQTT/TLS out of the way until the complete iPhone configuration
-  // transaction is acknowledged. The timestamp expires automatically if an
-  // interrupted app never reaches SELECT.
+  // Keep MQTT/TLS out of the way only while Wi-Fi and primary-printer fields
+  // are being rewritten. Fleet inventory synchronization is idempotent and
+  // must not pause a healthy selected-printer session for eight seconds every
+  // time the iPhone comes to the foreground.
   if (head == "H2D_WIFI_SSID" || head == "H2D_WIFI_PASS" ||
       head == "H2D_IP" || head == "H2D_SERIAL" || head == "H2D_CODE" ||
-      head == "H2D_SAVE" || head == "H2D_PROFILE" ||
-      head == "H2D_PROFILE_CLEAR" || head == "H2D_SELECT" ||
-      head == "H2D_PROFILE_SLOT" || head == "H2D_PROFILE_SLOT_CLEAR" ||
-      head == "H2D_SELECT_SLOT") {
+      head == "H2D_SAVE") {
     lastConfigurationCommandAt = millis();
   }
 
@@ -2451,10 +2466,10 @@ void handlePhoneCommand(String command) {
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *server, NimBLEConnInfo &connection) override {
     phoneConnected = true;
-    // A large Bambu TLS packet can occupy the Wi-Fi radio for more than the
-    // former 1.8-second BLE supervision timeout. Give coexistence six seconds
-    // so an error pushall cannot make the iPhone appear disconnected.
-    server->updateConnParams(connection.getConnHandle(), 12, 24, 0, 600);
+    // TLS negotiation and one 22-KB H2D pushall may briefly monopolize the
+    // shared Wi-Fi/Bluetooth radio.  A twelve-second supervision window keeps
+    // the BLE control channel alive through that bounded LAN transaction.
+    server->updateConnParams(connection.getConnHandle(), 12, 24, 0, 1200);
     Serial.println("[BLE] iPhone connected");
   }
 
@@ -2780,8 +2795,9 @@ void updateLedStrip() {
     // calibration, nozzle cleaning and filament changes. Yellow is reserved
     // for an idle/flash state only.
     // Pixels 0...3 stay green. Pixels 4...6 are the three progress pixels.
-    // Future progress is white; the active segment cross-fades continuously
-    // from white to green, and completed segments remain solid green.
+    // Future progress is white at exactly 30% of the green channel level. The
+    // active segment cross-fades continuously from that dim white to full
+    // green, and completed segments remain solid green.
     fillStatusLeds(ledColor(0, 255, 58));
     const float filledPixels =
         smoothLedProgress(now) * Config::LED_ANIMATED_COUNT / 100.0f;
@@ -2789,7 +2805,7 @@ void updateLedStrip() {
       const uint16_t pixel = Config::LED_STATUS_COUNT + i;
       const float portion = constrain(filledPixels - i, 0.0f, 1.0f);
       if (portion <= 0.001f) {
-        ledStrip.setPixelColor(pixel, ledColor(255, 255, 255));
+        ledStrip.setPixelColor(pixel, ledColor(77, 77, 77));
         continue;
       }
       if (portion >= 0.999f) {
@@ -2798,13 +2814,15 @@ void updateLedStrip() {
         ledStrip.setPixelColor(pixel, ledColor(0, 255, 58));
         continue;
       }
-      // White fades out at the same rate that green fades in. The resulting
-      // cross-fade has no dark jump between percentage updates.
+      // Interpolate from 30%-white (77/255) to the full green state. This keeps
+      // unfinished LEDs visible without making them look completed.
       const float eased = portion * portion * (3.0f - 2.0f * portion);
-      const uint8_t white = static_cast<uint8_t>((1.0f - eased) * 255.0f);
-      const uint8_t greenBlue = static_cast<uint8_t>(
-          (1.0f - eased) * 255.0f + eased * 58.0f);
-      ledStrip.setPixelColor(pixel, ledColor(white, 255, greenBlue));
+      const uint8_t red = static_cast<uint8_t>((1.0f - eased) * 77.0f);
+      const uint8_t green = static_cast<uint8_t>(
+          77.0f + eased * (255.0f - 77.0f));
+      const uint8_t blue = static_cast<uint8_t>(
+          77.0f + eased * (58.0f - 77.0f));
+      ledStrip.setPixelColor(pixel, ledColor(red, green, blue));
     }
   } else if (hardwareMode == 0) {
     // Centre is the normal waiting position. Match the iPhone standby effect
@@ -2834,7 +2852,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.1");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

@@ -148,7 +148,7 @@ struct H2DTimelapseView: View {
             }
             .task {
                 while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 60_000_000_000)
+                    try? await Task.sleep(nanoseconds: 120_000_000_000)
                     guard !Task.isCancelled else { return }
                     bluetooth.requestFleetRefresh()
                 }
@@ -397,7 +397,11 @@ struct H2DTimelapseView: View {
         switch printerIslandState {
         case .idle: return "\(printerName) • CHƯA BẮT ĐẦU"
         case .preparing: return "\(printerName) • \(bluetooth.h2dStageText.uppercased())"
-        case .printing: return "\(printerName) • ĐANG IN \(bluetooth.h2dPrintPercent)%"
+        case .printing:
+            if bluetooth.h2dRemainingMinutes >= 0 {
+                return "\(printerName) • \(bluetooth.h2dPrintPercent)% • \(bluetooth.remainingPrintTimeText.uppercased())"
+            }
+            return "\(printerName) • ĐANG IN \(bluetooth.h2dPrintPercent)%"
         case .capturing: return "\(printerName) • CHỤP LỚP \(max(1, bluetooth.h2dCurrentLayer))"
         case .connecting: return "ESP32 • ĐANG KẾT NỐI \(printerName)"
         case .stopping: return "\(printerName) • ĐANG DỪNG"
@@ -893,6 +897,22 @@ struct H2DTimelapseView: View {
                             .foregroundStyle(cinemaGreen)
                     }
                     CinemaProgressRail(progress: printerProgress, tint: cinemaGreen)
+
+                    if bluetooth.isPrintSessionActive {
+                        HStack(spacing: 7) {
+                            Image(systemName: "timer")
+                                .foregroundStyle(cinemaCyan)
+                            Text(bluetooth.remainingPrintTimeText)
+                                .fontWeight(.bold)
+                            Spacer(minLength: 8)
+                            if !bluetooth.estimatedPrintFinishText.isEmpty {
+                                Text(bluetooth.estimatedPrintFinishText)
+                                    .foregroundStyle(.white.opacity(0.55))
+                            }
+                        }
+                        .font(.system(size: 11, design: .rounded))
+                        .monospacedDigit()
+                    }
                 }
                 .padding(.vertical, 2)
             }
