@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.50 build129 - icon film va chuyen may muot
+name: Tao IPA SE v9.51 build130 - quet 3 may va 8 LED
 
 on:
   workflow_dispatch:
@@ -129,7 +129,9 @@ jobs:
           grep -q "lanAccessCode.recovery" "RedCameraTest/BambuCredentialStore.swift"
           grep -q "ScreenEdgeLEDStrip" "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'case completed' "RedCameraTest/H2DTimelapseView.swift"
-          grep -q "acknowledgePrintCompletion" "RedCameraTest/H2DBLEManager.swift"
+          grep -q "requestFleetRefresh" "RedCameraTest/H2DBLEManager.swift"
+          grep -q "setHardwareBuzzerEnabled" "RedCameraTest/H2DBLEManager.swift"
+          ! grep -q "hardwareLevelPercent" "RedCameraTest/H2DBLEManager.swift" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "breathingPeriod" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "preservesProgressWhenHidden" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "ClockwiseScreenBorderShape" "RedCameraTest/H2DTimelapseView.swift"
@@ -190,19 +192,19 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.50"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "129"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.51"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "130"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.50-build129-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.51-build130-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.50-build129-unsigned-ipa
-          path: SE-v9.50-build129-unsigned.ipa
+          name: SE-v9.51-build130-unsigned-ipa
+          path: SE-v9.51-build130-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -265,22 +267,21 @@ jobs:
           grep -q 'hasCriticalPrinterError' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'H2D_PROFILE' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'maintainFleetMonitors' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'FLEET_BACKGROUND_MQTT_ENABLED = false' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'FLEET_REFRESH_PERIOD_MS = 60000' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'H2D_FLEET_REFRESH' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'BUZZER_PIN = 33' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'updateBuzzerAlarm' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'mc_remaining_time' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'isPausedState' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'LED_STRIP_PIN = 5' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'LED_STATUS_COUNT = 3' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'LED_STATUS_COUNT = 4' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'LED_ANIMATED_COUNT = 4' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'LED_PHYSICAL_COUNT = 10' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'LED_IDLE_MAX_SCALE = 102' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'H2D_COMPLETE_ACK' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'H2D_BUZZER' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'LED_FIXED_BRIGHTNESS_PERCENT = 95' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'fixedLedBrightness' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'acceptStablePotentiometerReading' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'potentiometerDetected' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'LEVEL_POT_DETECT_RAW = 80' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          ! grep -q 'LEVEL_POT\|potentiometerDetected\|CONTROL,LEVEL' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'modeEntryFlashUntil = now + 1000' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'hardwareMode == 0' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'breathingScale(now)' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
@@ -297,7 +298,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.12.14
+          name: SE-Bambu-ESP32-v1.13.0
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

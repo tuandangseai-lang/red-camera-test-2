@@ -12,6 +12,7 @@ struct H2DTimelapseView: View {
     @AppStorage("SE.H2D.printerSerial") private var printerSerial = ""
     @AppStorage("SE.H2D.configurationSaved") private var configurationSaved = false
     @AppStorage("SE.H2D.setupCameraEnabled") private var setupCameraEnabled = false
+    @AppStorage("SE.H2D.hardwareBuzzerEnabled") private var hardwareBuzzerEnabled = true
     @State private var wifiPassword = ""
     @State private var accessCode = ""
     @State private var showConfiguration = true
@@ -27,8 +28,12 @@ struct H2DTimelapseView: View {
     @State private var hardwareStartedCapture = false
     @State private var hardwareModeOneLatched = false
     @State private var hardwareControlGeneration = 0
+    @State private var lastAppliedHardwareMode: Int?
+    @State private var lastAppliedHardwareHold: Bool?
     @State private var completionBlueActive = false
     @State private var completionDismissWorkItem: DispatchWorkItem?
+    @State private var acknowledgedFleetCompletions: Set<BambuPrinterKind> = []
+    @State private var pendingFleetCompletionAcknowledgements: Set<BambuPrinterKind> = []
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -48,13 +53,6 @@ struct H2DTimelapseView: View {
         observedContent
             .onChange(of: bluetooth.hardwareControlRevision) { _, _ in
                 scheduleHardwareControls()
-            }
-            .onChange(of: bluetooth.hardwareLevelPercent) { _, level in
-                // Apply volume directly as well as through the aggregate
-                // control revision so rapid knob updates cannot be coalesced
-                // with a simultaneous MODE or HOLD notification.
-                printerAlarm.setLevel(Double(level) / 100.0)
-                timelapse.setEffectSoundLevel(Double(level) / 100.0)
             }
             .onChange(of: timelapse.isRendering) { _, rendering in
                 if !rendering { applyHardwareControls(force: true) }
@@ -148,6 +146,8 @@ struct H2DTimelapseView: View {
                 reconcileBridgeWithSelectedProfile()
                 attemptAutomaticConfigurationIfNeeded()
                 syncFleetWhenPossible()
+                bluetooth.setHardwareBuzzerEnabled(hardwareBuzzerEnabled)
+                bluetooth.requestFleetRefresh()
                 synchronizePrinterAlarm()
             }
         }
@@ -210,13 +210,16 @@ struct H2DTimelapseView: View {
             } else {
                 attemptAutomaticConfigurationIfNeeded()
             }
-            if bluetooth.isH2DReady { applyHardwareControls(force: true) }
+            if bluetooth.isH2DReady { applyHardwareControls() }
             if status == "READY" || status == "ARMED" || status == "DISARMED" {
                 syncFleetWhenPossible()
             }
         }
         .onChange(of: bluetooth.h2dPrintState) { _, state in
             updateCompletionPresentation(for: state)
+        }
+        .onChange(of: bluetooth.fleetStatuses) { _, statuses in
+            updateFleetCompletionPresentations(statuses)
         }
         .onChange(of: bluetooth.isH2DBridge) { _, recognized in
             if recognized {
@@ -225,7 +228,16 @@ struct H2DTimelapseView: View {
                 attemptAutomaticConfigurationIfNeeded()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                     syncFleetWhenPossible()
+                    bluetooth.setHardwareBuzzerEnabled(hardwareBuzzerEnabled)
+                    bluetooth.requestFleetRefresh()
                 }
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                guard !Task.isCancelled else { return }
+                bluetooth.requestFleetRefresh()
             }
         }
         .onChange(of: bluetooth.printerSerial) { _, _ in
@@ -253,6 +265,9 @@ struct H2DTimelapseView: View {
         }
         .onChange(of: bluetooth.activeCriticalPrinterAlertText) { _, _ in
             synchronizePrinterAlarm()
+        }
+        .onChange(of: hardwareBuzzerEnabled) { _, enabled in
+            bluetooth.setHardwareBuzzerEnabled(enabled)
         }
     }
 
@@ -424,7 +439,6 @@ struct H2DTimelapseView: View {
             completionBlueActive = true
             let workItem = DispatchWorkItem {
                 completionBlueActive = false
-                bluetooth.acknowledgePrintCompletion()
             }
             completionDismissWorkItem = workItem
             DispatchQueue.main.asyncAfter(
@@ -434,15 +448,40 @@ struct H2DTimelapseView: View {
                 execute: workItem
             )
         } else if ["RUNNING", "PREPARE", "PREPARING", "SLICING", "INIT", "HEATING"].contains(normalized) {
-            dismissCompletionPresentation(notifyBridge: false)
+            dismissCompletionPresentation()
         }
     }
 
-    private func dismissCompletionPresentation(notifyBridge: Bool) {
+    private func dismissCompletionPresentation() {
         completionDismissWorkItem?.cancel()
         completionDismissWorkItem = nil
         completionBlueActive = false
-        if notifyBridge { bluetooth.acknowledgePrintCompletion() }
+    }
+
+    private func updateFleetCompletionPresentations(
+        _ statuses: [BambuPrinterKind: BambuFleetStatus]
+    ) {
+        for kind in [BambuPrinterKind.a1, .h2d, .p2s] {
+            guard let status = statuses[kind] else { continue }
+            let state = status.printState.uppercased()
+            let completed = ["FINISH", "COMPLETE", "COMPLETED"].contains(state)
+            if status.hasActivePrintJob {
+                acknowledgedFleetCompletions.remove(kind)
+                pendingFleetCompletionAcknowledgements.remove(kind)
+                continue
+            }
+            guard completed,
+                  !acknowledgedFleetCompletions.contains(kind),
+                  !pendingFleetCompletionAcknowledgements.contains(kind) else { continue }
+            pendingFleetCompletionAcknowledgements.insert(kind)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                guard pendingFleetCompletionAcknowledgements.contains(kind) else { return }
+                pendingFleetCompletionAcknowledgements.remove(kind)
+                let current = bluetooth.fleetStatus(for: kind).printState.uppercased()
+                guard ["FINISH", "COMPLETE", "COMPLETED"].contains(current) else { return }
+                acknowledgedFleetCompletions.insert(kind)
+            }
+        }
     }
 
     private var setupView: some View {
@@ -849,6 +888,13 @@ struct H2DTimelapseView: View {
 
             printerProfileSelector
 
+            Toggle(isOn: $hardwareBuzzerEnabled) {
+                Label("Loa báo trên ESP32", systemImage: hardwareBuzzerEnabled
+                    ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                    .font(.custom("Arial", size: 12).weight(.bold))
+            }
+            .tint(cinemaGreen)
+
             if bluetooth.isSwitchingPrinter {
                 printerProfileSwitchProgress
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -960,7 +1006,10 @@ struct H2DTimelapseView: View {
                         PrinterActivityDot(
                             isConfigured: savedProfiles.contains(where: { $0.kind == kind }),
                             status: fleet,
-                            isSwitching: bluetooth.isSwitchingPrinter && selectedPrinterKind == kind
+                            isSwitching: bluetooth.isSwitchingPrinter && selectedPrinterKind == kind,
+                            showsCompletion: ["FINISH", "COMPLETE", "COMPLETED"]
+                                .contains(fleet.printState.uppercased()) &&
+                                !acknowledgedFleetCompletions.contains(kind)
                         )
                         Text(kind.rawValue)
                     }
@@ -1472,16 +1521,13 @@ struct H2DTimelapseView: View {
     }
 
     private func applyHardwareControls(force: Bool = false) {
-        printerAlarm.setLevel(Double(bluetooth.hardwareLevelPercent) / 100.0)
-        timelapse.setEffectSoundLevel(Double(bluetooth.hardwareLevelPercent) / 100.0)
-
-        // Potentiometer reports are frequent. They only control brightness and
-        // alarm volume, so they must not disturb a torch the user enabled from
-        // the app or restart another hardware action.
-        if !force && bluetooth.hardwareLastControl == "LEVEL" { return }
-
         let mode = bluetooth.hardwareMode
         let buttonHeld = bluetooth.hardwareHoldActive
+        let controlsChanged = lastAppliedHardwareMode != mode ||
+            lastAppliedHardwareHold != buttonHeld
+        guard force || controlsChanged else { return }
+        lastAppliedHardwareMode = mode
+        lastAppliedHardwareHold = buttonHeld
         let keepCameraWarm = setupCameraEnabled || timelapse.isArmed || mode == 1
         timelapse.setHardwareTorch(
             steady: mode == -1,
@@ -1525,12 +1571,12 @@ struct H2DTimelapseView: View {
     private func scheduleHardwareControls() {
         // Industrial three-position switches briefly touch the centre contact
         // while moving between sides. Coalesce bounce and intermediate MODE
-        // packets, then apply only the final physical position. LEVEL has its
-        // own lightweight observer and never needs to restart the camera.
-        guard bluetooth.hardwareLastControl != "LEVEL" else { return }
+        // packets, then apply only the final stable physical position. A
+        // slightly longer window avoids starting and stopping AVCapture for
+        // the centre contact while the knob is moving between its two sides.
         hardwareControlGeneration &+= 1
         let generation = hardwareControlGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.40) {
             guard generation == self.hardwareControlGeneration else { return }
             self.applyHardwareControls()
         }
@@ -1574,25 +1620,33 @@ private struct PrinterActivityDot: View {
     let isConfigured: Bool
     let status: BambuFleetStatus
     let isSwitching: Bool
+    let showsCompletion: Bool
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.0)) { context in
+        TimelineView(.periodic(from: .now, by: 0.1)) { context in
             let brightHalf = Int(context.date.timeIntervalSinceReferenceDate) % 2 == 0
+            let completionPhase = context.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: 4.0) / 4.0
+            let completionOpacity = 0.18 + 0.82 *
+                (0.5 - 0.5 * cos(completionPhase * .pi * 2.0))
             Circle()
                 .fill(dotColor)
                 .frame(width: 9, height: 9)
-                .opacity(shouldBlink ? (brightHalf ? 1 : 0.18) : 1)
+                .opacity(showsCompletion
+                    ? completionOpacity
+                    : shouldBlink ? (brightHalf ? 1 : 0.18) : 1)
                 .shadow(color: dotColor.opacity(shouldBlink && brightHalf ? 0.9 : 0), radius: 4)
         }
     }
 
     private var shouldBlink: Bool {
-        isSwitching || status.hasCriticalError || status.hasActivePrintJob
+        isSwitching || status.hasCriticalError || status.hasActivePrintJob || showsCompletion
     }
 
     private var dotColor: Color {
         if isSwitching { return .cyan }
         if status.hasCriticalError { return .red }
+        if showsCompletion { return .blue }
         // Green means an active print only.  A powered, idle printer is
         // reachable but waiting, so it gets yellow.  A configured printer
         // that is powered off (or has a stale IP) is black, never yellow.

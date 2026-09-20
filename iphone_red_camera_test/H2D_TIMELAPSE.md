@@ -26,20 +26,14 @@ và **Adafruit NeoPixel**, sau đó nạp qua USB. Firmware không sử dụng s
 
 ## Đấu cụm điều khiển vật lý
 
-- WS2812B: DIN vào **GPIO5** qua điện trở 330 ohm. Cả 8 LED hoạt động: 3 LED
-  đầu giữ màu trạng thái, 5 LED sau tăng dần theo tiến trình. Cấp 5V riêng cho
+- WS2812B: DIN vào **GPIO5** qua điện trở 330 ohm. Cả 8 LED hoạt động: 4 LED
+  đầu giữ màu trạng thái, 4 LED sau tăng dần theo tiến trình. Cấp 5V riêng cho
   dải LED và nối chung GND với ESP32.
 - Nút nhấn giữ: một chân vào **GPIO27**, chân còn lại vào GND.
 - Công tắc xoay 3 nấc: chân chung vào GND; tiếp điểm bên phải vào **GPIO25**,
   tiếp điểm bên trái vào **GPIO26**. Nấc giữa không nối chân nào.
-- Biến trở: hai chân ngoài vào 3V3 và GND, chân giữa vào **GPIO34**. Nếu xoay
-  theo chiều tăng mà âm lượng lại giảm, đổi chéo hai chân ngoài của biến trở.
-  Biến trở luôn hoạt động ở cả ba nấc -1, 0 và +1; nó chỉnh âm lượng hiệu ứng
-  trên iPhone, còn WS2812B được giữ cố định ở 95% để màu trạng thái ổn định.
-  Firmware lấy trung vị 15 mẫu ADC rồi kiểm tra thêm cửa sổ 21 lần đọc. Giá trị
-  nhiễu rộng sẽ bị bỏ qua và LED giữ mức hợp lệ gần nhất thay vì tắt toàn bộ.
-  Biến trở dùng toàn dải và có vùng hiệu chỉnh ở hai đầu: vặn hết trái là âm
-  lượng iPhone 0%; vặn hết phải là 100%, kể cả khi ADC không đạt đúng 0/4095.
+- Không dùng biến trở; **GPIO34 để trống**. Dải WS2812B dùng mức sáng cố định
+  tối đa 95% để màu ổn định và không còn bị giật do nhiễu ADC.
 - Buzzer chủ động 3 chân: chân **S vào GPIO33**, chân **+ vào nguồn đúng điện
   áp của module**, chân **- vào GND**. Buzzer báo lỗi của các máy không được
   iPhone chọn; nếu iPhone mất kết nối, ESP32 tự báo cả máy đang được chọn.
@@ -47,8 +41,8 @@ và **Adafruit NeoPixel**, sau đó nạp qua USB. Firmware không sử dụng s
 Nấc giữa là chế độ điều khiển bình thường: dải LED luôn bám trạng thái thật của
 máy in và iPhone (vàng khi chờ/chuẩn bị, xanh lá theo tiến trình khi đang in,
 xanh biển lúc chụp và đỏ khi dừng/lỗi). Nấc phải sáng đỏ tối đa đúng 1 giây rồi kích hoạt
-timelapse; năm LED hiệu ứng tăng sáng mượt lần lượt theo tiến trình xanh.
-Firmware lọc rung công tắc 80 ms; app gom các nấc trung gian trong 180 ms và
+timelapse; bốn LED hiệu ứng tăng sáng mượt lần lượt theo tiến trình xanh.
+Firmware lọc rung công tắc 140 ms; app gom các nấc trung gian trong 400 ms và
 không xử lý lại gói MODE/HOLD trùng, tránh bật/tắt camera liên tục làm lag hoặc
 nghẽn kết nối Bluetooth.
 Nấc trái bật đèn flash iPhone liên tục và giữ dải LED màu vàng. Giữ nút GPIO27
@@ -56,8 +50,8 @@ Nấc trái bật đèn flash iPhone liên tục và giữ dải LED màu vàng.
 giữ vàng liên tục. Khi bất kỳ máy in nào có lỗi nghiêm trọng, cả 8 LED nhấp
 nháy đỏ nhanh; đây là trạng thái duy nhất làm dải LED chớp.
 
-Trong dải 8 LED, ba LED đầu luôn sáng ổn định theo màu trạng thái hiện tại.
-Năm LED sau (số 4–8) tăng sáng lần lượt theo tiến trình xanh khi in. Chờ/chuẩn
+Trong dải 8 LED, bốn LED đầu luôn sáng ổn định theo màu trạng thái hiện tại.
+Bốn LED sau (số 5–8) tăng sáng lần lượt theo tiến trình xanh khi in. Chờ/chuẩn
 bị giữ vàng liên tục; đổi nhựa giữa bản in vẫn giữ tiến trình xanh.
 
 Ở nấc giữa, vẫn có thể bấm nút trên màn hình iPhone để bắt đầu/dừng timelapse

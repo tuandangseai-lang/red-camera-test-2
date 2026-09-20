@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.12.14
+// SE Bambu Timelapse Bridge for classic ESP32 v1.13.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -57,13 +57,12 @@ constexpr uint32_t FLEET_PROBE_PERIOD_MS = 900;
 constexpr uint32_t FLEET_PROBE_TIMEOUT_MS = 350;
 constexpr uint32_t FLEET_ONLINE_GRACE_MS = 6500;
 constexpr uint8_t FLEET_OFFLINE_FAILURES = 3;
-// Background MQTT is deliberately disabled on the classic ESP32. In v1.12.12
-// the scanner borrowed the primary client and disconnected the selected
-// printer every few seconds, which made both ESP32 and iPhone appear offline.
-// Never enable this unless monitoring moves to hardware with enough RAM for a
-// completely independent TLS session.
-constexpr uint32_t FLEET_MONITOR_DWELL_MS = 3000;
-constexpr bool FLEET_BACKGROUND_MQTT_ENABLED = false;
+// The two non-selected printers are sampled sequentially through independent
+// TLS clients. Only one short-lived fleet client is active at a time, so the
+// selected printer keeps its uninterrupted timelapse MQTT session.
+constexpr uint32_t FLEET_REFRESH_PERIOD_MS = 60000;
+constexpr uint32_t FLEET_MONITOR_DWELL_MS = 4500;
+constexpr uint32_t FLEET_MONITOR_RETRY_GAP_MS = 250;
 constexpr uint32_t PRINT_COMPLETE_BLUE_MS = 3UL * 60UL * 60UL * 1000UL;
 constexpr uint32_t PRINT_COMPLETE_PULSE_MS = 4000;
 constexpr uint32_t STATUS_PERIOD_MS = 2000;
@@ -77,51 +76,35 @@ constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint32_t CONFIG_NETWORK_QUIET_MS = 8000;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
-// Seven WS2812B packages are active: pixels 0...2 hold the steady state colour
-// and pixels 3...6 show the same colour with the configured animation/progress.
+// Eight WS2812B packages are active: pixels 0...3 hold the steady state colour
+// and pixels 4...7 show the same colour with the configured animation/progress.
 // DATA -> GPIO5 through 330 ohms; 5V/GND must share GND with the ESP32.
 constexpr uint8_t LED_STRIP_PIN = 5;
-constexpr uint16_t LED_STATUS_COUNT = 3;
+constexpr uint16_t LED_STATUS_COUNT = 4;
 constexpr uint16_t LED_ANIMATED_COUNT = 4;
 constexpr uint16_t LED_ACTIVE_COUNT = LED_STATUS_COUNT + LED_ANIMATED_COUNT;
-// The installed strip contains ten packages, but only the first seven are in
-// use. Keep the final three in each transmitted frame so they are actively
+// The installed strip contains ten packages, but only the first eight are in
+// use. Keep the final two in each transmitted frame so they are actively
 // cleared instead of retaining a colour from an earlier firmware build.
 constexpr uint16_t LED_PHYSICAL_COUNT = 10;
 // Controls use INPUT_PULLUP: each button/switch contact closes to GND.
 constexpr uint8_t HOLD_BUTTON_PIN = 27;
 constexpr uint8_t MODE_TIMELAPSE_PIN = 25;
 constexpr uint8_t MODE_TORCH_PIN = 26;
-// GPIO34 is ADC1, so the potentiometer keeps working while Wi-Fi is active.
-constexpr uint8_t LEVEL_POT_PIN = 34;
 // Three-pin active buzzer module: S -> GPIO33, + -> module supply, - -> GND.
 // Use a common ground with ESP32. Set false for modules whose input is active LOW.
 constexpr uint8_t BUZZER_PIN = 33;
 constexpr bool BUZZER_ACTIVE_HIGH = true;
 constexpr uint32_t BUZZER_ON_MS = 180;
 constexpr uint32_t BUZZER_OFF_MS = 100;
-// Reserve a small dead zone at both physical ends. Real ESP32 ADCs and common
-// panel potentiometers rarely reach the ideal 0/4095 endpoints, so these
-// calibrated limits make fully counter-clockwise exactly 0% and fully
-// clockwise exactly 100%.
-constexpr uint16_t LEVEL_POT_RAW_MIN = 180;
-constexpr uint16_t LEVEL_POT_RAW_MAX = 3600;
-// A disconnected or incorrectly wired wiper commonly reads a hard zero. Keep
-// the LEDs visible at their safe boot default until the knob produces a real
-// ADC signal. Once detected, returning to zero still turns the LEDs fully off.
-constexpr uint16_t LEVEL_POT_DETECT_RAW = 80;
-constexpr uint8_t LEVEL_POT_SAMPLE_COUNT = 15;
-constexpr uint8_t LEVEL_POT_WINDOW_COUNT = 21;
-constexpr uint16_t LEVEL_POT_STABLE_SPAN = 180;
 constexpr uint8_t LED_MIN_BRIGHTNESS = 0;
 constexpr uint8_t LED_MAX_BRIGHTNESS = 255;
 constexpr uint8_t LED_FIXED_BRIGHTNESS_PERCENT = 95;
 constexpr uint8_t LED_IDLE_MAX_SCALE = 102;  // 40% of the normal LED level.
 constexpr uint32_t LED_REFRESH_MS = 35;
 constexpr uint32_t INPUT_REFRESH_MS = 20;
-constexpr uint32_t INPUT_DEBOUNCE_MS = 80;
-constexpr uint32_t LEVEL_STABLE_MS = 90;
-constexpr uint32_t LEVEL_NOTIFY_MS = 180;
+constexpr uint32_t INPUT_DEBOUNCE_MS = 140;
+constexpr uint32_t BUZZER_BEEP_MS = 150;
 }  // namespace Config
 
 struct BridgeSettings {
@@ -162,6 +145,7 @@ struct FleetRuntime {
   bool online = false;
   bool printErrorActive = false;
   bool criticalLatched = false;
+  bool physicalAlarmAcknowledged = false;
   uint32_t printErrorCode = 0;
   uint32_t lastMessageAt = 0;
   uint32_t lastReachableAt = 0;
@@ -192,6 +176,11 @@ uint32_t monitorLastAttemptAt[BACKGROUND_MONITOR_COUNT] = {0, 0};
 uint32_t monitorSequenceId[BACKGROUND_MONITOR_COUNT] = {0, 0};
 int8_t activeFleetMonitorSlot = -1;
 uint32_t activeFleetMonitorSince = 0;
+uint32_t lastFleetRefreshAt = 0;
+uint32_t nextFleetMonitorAttemptAt = 0;
+uint8_t fleetMonitorCursor = 0;
+volatile bool fleetRefreshRequested = true;
+bool fleetRefreshInProgress = false;
 uint32_t lastFleetProbeAt = 0;
 uint8_t nextFleetProbeIndex = 0;
 Adafruit_NeoPixel ledStrip(
@@ -218,6 +207,8 @@ bool printWasRunning = false;
 bool hmsAlertActive = false;
 bool printErrorActive = false;
 bool criticalAlarmLatched = false;
+bool physicalCriticalAcknowledged = false;
+volatile bool buzzerEnabled = true;
 bool lastReportedPrinterAlert = false;
 bool lastReportedPrinterAlertCritical = false;
 uint32_t printErrorCode = 0;
@@ -262,11 +253,10 @@ uint32_t captureFlashUntil = 0;
 uint32_t lastLedRefreshAt = 0;
 uint32_t modeEntryFlashUntil = 0;
 uint32_t printCompleteBlueUntil = 0;
+uint32_t buzzerBeepUntil = 0;
 uint32_t lastInputRefreshAt = 0;
-uint32_t lastLevelNotifyAt = 0;
 uint32_t modeCandidateSince = 0;
 uint32_t holdCandidateSince = 0;
-uint32_t levelCandidateSince = 0;
 uint32_t lastProgressTickAt = 0;
 volatile uint32_t lastConfigurationCommandAt = 0;
 int8_t hardwareMode = 0;  // -1 = torch, 0 = normal, +1 = timelapse.
@@ -274,14 +264,11 @@ int8_t modeCandidate = 0;
 bool hardwareHoldPressed = false;
 bool holdCandidate = false;
 float displayedPrintPercent = 0.0f;
-uint8_t hardwareLevelPercent = 100;
-uint8_t levelCandidate = 100;
-bool potentiometerDetected = false;
-uint16_t potReadingWindow[Config::LEVEL_POT_WINDOW_COUNT] = {};
-uint8_t potReadingWindowCount = 0;
-uint8_t potReadingWindowIndex = 0;
 
 void reportHardwareControls();
+void queueHardwareControl(const char *name, int value);
+void setBuzzerOutput(bool enabled);
+void requestBuzzerBeep(uint32_t durationMs = Config::BUZZER_BEEP_MS);
 
 void queuePhoneEvent(const String &event) {
   portENTER_CRITICAL(&eventMux);
@@ -368,6 +355,10 @@ bool fleetRuntimeCritical(const FleetRuntime &runtime) {
   return !isStoppedPrintState(runtime.state) && runtime.criticalLatched;
 }
 
+bool fleetRuntimePhysicalCritical(const FleetRuntime &runtime) {
+  return fleetRuntimeCritical(runtime) && !runtime.physicalAlarmAcknowledged;
+}
+
 void reportFleetStatus(uint8_t index, bool force = false) {
   if (index >= FLEET_PRINTER_COUNT) return;
   FleetProfile &profile = fleetProfiles[index];
@@ -422,6 +413,7 @@ void syncSelectedFleetRuntime(bool forceReport = false) {
     runtime.printErrorActive = printErrorActive;
     runtime.printErrorCode = printErrorCode;
     runtime.criticalLatched = criticalAlarmLatched;
+    runtime.physicalAlarmAcknowledged = physicalCriticalAcknowledged;
     runtime.lastMessageAt = lastMqttMessageAt;
   }
   reportFleetStatus(selectedFleetIndex, forceReport);
@@ -437,10 +429,37 @@ bool hasAnyFleetCriticalError() {
   return false;
 }
 
+bool hasAnyFleetPhysicalCriticalError() {
+  if (criticalAlarmLatched && !isStoppedPrintState(printState) &&
+      !physicalCriticalAcknowledged) {
+    return true;
+  }
+  for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
+    // The selected printer is represented by the primary runtime above.
+    if (static_cast<int8_t>(i) == selectedFleetIndex) continue;
+    if (fleetProfiles[i].complete() &&
+        fleetRuntimePhysicalCritical(fleetRuntimes[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool hasBackgroundFleetCriticalError() {
   for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
     if (static_cast<int8_t>(i) == selectedFleetIndex) continue;
     if (fleetProfiles[i].complete() && fleetRuntimeCritical(fleetRuntimes[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool hasBackgroundFleetPhysicalCriticalError() {
+  for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
+    if (static_cast<int8_t>(i) == selectedFleetIndex) continue;
+    if (fleetProfiles[i].complete() &&
+        fleetRuntimePhysicalCritical(fleetRuntimes[i])) {
       return true;
     }
   }
@@ -641,6 +660,7 @@ void loadSettings() {
   settings.printerIp = preferences.getString("printerIp", "");
   settings.printerSerial = preferences.getString("serial", "");
   settings.accessCode = preferences.getString("access", "");
+  buzzerEnabled = preferences.getBool("buzzer", true);
   pendingSettings = settings;
   loadFleetProfiles();
   selectedFleetIndex = fleetIndexForSerial(settings.printerSerial);
@@ -1291,6 +1311,7 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
                         int newPercent, int newStage, int newRemainingMinutes,
                         const String &jobToken) {
   const String previousState = printState;
+  const bool wasActiveSession = isActivePrintState(previousState);
   const bool wasRunning = printWasRunning;
   if (!newState.isEmpty()) {
     printState = newState;
@@ -1304,7 +1325,10 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
 
   // A real preparation/running state means a new print command has arrived,
   // so the previous job's three-hour blue completion indication ends now.
-  if (isActivePrintState(printState)) printCompleteBlueUntil = 0;
+  if (isActivePrintState(printState)) {
+    printCompleteBlueUntil = 0;
+    if (!wasActiveSession) requestBuzzerBeep();
+  }
 
   // PREPARE may already report layer 0/1 while the bed is heating. Baseline
   // only on the first real RUNNING packet, otherwise layer 1 is photographed
@@ -1342,6 +1366,7 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
     finishSent = true;
     printWasRunning = false;
     printCompleteBlueUntil = millis() + Config::PRINT_COMPLETE_BLUE_MS;
+    requestBuzzerBeep(240);
     Serial.printf("[PRINT] finished at layer %d\n", finalLayer);
   } else if (printState == "FAILED" || printState == "ERROR" ||
              printState == "IDLE" || printState == "STOP" ||
@@ -1356,6 +1381,16 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
 
 void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   lastMqttMessageAt = millis();
+  const String previousStateForAlarm = printState;
+  const uint32_t previousPrintError = printErrorCode;
+  const auto selectedAlarmAlreadyAcknowledged = [&](uint32_t code) {
+    if (selectedFleetIndex < 0 || selectedFleetIndex >= FLEET_PRINTER_COUNT) {
+      return physicalCriticalAcknowledged;
+    }
+    const FleetRuntime &cached = fleetRuntimes[selectedFleetIndex];
+    return cached.physicalAlarmAcknowledged &&
+           (code == 0 || cached.printErrorCode == code);
+  };
   int layer = -1;
   int total = -1;
   int percent = -1;
@@ -1399,15 +1434,29 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
     if (incomingPrintError == 0) {
       // A zero error code is the printer's acknowledgement/clear signal.
       criticalAlarmLatched = false;
+      physicalCriticalAcknowledged = false;
     } else if (isActivePrintState(printState) || printState == "FAILED" ||
                printState == "ERROR") {
       // Ignore old error codes contained in an idle pushall packet, but once a
       // real job fault is seen keep the alarm latched until the printer clears it.
       criticalAlarmLatched = true;
+      if (incomingPrintError != previousPrintError &&
+          !selectedAlarmAlreadyAcknowledged(incomingPrintError)) {
+        physicalCriticalAcknowledged = false;
+      }
     }
   }
-  if (hasState && printState == "ERROR") criticalAlarmLatched = true;
-  if (hasState && isExplicitlyStoppedState()) criticalAlarmLatched = false;
+  if (hasState && printState == "ERROR") {
+    criticalAlarmLatched = true;
+    if (previousStateForAlarm != "ERROR" &&
+        !selectedAlarmAlreadyAcknowledged(printErrorCode)) {
+      physicalCriticalAcknowledged = false;
+    }
+  }
+  if (hasState && isExplicitlyStoppedState()) {
+    criticalAlarmLatched = false;
+    physicalCriticalAcknowledged = false;
+  }
   if (hasHms) hmsAlertActive = incomingHmsAlert;
   updateActiveMaterial(payload, length);
   updatePrinterTelemetry(payload, length);
@@ -1425,6 +1474,8 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
                                        unsigned int length) {
   if (profileIndex < 0 || profileIndex >= FLEET_PRINTER_COUNT) return;
   FleetRuntime &runtime = fleetRuntimes[profileIndex];
+  const String previousState = runtime.state;
+  const bool wasActiveSession = isActivePrintState(previousState);
   const bool wasCritical = runtime.criticalLatched;
   const uint32_t previousError = runtime.printErrorCode;
   String state;
@@ -1445,8 +1496,14 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
     state.trim();
     state.toUpperCase();
     runtime.state = state;
-    if (state == "ERROR") runtime.criticalLatched = true;
-    if (isStoppedPrintState(state)) runtime.criticalLatched = false;
+    if (state == "ERROR") {
+      runtime.criticalLatched = true;
+      if (previousState != "ERROR") runtime.physicalAlarmAcknowledged = false;
+    }
+    if (isStoppedPrintState(state)) {
+      runtime.criticalLatched = false;
+      runtime.physicalAlarmAcknowledged = false;
+    }
   }
   if (hasPercent) runtime.percent = constrain(percent, 0, 100);
   if (hasPrintError) {
@@ -1454,10 +1511,20 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
     runtime.printErrorActive = incomingError != 0;
     if (incomingError == 0) {
       runtime.criticalLatched = false;
+      runtime.physicalAlarmAcknowledged = false;
     } else if (isActivePrintState(runtime.state) || runtime.state == "FAILED" ||
                runtime.state == "ERROR") {
       runtime.criticalLatched = true;
+      if (incomingError != previousError) {
+        runtime.physicalAlarmAcknowledged = false;
+      }
     }
+  }
+  if (hasState && isActivePrintState(runtime.state) && !wasActiveSession) {
+    requestBuzzerBeep();
+  }
+  if (hasState && isCompletedPrintState(runtime.state) && wasActiveSession) {
+    requestBuzzerBeep(240);
   }
   if (wasCritical != runtime.criticalLatched ||
       (hasPrintError && incomingError != previousError)) {
@@ -1533,6 +1600,9 @@ void refreshFleetMonitorAssignments() {
   if (assignmentsChanged) {
     activeFleetMonitorSlot = -1;
     activeFleetMonitorSince = 0;
+    fleetRefreshInProgress = false;
+    fleetRefreshRequested = true;
+    fleetMonitorCursor = 0;
   }
 }
 
@@ -1552,6 +1622,50 @@ void disconnectFleetMonitors(bool markOffline = true) {
   }
   activeFleetMonitorSlot = -1;
   activeFleetMonitorSince = 0;
+}
+
+bool startFleetMonitor(uint8_t slot) {
+  if (slot >= BACKGROUND_MONITOR_COUNT) return false;
+  const int8_t profileIndex = monitorProfileIndex[slot];
+  if (profileIndex < 0 || profileIndex >= FLEET_PRINTER_COUNT) return false;
+  const FleetProfile &profile = fleetProfiles[profileIndex];
+  if (!profile.complete() || !fleetRuntimes[profileIndex].online) return false;
+
+  PubSubClient &client = fleetMqttForSlot(slot);
+  client.setServer(profile.printerIp.c_str(), Config::MQTT_PORT);
+  client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+  const uint64_t chip = ESP.getEfuseMac();
+  char clientId[40];
+  snprintf(clientId, sizeof(clientId), "SE-Fleet-%u-%08lX-%lu", slot,
+           static_cast<unsigned long>(chip & 0xFFFFFFFF),
+           static_cast<unsigned long>(++monitorSequenceId[slot]));
+  Serial.printf("[FLEET] sampling %s MQTT at %s\n", profile.kind.c_str(),
+                profile.printerIp.c_str());
+  if (!client.connect(clientId, "bblp", profile.accessCode.c_str())) {
+    Serial.printf("[FLEET] %s MQTT sample failed, state=%d, heap=%u\n",
+                  profile.kind.c_str(), client.state(), ESP.getFreeHeap());
+    client.disconnect();
+    client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+    return false;
+  }
+  if (!client.setBufferSize(Config::FLEET_MQTT_BUFFER_BYTES)) {
+    Serial.printf("[FLEET] %s cannot allocate %u-byte sample buffer\n",
+                  profile.kind.c_str(), Config::FLEET_MQTT_BUFFER_BYTES);
+    client.disconnect();
+    client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+    return false;
+  }
+  const String reportTopic = "device/" + profile.printerSerial + "/report";
+  if (!client.subscribe(reportTopic.c_str(), 0)) {
+    Serial.printf("[FLEET] %s sample subscribe failed\n", profile.kind.c_str());
+    client.disconnect();
+    client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+    return false;
+  }
+  activeFleetMonitorSlot = slot;
+  activeFleetMonitorSince = millis();
+  publishFleetStatusRequest(slot);
+  return true;
 }
 
 void markFleetReachable(uint8_t profileIndex, uint32_t now) {
@@ -1639,11 +1753,57 @@ void maintainFleetReachability() {
 
 void maintainFleetMonitors() {
   refreshFleetMonitorAssignments();
-  // Preserve one invariant: fleet monitoring must never disconnect, resize,
-  // retarget, or change the callback of `mqtt`, which belongs to the selected
-  // printer. Reachability continues in maintainFleetReachability().
-  if (!Config::FLEET_BACKGROUND_MQTT_ENABLED && activeFleetMonitorSlot >= 0) {
-    disconnectFleetMonitors(false);
+  const uint32_t now = millis();
+  // Fleet MQTT uses only fleetMqtt0/1. Never retarget or resize `mqtt`, which
+  // owns the selected printer and all timelapse layer transitions.
+  if (WiFi.status() != WL_CONNECTED || !mqttWasConnected ||
+      (lastConfigurationCommandAt != 0 &&
+       now - lastConfigurationCommandAt < Config::CONFIG_NETWORK_QUIET_MS)) {
+    if (activeFleetMonitorSlot >= 0) disconnectFleetMonitors(false);
+    fleetRefreshInProgress = false;
+    return;
+  }
+
+  if (activeFleetMonitorSlot >= 0) {
+    PubSubClient &client = fleetMqttForSlot(activeFleetMonitorSlot);
+    const bool sessionAlive = client.connected() && client.loop();
+    if (sessionAlive && now - activeFleetMonitorSince <
+                            Config::FLEET_MONITOR_DWELL_MS) {
+      return;
+    }
+    client.disconnect();
+    client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+    activeFleetMonitorSlot = -1;
+    activeFleetMonitorSince = 0;
+    ++fleetMonitorCursor;
+    nextFleetMonitorAttemptAt = now + Config::FLEET_MONITOR_RETRY_GAP_MS;
+  }
+
+  if (!fleetRefreshInProgress) {
+    if (!fleetRefreshRequested && lastFleetRefreshAt != 0 &&
+        now - lastFleetRefreshAt < Config::FLEET_REFRESH_PERIOD_MS) {
+      return;
+    }
+    fleetRefreshRequested = false;
+    fleetRefreshInProgress = true;
+    fleetMonitorCursor = 0;
+    nextFleetMonitorAttemptAt = now;
+  }
+
+  if (fleetMonitorCursor >= BACKGROUND_MONITOR_COUNT) {
+    fleetRefreshInProgress = false;
+    lastFleetRefreshAt = now;
+    for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
+      reportFleetStatus(i, true);
+    }
+    return;
+  }
+  if (static_cast<int32_t>(nextFleetMonitorAttemptAt - now) > 0) return;
+
+  const uint8_t slot = fleetMonitorCursor;
+  if (!startFleetMonitor(slot)) {
+    ++fleetMonitorCursor;
+    nextFleetMonitorAttemptAt = millis() + Config::FLEET_MONITOR_RETRY_GAP_MS;
   }
 }
 
@@ -1843,7 +2003,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.12.14");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.13.0");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -1960,6 +2120,8 @@ void handlePhoneCommand(String command) {
         settings.printerSerial != profile.printerSerial ||
         settings.accessCode != profile.accessCode;
     selectedFleetIndex = index;
+    physicalCriticalAcknowledged =
+        fleetRuntimes[index].physicalAlarmAcknowledged;
     if (needsReconnect) {
       // Profiles already contain the printer credentials. Switch the primary
       // MQTT target directly instead of replaying Wi-Fi fields and waiting for
@@ -2024,6 +2186,17 @@ void handlePhoneCommand(String command) {
     // presentation timer is cleared.
     printCompleteBlueUntil = 0;
     queuePhoneEvent("H2D,COMPLETE_ACK");
+  } else if (head == "H2D_FLEET_REFRESH") {
+    fleetRefreshRequested = true;
+    for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
+      reportFleetStatus(i, true);
+    }
+    queuePhoneEvent("H2D,FLEET_REFRESH,QUEUED");
+  } else if (head == "H2D_BUZZER") {
+    buzzerEnabled = argument != "0";
+    preferences.putBool("buzzer", buzzerEnabled);
+    if (!buzzerEnabled) setBuzzerOutput(false);
+    queueHardwareControl("BUZZER", buzzerEnabled ? 1 : 0);
   } else if (head == "H2D_STATUS" || head == "APP_READY" || head == "PING") {
     sendCurrentStatus();
     // The command callback runs on NimBLE's host task. Defer publishStatus-
@@ -2099,77 +2272,14 @@ void queueHardwareControl(const char *name, int value) {
 void reportHardwareControls() {
   queueHardwareControl("MODE", hardwareMode);
   queueHardwareControl("HOLD", hardwareHoldPressed ? 1 : 0);
-  queueHardwareControl("LEVEL", hardwareLevelPercent);
+  queueHardwareControl("BUZZER", buzzerEnabled ? 1 : 0);
 }
 
 uint8_t fixedLedBrightness() {
-  // LED status must remain stable even when the mechanical potentiometer is
-  // noisy. The knob is now reserved for SE's iPhone sound effects only.
+  // The potentiometer has been removed. Every normal state uses a predictable
+  // fixed 95% ceiling so all eight packages have matching colour/brightness.
   return static_cast<uint16_t>(Config::LED_MAX_BRIGHTNESS) *
          Config::LED_FIXED_BRIGHTNESS_PERCENT / 100;
-}
-
-uint8_t levelForPotReading(float rawReading) {
-  if (rawReading <= Config::LEVEL_POT_RAW_MIN) return 0;
-  if (rawReading >= Config::LEVEL_POT_RAW_MAX) return 100;
-  const float calibrated =
-      (rawReading - Config::LEVEL_POT_RAW_MIN) * 100.0f /
-      (Config::LEVEL_POT_RAW_MAX - Config::LEVEL_POT_RAW_MIN);
-  return constrain(static_cast<int>(lroundf(calibrated)), 0, 100);
-}
-
-uint16_t readPotentiometerMedianSample() {
-  uint16_t samples[Config::LEVEL_POT_SAMPLE_COUNT];
-  for (uint8_t i = 0; i < Config::LEVEL_POT_SAMPLE_COUNT; ++i) {
-    samples[i] = analogRead(Config::LEVEL_POT_PIN);
-    delayMicroseconds(35);
-  }
-  // A median rejects the large one-sample spikes seen when Wi-Fi and the ADC
-  // are active together. It also prevents a slightly noisy wiper from making
-  // the iPhone volume and LED brightness jump back and forth.
-  for (uint8_t i = 1; i < Config::LEVEL_POT_SAMPLE_COUNT; ++i) {
-    const uint16_t value = samples[i];
-    int8_t j = i - 1;
-    while (j >= 0 && samples[j] > value) {
-      samples[j + 1] = samples[j];
-      --j;
-    }
-    samples[j + 1] = value;
-  }
-  return samples[Config::LEVEL_POT_SAMPLE_COUNT / 2];
-}
-
-bool acceptStablePotentiometerReading(uint16_t rawSample,
-                                      uint16_t &stableReading) {
-  potReadingWindow[potReadingWindowIndex] = rawSample;
-  potReadingWindowIndex =
-      (potReadingWindowIndex + 1) % Config::LEVEL_POT_WINDOW_COUNT;
-  if (potReadingWindowCount < Config::LEVEL_POT_WINDOW_COUNT) {
-    ++potReadingWindowCount;
-    return false;
-  }
-
-  uint16_t sorted[Config::LEVEL_POT_WINDOW_COUNT];
-  memcpy(sorted, potReadingWindow, sizeof(sorted));
-  for (uint8_t i = 1; i < Config::LEVEL_POT_WINDOW_COUNT; ++i) {
-    const uint16_t value = sorted[i];
-    int8_t j = i - 1;
-    while (j >= 0 && sorted[j] > value) {
-      sorted[j + 1] = sorted[j];
-      --j;
-    }
-    sorted[j + 1] = value;
-  }
-
-  // Ignore the three highest and three lowest readings. A stationary knob is
-  // accepted only when the remaining 15 readings agree. If its contact or
-  // wiring produces wide 0...4095 jumps, keep the last valid brightness
-  // instead of blacking out every normal LED state.
-  const uint16_t low = sorted[3];
-  const uint16_t high = sorted[Config::LEVEL_POT_WINDOW_COUNT - 4];
-  if (high - low > Config::LEVEL_POT_STABLE_SPAN) return false;
-  stableReading = sorted[Config::LEVEL_POT_WINDOW_COUNT / 2];
-  return true;
 }
 
 void updateHardwareInputs() {
@@ -2184,11 +2294,22 @@ void updateHardwareInputs() {
   } else if (hardwareMode != modeCandidate &&
              now - modeCandidateSince >= Config::INPUT_DEBOUNCE_MS) {
     hardwareMode = modeCandidate;
+    // Rotating to another position is the physical acknowledgement gesture.
+    // It clears this ESP32's completion light and silences every currently
+    // latched alarm without clearing the error shown by the iPhone/printer.
+    printCompleteBlueUntil = 0;
+    if (criticalAlarmLatched) physicalCriticalAcknowledged = true;
+    for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
+      if (fleetRuntimeCritical(fleetRuntimes[i])) {
+        fleetRuntimes[i].physicalAlarmAcknowledged = true;
+      }
+    }
     if (hardwareMode == 1) {
       // A short red acknowledgement makes the physical transition into
       // timelapse mode unambiguous before live printer colours take over.
       modeEntryFlashUntil = now + 1000;
     }
+    requestBuzzerBeep();
     queueHardwareControl("MODE", hardwareMode);
     Serial.printf("[CONTROL] rotary mode %d\n", hardwareMode);
   }
@@ -2205,35 +2326,6 @@ void updateHardwareInputs() {
                   hardwareHoldPressed ? "held" : "released");
   }
 
-  const uint16_t rawPot = readPotentiometerMedianSample();
-  uint16_t stablePot = 0;
-  if (!acceptStablePotentiometerReading(rawPot, stablePot)) return;
-  if (!potentiometerDetected) {
-    if (stablePot < Config::LEVEL_POT_DETECT_RAW) {
-      // Do not let an absent/stuck-at-ground potentiometer black out every
-      // status colour. hardwareLevelPercent remains at its visible 100% boot
-      // default and the iPhone also receives that safe value.
-      return;
-    }
-    potentiometerDetected = true;
-    Serial.printf("[CONTROL] potentiometer detected (ADC %u)\n", stablePot);
-  }
-  const uint8_t newLevel = levelForPotReading(stablePot);
-  if (newLevel != levelCandidate) {
-    levelCandidate = newLevel;
-    levelCandidateSince = now;
-  }
-  const int levelDelta = abs(static_cast<int>(levelCandidate) -
-                             static_cast<int>(hardwareLevelPercent));
-  if (levelDelta >= 2 && now - levelCandidateSince >= Config::LEVEL_STABLE_MS) {
-    hardwareLevelPercent = levelCandidate;
-    if (now - lastLevelNotifyAt >= Config::LEVEL_NOTIFY_MS) {
-      lastLevelNotifyAt = now;
-      queueHardwareControl("LEVEL", hardwareLevelPercent);
-      Serial.printf("[CONTROL] level %u%% (stable ADC %u)\n",
-                    hardwareLevelPercent, stablePot);
-    }
-  }
 }
 
 uint32_t scaledLedColor(uint8_t red, uint8_t green, uint8_t blue,
@@ -2272,18 +2364,29 @@ void setBuzzerOutput(bool enabled) {
                enabled == Config::BUZZER_ACTIVE_HIGH ? HIGH : LOW);
 }
 
+void requestBuzzerBeep(uint32_t durationMs) {
+  if (!buzzerEnabled) return;
+  buzzerBeepUntil = millis() + (durationMs < 40 ? 40 : durationMs);
+}
+
 void updateBuzzerAlarm() {
   // A selected printer uses the iPhone siren while BLE is present. Every
   // background-printer fault is owned by ESP32; if the phone disconnects,
   // ESP32 also takes over the selected printer so an error is never silent.
-  const bool shouldSound = hasBackgroundFleetCriticalError() ||
-                           (!phoneConnected && hasCriticalPrinterError());
-  if (!shouldSound) {
+  if (!buzzerEnabled) {
     setBuzzerOutput(false);
     return;
   }
-  const uint32_t period = Config::BUZZER_ON_MS + Config::BUZZER_OFF_MS;
-  setBuzzerOutput((millis() % period) < Config::BUZZER_ON_MS);
+  const bool shouldAlarm = hasBackgroundFleetPhysicalCriticalError() ||
+      (!phoneConnected && hasCriticalPrinterError() &&
+       !physicalCriticalAcknowledged);
+  const uint32_t now = millis();
+  if (shouldAlarm) {
+    const uint32_t period = Config::BUZZER_ON_MS + Config::BUZZER_OFF_MS;
+    setBuzzerOutput((now % period) < Config::BUZZER_ON_MS);
+    return;
+  }
+  setBuzzerOutput(static_cast<int32_t>(buzzerBeepUntil - now) > 0);
 }
 
 uint8_t breathingScale(uint32_t now) {
@@ -2343,11 +2446,11 @@ void updateLedStrip() {
   lastLedRefreshAt = now;
   ledStrip.clear();
 
-  const bool anyCriticalError = hasAnyFleetCriticalError();
+  const bool anyCriticalError = hasAnyFleetPhysicalCriticalError();
   if (anyCriticalError) {
     // Every printer fault overrides the physical strip immediately, selected
     // or background. The phone does not need to be open and no profile switch
-    // is required. Three leading LEDs stay red while the four effect LEDs
+    // is required. Four leading LEDs stay red while the four effect LEDs
     // flash rapidly until the printer itself clears its error.
     const bool alarmOn = (now % 260) < 150;
     fillStatusLeds(ledColor(255, 0, 0));
@@ -2355,7 +2458,7 @@ void updateLedStrip() {
                              : ledStrip.Color(0, 0, 0));
   } else if (printCompleteBlueUntil != 0 &&
              static_cast<int32_t>(printCompleteBlueUntil - now) > 0) {
-    // Completion is blue for three hours. The leading three stay blue while
+    // Completion is blue for three hours. The leading four stay blue while
     // the four effect LEDs fade smoothly in and out over a slow four-second
     // cycle instead of switching abruptly.
     fillStatusLeds(ledColor(0, 105, 255));
@@ -2364,7 +2467,7 @@ void updateLedStrip() {
         smoothPulseScale(now, Config::PRINT_COMPLETE_PULSE_MS, 0, 255)));
   } else if (static_cast<int32_t>(modeEntryFlashUntil - now) > 0) {
     // Entering timelapse is acknowledged at the fixed 95% LED power for one
-    // complete second, independently of the potentiometer.
+    // complete second at the fixed 95% output.
     fillLedStrip(ledColor(255, 0, 0));
   } else if (static_cast<int32_t>(captureFlashUntil - now) > 0) {
     // Same meaning as the blue border on iPhone: one layer photo was ordered.
@@ -2382,7 +2485,7 @@ void updateLedStrip() {
     // A print command owns green immediately, including heating, homing,
     // calibration, nozzle cleaning and filament changes. Yellow is reserved
     // for an idle/flash state only.
-    // Pixels 0...2 stay green. Pixels 3...6 are the four clockwise progress
+    // Pixels 0...3 stay green. Pixels 4...7 are the four clockwise progress
     // pixels that use the same green and match the iPhone border.
     fillStatusLeds(ledColor(0, 255, 58));
     const float filledPixels =
@@ -2437,20 +2540,13 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.12.14");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.13.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
-  pinMode(Config::LEVEL_POT_PIN, INPUT);
-  analogReadResolution(12);
-  analogSetPinAttenuation(Config::LEVEL_POT_PIN, ADC_11db);
   hardwareMode = modeCandidate = readHardwareModeRaw();
   hardwareHoldPressed = holdCandidate =
       digitalRead(Config::HOLD_BUTTON_PIN) == LOW;
-  // Start visible at full brightness. The potentiometer takes control only
-  // after a complete stable time window, so a noisy/floating ADC cannot make
-  // every normal LED state disappear immediately after boot.
-  hardwareLevelPercent = levelCandidate = 100;
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   loadSettings();

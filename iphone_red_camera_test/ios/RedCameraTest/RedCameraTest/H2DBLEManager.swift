@@ -66,9 +66,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var printerSwitchPhaseText = ""
     @Published private(set) var hardwareMode = 0
     @Published private(set) var hardwareHoldActive = false
-    @Published private(set) var hardwareLevelPercent = 70
+    @Published private(set) var hardwareBuzzerEnabled = true
     @Published private(set) var hardwareControlRevision = 0
-    @Published private(set) var hardwareLastControl = ""
     @Published private(set) var fleetStatuses: [BambuPrinterKind: BambuFleetStatus] = [:]
 
     private var expectedPrinterSerial = ""
@@ -565,8 +564,13 @@ final class H2DBLEManager: NSObject, ObservableObject {
         send("H2D_ACK,\(max(0, layer)),\(success ? 1 : 0)")
     }
 
-    func acknowledgePrintCompletion() {
-        send("H2D_COMPLETE_ACK")
+    func requestFleetRefresh() {
+        _ = send("H2D_FLEET_REFRESH")
+    }
+
+    func setHardwareBuzzerEnabled(_ enabled: Bool) {
+        hardwareBuzzerEnabled = enabled
+        _ = send("H2D_BUZZER,\(enabled ? 1 : 0)")
     }
 
     func suspendForBackground() {
@@ -870,20 +874,17 @@ final class H2DBLEManager: NSObject, ObservableObject {
                     hardwareHoldActive = value
                     changed = true
                 }
-            case "LEVEL":
-                let value = min(100, max(0, Int(fields[3]) ?? 70))
-                if value != hardwareLevelPercent {
-                    hardwareLevelPercent = value
-                    changed = true
-                }
+            case "BUZZER":
+                hardwareBuzzerEnabled = fields[3] != "0"
+                // This setting never changes camera/torch state.
+                return
             default:
                 return
             }
-            // ESP32 repeats MODE/HOLD/LEVEL during status synchronization.
+            // ESP32 repeats MODE/HOLD during status synchronization.
             // Do not restart the camera or torch for identical values; a forced
             // synchronization already runs when the view becomes active again.
             if changed {
-                hardwareLastControl = control
                 hardwareControlRevision &+= 1
             }
         case "PRINTER":
