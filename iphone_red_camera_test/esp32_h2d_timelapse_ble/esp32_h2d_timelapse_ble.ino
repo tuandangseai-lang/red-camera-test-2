@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.14.9
+// SE Bambu Timelapse Bridge for classic ESP32 v1.15.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -65,7 +65,10 @@ constexpr uint8_t FLEET_OFFLINE_FAILURES = 3;
 // The UI selection never changes: the scanner reports an active/error state
 // immediately, closes, and the selected printer resumes normal MQTT reads.
 constexpr uint32_t FLEET_REFRESH_PERIOD_MS = 120000;
-constexpr uint32_t FLEET_MONITOR_DWELL_MS = 1400;
+// H2D's full 22-KB pushall can arrive noticeably later than A1/P2S. Keep the
+// short-lived scanner open long enough to receive that packet, otherwise an
+// H2D fault could be missed until its profile was selected manually.
+constexpr uint32_t FLEET_MONITOR_DWELL_MS = 3000;
 constexpr uint32_t FLEET_MONITOR_RETRY_GAP_MS = 250;
 constexpr uint32_t PRINT_COMPLETE_BLUE_MS = 3UL * 60UL * 60UL * 1000UL;
 constexpr uint32_t PRINT_COMPLETE_PULSE_MS = 4000;
@@ -101,6 +104,10 @@ constexpr uint8_t BUZZER_PIN = 33;
 constexpr bool BUZZER_ACTIVE_HIGH = true;
 constexpr uint32_t BUZZER_ON_MS = 180;
 constexpr uint32_t BUZZER_OFF_MS = 100;
+// Three-pin active buzzer modules stop oscillating below a minimum input duty.
+// Map every non-zero app volume above that floor so "quiet" remains audible
+// instead of becoming indistinguishable from mute.
+constexpr uint8_t BUZZER_MIN_AUDIBLE_DUTY = 96;
 constexpr uint8_t LED_MIN_BRIGHTNESS = 0;
 constexpr uint8_t LED_MAX_BRIGHTNESS = 255;
 constexpr uint8_t LED_DEFAULT_BRIGHTNESS_PERCENT = 95;
@@ -112,7 +119,7 @@ constexpr uint32_t INPUT_DEBOUNCE_MS = 140;
 // than a momentary button. Accept a new position only after it has remained
 // continuously stable; hardwareMode then guarantees one event/beep per
 // accepted position without suppressing a quick deliberate 1 -> 2 -> 3 move.
-constexpr uint32_t MODE_INPUT_DEBOUNCE_MS = 650;
+constexpr uint32_t MODE_INPUT_DEBOUNCE_MS = 220;
 constexpr uint32_t BUZZER_BEEP_MS = 150;
 }  // namespace Config
 
@@ -2146,7 +2153,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.14.9");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.15.0");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2444,16 +2451,19 @@ void handlePhoneCommand(String command) {
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *server, NimBLEConnInfo &connection) override {
     phoneConnected = true;
-    server->updateConnParams(connection.getConnHandle(), 12, 24, 0, 180);
+    // A large Bambu TLS packet can occupy the Wi-Fi radio for more than the
+    // former 1.8-second BLE supervision timeout. Give coexistence six seconds
+    // so an error pushall cannot make the iPhone appear disconnected.
+    server->updateConnParams(connection.getConnHandle(), 12, 24, 0, 600);
     Serial.println("[BLE] iPhone connected");
   }
 
-  void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int) override {
+  void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override {
     phoneConnected = false;
     portENTER_CRITICAL(&eventMux);
     eventHead = eventTail = 0;
     portEXIT_CRITICAL(&eventMux);
-    Serial.println("[BLE] iPhone disconnected");
+    Serial.printf("[BLE] iPhone disconnected, reason=%d\n", reason);
     NimBLEDevice::startAdvertising();
   }
 };
@@ -2468,6 +2478,7 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
 
 void setupBle() {
   NimBLEDevice::init(Config::DEVICE_NAME);
+  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   NimBLEDevice::setMTU(185);
   NimBLEServer *server = NimBLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks());
@@ -2631,8 +2642,12 @@ void drawSettingsLevel() {
 }
 
 void setBuzzerOutput(bool enabled) {
-  const uint8_t activeDuty = static_cast<uint16_t>(
-      constrain(buzzerVolumePercent, 0, 100)) * 255 / 100;
+  const uint8_t volume = constrain(buzzerVolumePercent, 0, 100);
+  const uint8_t activeDuty = volume == 0
+      ? 0
+      : Config::BUZZER_MIN_AUDIBLE_DUTY +
+            static_cast<uint16_t>(255 - Config::BUZZER_MIN_AUDIBLE_DUTY) *
+                volume / 100;
   const uint8_t duty = Config::BUZZER_ACTIVE_HIGH
       ? (enabled ? activeDuty : 0)
       : (enabled ? 255 - activeDuty : 255);
@@ -2645,16 +2660,14 @@ void requestBuzzerBeep(uint32_t durationMs) {
 }
 
 void updateBuzzerAlarm() {
-  // A selected printer uses the iPhone siren while BLE is present. Every
-  // background-printer fault is owned by ESP32; if the phone disconnects,
-  // ESP32 also takes over the selected printer so an error is never silent.
+  // ESP32 is the independent safety alarm. Every unacknowledged printer fault
+  // sounds here even while the iPhone is connected; the phone may play its own
+  // siren too, but Bluetooth state can never silence the physical buzzer.
   if (!buzzerEnabled) {
     setBuzzerOutput(false);
     return;
   }
-  const bool shouldAlarm = hasBackgroundFleetPhysicalCriticalError() ||
-      (!phoneConnected && hasCriticalPrinterError() &&
-       !physicalCriticalAcknowledged);
+  const bool shouldAlarm = hasAnyFleetPhysicalCriticalError();
   const uint32_t now = millis();
   if (shouldAlarm) {
     const uint32_t period = Config::BUZZER_ON_MS + Config::BUZZER_OFF_MS;
@@ -2821,7 +2834,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.14.9");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

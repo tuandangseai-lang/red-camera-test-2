@@ -900,7 +900,11 @@ final class H2DBLEManager: NSObject, ObservableObject {
         mqttLossWorkItem = item
         // A short MQTT renegotiation must not make the Island flash green/yellow.
         // A real outage still becomes visible after this grace period.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0, execute: item)
+        // A complete two-printer background scan plus the selected-printer TLS
+        // reconnect can legitimately take several seconds on classic ESP32.
+        // Keep the last confirmed state long enough to avoid a false Bluetooth/
+        // printer outage while that intentional scan is in progress.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12.0, execute: item)
     }
 
     private func activateTransportIfReady(_ peripheral: CBPeripheral) {
