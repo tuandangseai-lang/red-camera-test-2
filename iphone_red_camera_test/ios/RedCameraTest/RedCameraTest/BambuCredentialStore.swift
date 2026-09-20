@@ -10,6 +10,10 @@ enum H2DAccessCodeStore {
         "lan-access-code-\(kind.rawValue.lowercased())"
     }
 
+    private static func account(forProfileID profileID: String) -> String {
+        "lan-access-code-profile-\(profileID.lowercased())"
+    }
+
     private static func recoveryKey(for kind: BambuPrinterKind) -> String {
         "SE.Bambu.\(kind.rawValue).lanAccessCode.recovery"
     }
@@ -67,6 +71,27 @@ enum H2DAccessCodeStore {
         return legacy
     }
 
+    static func load(for profile: BambuPrinterProfile) -> String {
+        let profileID = profile.id
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account(forProfileID: profileID),
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+           let data = result as? Data,
+           let value = String(data: data, encoding: .utf8) {
+            let normalized = normalize(value)
+            if !normalized.isEmpty { return normalized }
+        }
+        let migrated = load(for: profile.kind)
+        if !migrated.isEmpty { save(migrated, forProfileID: profileID) }
+        return migrated
+    }
+
     static func save(_ value: String, for kind: BambuPrinterKind = .h2d) {
         let trimmed = normalize(value)
         guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return }
@@ -86,6 +111,25 @@ enum H2DAccessCodeStore {
             if addStatus == errSecDuplicateItem {
                 _ = SecItemUpdate(identity as CFDictionary, update as CFDictionary)
             }
+        }
+    }
+
+    static func save(_ value: String, forProfileID profileID: String) {
+        let trimmed = normalize(value)
+        guard !trimmed.isEmpty, !profileID.isEmpty,
+              let data = trimmed.data(using: .utf8) else { return }
+        let identity: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account(forProfileID: profileID)
+        ]
+        let update: [String: Any] = [kSecValueData as String: data]
+        let status = SecItemUpdate(identity as CFDictionary, update as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = identity
+            item[kSecValueData as String] = data
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            _ = SecItemAdd(item as CFDictionary, nil)
         }
     }
 }

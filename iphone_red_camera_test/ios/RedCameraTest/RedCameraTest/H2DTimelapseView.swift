@@ -13,6 +13,8 @@ struct H2DTimelapseView: View {
     @AppStorage("SE.H2D.configurationSaved") private var configurationSaved = false
     @AppStorage("SE.H2D.setupCameraEnabled") private var setupCameraEnabled = false
     @AppStorage("SE.H2D.hardwareBuzzerEnabled") private var hardwareBuzzerEnabled = true
+    @AppStorage("SE.H2D.hardwareBuzzerVolume") private var hardwareBuzzerVolume = 1.0
+    @AppStorage("SE.H2D.hardwareLEDBrightness") private var hardwareLEDBrightness = 0.95
     @State private var wifiPassword = ""
     @State private var accessCode = ""
     @State private var showConfiguration = true
@@ -20,6 +22,8 @@ struct H2DTimelapseView: View {
     @State private var showStopOptions = false
     @State private var automaticConfigurationAttempted = false
     @State private var selectedPrinterKind: BambuPrinterKind = .h2d
+    @State private var selectedProfileID = ""
+    @State private var profileDisplayName = ""
     @State private var savedProfiles: [BambuPrinterProfile] = []
     @State private var pendingProfileSwitch = false
     @State private var showCriticalPrinterAlarm = false
@@ -32,8 +36,9 @@ struct H2DTimelapseView: View {
     @State private var lastAppliedHardwareHold: Bool?
     @State private var completionBlueActive = false
     @State private var completionDismissWorkItem: DispatchWorkItem?
-    @State private var acknowledgedFleetCompletions: Set<BambuPrinterKind> = []
-    @State private var pendingFleetCompletionAcknowledgements: Set<BambuPrinterKind> = []
+    @State private var acknowledgedFleetCompletions: Set<String> = []
+    @State private var pendingFleetCompletionAcknowledgements: Set<String> = []
+    @State private var hardwareLevelSendWorkItem: DispatchWorkItem?
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -43,7 +48,23 @@ struct H2DTimelapseView: View {
         return fromBridge == .unknown ? selectedPrinterKind : fromBridge
     }
 
-    private var printerName: String { detectedPrinterKind.rawValue }
+    private var printerName: String {
+        let trimmed = profileDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? detectedPrinterKind.rawValue : trimmed
+    }
+
+    private var selectedProfile: BambuPrinterProfile? {
+        savedProfiles.first { $0.id == selectedProfileID } ??
+            savedProfiles.first {
+                $0.serial.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ==
+                    printerSerial.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            }
+    }
+
+    private var selectedFleetStatus: BambuFleetStatus {
+        if let selectedProfile { return bluetooth.fleetStatus(for: selectedProfile) }
+        return bluetooth.fleetStatus(for: selectedPrinterKind)
+    }
 
     private let cinemaCyan = Color(red: 0.18, green: 0.88, blue: 0.96)
     private let cinemaAmber = Color(red: 0.96, green: 0.61, blue: 0.20)
@@ -100,6 +121,12 @@ struct H2DTimelapseView: View {
             .onChange(of: hardwareBuzzerEnabled) { _, enabled in
                 bluetooth.setHardwareBuzzerEnabled(enabled)
             }
+            .onChange(of: hardwareBuzzerVolume) { _, _ in
+                scheduleHardwareLevelSync()
+            }
+            .onChange(of: hardwareLEDBrightness) { _, _ in
+                scheduleHardwareLevelSync()
+            }
     }
 
     // Keep the modifier tree in small stages. Besides making the individual
@@ -133,7 +160,11 @@ struct H2DTimelapseView: View {
                 let detected = BambuPrinterKind.detect(serial: serial)
                 guard detected != .unknown, detected != selectedPrinterKind else { return }
                 selectedPrinterKind = detected
-                accessCode = H2DAccessCodeStore.load(for: detected)
+                if let profile = BambuPrinterProfileStore.profile(id: selectedProfileID) {
+                    accessCode = H2DAccessCodeStore.load(for: profile)
+                } else {
+                    accessCode = H2DAccessCodeStore.load(for: detected)
+                }
             }
             .onChange(of: bluetooth.hasBridgeError) { _, hasError in
                 // A bridge/configuration failure means the saved values need to be
@@ -182,6 +213,9 @@ struct H2DTimelapseView: View {
             }
             .onChange(of: bluetooth.fleetStatuses) { _, statuses in
                 updateFleetCompletionPresentations(statuses)
+            }
+            .onChange(of: bluetooth.profileFleetStatuses) { _, _ in
+                updateProfileFleetCompletionPresentations()
             }
     }
 
@@ -240,8 +274,18 @@ struct H2DTimelapseView: View {
         .onAppear {
             timelapse.setViewActive(true)
             savedProfiles = BambuPrinterProfileStore.load()
-            let storedKind = BambuPrinterKind.detect(serial: printerSerial)
-            if storedKind != .unknown { selectedPrinterKind = storedKind }
+            if let activeProfile = savedProfiles.first(where: {
+                $0.serial.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ==
+                    printerSerial.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            }) {
+                selectedProfileID = activeProfile.id
+                selectedPrinterKind = activeProfile.kind
+                profileDisplayName = activeProfile.displayName
+                accessCode = H2DAccessCodeStore.load(for: activeProfile)
+            } else {
+                let storedKind = BambuPrinterKind.detect(serial: printerSerial)
+                if storedKind != .unknown { selectedPrinterKind = storedKind }
+            }
             if accessCode.isEmpty {
                 accessCode = H2DAccessCodeStore.load(for: selectedPrinterKind)
             }
@@ -279,6 +323,8 @@ struct H2DTimelapseView: View {
                 attemptAutomaticConfigurationIfNeeded()
                 syncFleetWhenPossible()
                 bluetooth.setHardwareBuzzerEnabled(hardwareBuzzerEnabled)
+                bluetooth.setHardwareBuzzerVolume(Int((hardwareBuzzerVolume * 100).rounded()))
+                bluetooth.setHardwareLEDBrightness(Int((hardwareLEDBrightness * 100).rounded()))
                 bluetooth.requestFleetRefresh()
                 synchronizePrinterAlarm()
             }
@@ -323,6 +369,14 @@ struct H2DTimelapseView: View {
         if timelapse.isCapturing { return .capturing }
         if !bluetooth.isH2DReady { return .connecting }
         if completionBlueActive { return .completed }
+        // The selected profile is also refreshed by the independent fleet
+        // watcher. Use that fresh signal immediately when the primary detail
+        // packet is late; this prevents an actively printing H2D from staying
+        // yellow until the user taps another profile and comes back.
+        if selectedFleetStatus.hasActivePrintJob {
+            return selectedFleetStatus.printState.uppercased() == "RUNNING"
+                ? .printing : .preparing
+        }
         switch bluetooth.h2dPrintState.uppercased() {
         // A failed/cancelled job without a real printer alarm is a deliberate
         // stop: show the red breathing state without starting the siren.
@@ -439,6 +493,9 @@ struct H2DTimelapseView: View {
         if bluetooth.h2dPrintPercent > 0 {
             return Double(bluetooth.h2dPrintPercent) / 100.0
         }
+        if selectedFleetStatus.printPercent > 0 {
+            return Double(selectedFleetStatus.printPercent) / 100.0
+        }
         if bluetooth.h2dTotalLayers > 0 {
             return Double(bluetooth.h2dCurrentLayer) / Double(max(1, bluetooth.h2dTotalLayers))
         }
@@ -446,8 +503,9 @@ struct H2DTimelapseView: View {
     }
 
     private var isLayerPrintingOrChangingFilament: Bool {
-        bluetooth.h2dPrintState.uppercased() == "RUNNING" &&
-            (bluetooth.isActuallyPrinting || bluetooth.h2dCurrentLayer > 0)
+        (bluetooth.h2dPrintState.uppercased() == "RUNNING" &&
+            (bluetooth.isActuallyPrinting || bluetooth.h2dCurrentLayer > 0)) ||
+            selectedFleetStatus.hasActivePrintJob
     }
 
     private func updateCompletionPresentation(for state: String) {
@@ -480,27 +538,44 @@ struct H2DTimelapseView: View {
     private func updateFleetCompletionPresentations(
         _ statuses: [BambuPrinterKind: BambuFleetStatus]
     ) {
-        for kind in [BambuPrinterKind.a1, .h2d, .p2s] {
-            guard let status = statuses[kind] else { continue }
+        for profile in savedProfiles {
+            guard let status = bluetooth.profileFleetStatuses[profile.id] ?? statuses[profile.kind] else { continue }
+            updateFleetCompletionPresentation(profile: profile, status: status)
+        }
+    }
+
+    private func updateProfileFleetCompletionPresentations() {
+        for profile in savedProfiles {
+            updateFleetCompletionPresentation(
+                profile: profile,
+                status: bluetooth.fleetStatus(for: profile)
+            )
+        }
+    }
+
+    private func updateFleetCompletionPresentation(
+        profile: BambuPrinterProfile,
+        status: BambuFleetStatus
+    ) {
+            let profileID = profile.id
             let state = status.printState.uppercased()
             let completed = ["FINISH", "COMPLETE", "COMPLETED"].contains(state)
             if status.hasActivePrintJob {
-                acknowledgedFleetCompletions.remove(kind)
-                pendingFleetCompletionAcknowledgements.remove(kind)
-                continue
+                acknowledgedFleetCompletions.remove(profileID)
+                pendingFleetCompletionAcknowledgements.remove(profileID)
+                return
             }
             guard completed,
-                  !acknowledgedFleetCompletions.contains(kind),
-                  !pendingFleetCompletionAcknowledgements.contains(kind) else { continue }
-            pendingFleetCompletionAcknowledgements.insert(kind)
+                  !acknowledgedFleetCompletions.contains(profileID),
+                  !pendingFleetCompletionAcknowledgements.contains(profileID) else { return }
+            pendingFleetCompletionAcknowledgements.insert(profileID)
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
-                guard pendingFleetCompletionAcknowledgements.contains(kind) else { return }
-                pendingFleetCompletionAcknowledgements.remove(kind)
-                let current = bluetooth.fleetStatus(for: kind).printState.uppercased()
+                guard pendingFleetCompletionAcknowledgements.contains(profileID) else { return }
+                pendingFleetCompletionAcknowledgements.remove(profileID)
+                let current = bluetooth.fleetStatus(for: profile).printState.uppercased()
                 guard ["FINISH", "COMPLETE", "COMPLETED"].contains(current) else { return }
-                acknowledgedFleetCompletions.insert(kind)
+                acknowledgedFleetCompletions.insert(profileID)
             }
-        }
     }
 
     private var setupView: some View {
@@ -668,7 +743,6 @@ struct H2DTimelapseView: View {
                             ZStack {
                                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                                     .stroke(cinemaCyan.opacity(0.36), lineWidth: 1)
-                                CinemaViewfinderOverlay(tint: cinemaCyan)
                                 if !timelapse.isPreviewRunning {
                                     VStack(spacing: 9) {
                                         ProgressView()
@@ -914,6 +988,21 @@ struct H2DTimelapseView: View {
             }
             .tint(cinemaGreen)
 
+            VStack(alignment: .leading, spacing: 10) {
+                hardwareLevelSlider(
+                    title: "Âm lượng loa ESP32",
+                    systemImage: "speaker.wave.2.fill",
+                    value: $hardwareBuzzerVolume
+                )
+                hardwareLevelSlider(
+                    title: "Độ sáng LED ESP32",
+                    systemImage: "sun.max.fill",
+                    value: $hardwareLEDBrightness
+                )
+            }
+            .padding(11)
+            .background(.black.opacity(0.24), in: RoundedRectangle(cornerRadius: 12))
+
             if bluetooth.isSwitchingPrinter {
                 printerProfileSwitchProgress
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -925,6 +1014,10 @@ struct H2DTimelapseView: View {
                     .foregroundStyle(.orange)
 
                 VStack(alignment: .leading, spacing: 12) {
+                    configurationLabel("Tên hiển thị")
+                    TextField("Ví dụ: Máy 1", text: $profileDisplayName)
+                        .textInputAutocapitalization(.words)
+
                     configurationLabel("Tên Wi-Fi", detail: "Mạng mà ESP32 sẽ kết nối")
                     TextField("Ví dụ: Khoá học cùng SE", text: $wifiSSID)
 
@@ -1015,41 +1108,59 @@ struct H2DTimelapseView: View {
     }
 
     private var printerProfileSelector: some View {
-        HStack(spacing: 8) {
-            ForEach([BambuPrinterKind.a1, .h2d, .p2s]) { kind in
-                let fleet = bluetooth.fleetStatus(for: kind)
-                Button {
-                    activateProfile(kind)
-                } label: {
-                    HStack(spacing: 5) {
-                        PrinterActivityDot(
-                            isConfigured: savedProfiles.contains(where: { $0.kind == kind }),
-                            status: fleet,
-                            isSwitching: bluetooth.isSwitchingPrinter && selectedPrinterKind == kind,
-                            showsCompletion: ["FINISH", "COMPLETE", "COMPLETED"]
-                                .contains(fleet.printState.uppercased()) &&
-                                !acknowledgedFleetCompletions.contains(kind)
-                        )
-                        Text(kind.rawValue)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(savedProfiles) { profile in
+                    let fleet = effectiveFleetStatus(for: profile)
+                    Button {
+                        activateProfile(profile)
+                    } label: {
+                        HStack(spacing: 5) {
+                            PrinterActivityDot(
+                                isConfigured: true,
+                                status: fleet,
+                                isSwitching: bluetooth.isSwitchingPrinter && selectedProfileID == profile.id,
+                                showsCompletion: ["FINISH", "COMPLETE", "COMPLETED"]
+                                    .contains(fleet.printState.uppercased()) &&
+                                    !acknowledgedFleetCompletions.contains(profile.id)
+                            )
+                            Text(profile.displayName)
+                                .lineLimit(1)
+                        }
+                        .font(.custom("Arial", size: 12).weight(.bold))
+                        .padding(.horizontal, 10)
+                        .frame(minWidth: 82, minHeight: 34)
                     }
-                    .font(.custom("Arial", size: 12).weight(.bold))
-                    .frame(maxWidth: .infinity)
+                    .buttonStyle(.borderedProminent)
+                    .tint(selectedProfileID == profile.id ? .blue : .gray.opacity(0.34))
+                    .accessibilityLabel(profileAccessibilityText(profile: profile, status: fleet))
+                    .disabled(bluetooth.isSwitchingPrinter && selectedProfileID == profile.id)
+                    .draggable(profile.id)
+                    .dropDestination(for: String.self) { identifiers, _ in
+                        guard let movingID = identifiers.first else { return false }
+                        savedProfiles = BambuPrinterProfileStore.reorder(
+                            movingID: movingID,
+                            before: profile.id
+                        )
+                        syncFleetWhenPossible()
+                        return true
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(selectedPrinterKind == kind ? .blue : .gray.opacity(0.34))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        // The blue selected fill is the only selection cue.
-                        // Do not add a second green outline around the active
-                        // profile; green is reserved for a printer that is
-                        // actually printing.
-                        .stroke(.clear, lineWidth: 0)
+
+                if savedProfiles.count < BambuPrinterProfileStore.maximumProfiles {
+                    Button {
+                        beginNewProfile()
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 14, weight: .black))
+                            .frame(width: 38, height: 34)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.gray.opacity(0.34))
+                    .accessibilityLabel("Thêm cấu hình máy in")
                 }
-                .accessibilityLabel(profileAccessibilityText(kind: kind, status: fleet))
-                // Keep the current target locked, but allow another tab to
-                // supersede an offline/slow switch without waiting 18 seconds.
-                .disabled(bluetooth.isSwitchingPrinter && selectedPrinterKind == kind)
             }
+            .padding(.vertical, 2)
         }
         .animation(.easeInOut(duration: 0.25), value: bluetooth.isSwitchingPrinter)
     }
@@ -1396,23 +1507,68 @@ struct H2DTimelapseView: View {
         }
     }
 
-    private func activateProfile(_ kind: BambuPrinterKind) {
-        selectedPrinterKind = kind
-        if let profile = BambuPrinterProfileStore.profile(for: kind) {
-            printerIP = profile.ip
-            printerSerial = profile.serial
-        } else {
-            printerIP = ""
-            printerSerial = ""
+    private func hardwareLevelSlider(
+        title: String,
+        systemImage: String,
+        value: Binding<Double>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Label(title, systemImage: systemImage)
+                Spacer()
+                Text("\(Int((value.wrappedValue * 100).rounded()))%")
+                    .monospacedDigit()
+            }
+            .font(.system(size: 11, weight: .bold, design: .rounded))
+            Slider(value: value, in: 0...1, step: 0.01)
+                .tint(cinemaCyan)
         }
-        bluetooth.prepareForPrinterProfile(kind, serial: printerSerial)
-        accessCode = H2DAccessCodeStore.load(for: kind)
+    }
+
+    private func scheduleHardwareLevelSync() {
+        hardwareLevelSendWorkItem?.cancel()
+        let workItem = DispatchWorkItem {
+            bluetooth.setHardwareBuzzerVolume(Int((hardwareBuzzerVolume * 100).rounded()))
+            bluetooth.setHardwareLEDBrightness(Int((hardwareLEDBrightness * 100).rounded()))
+        }
+        hardwareLevelSendWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
+    }
+
+    private func activateProfile(_ profile: BambuPrinterProfile) {
+        let changedProfile = selectedProfileID != profile.id
+        selectedProfileID = profile.id
+        selectedPrinterKind = profile.kind
+        profileDisplayName = profile.displayName
+        printerIP = profile.ip
+        printerSerial = profile.serial
+        bluetooth.prepareForPrinterProfile(
+            profile.kind,
+            serial: printerSerial,
+            profileID: profile.id
+        )
+        accessCode = H2DAccessCodeStore.load(for: profile)
         automaticConfigurationAttempted = false
         let complete = hasCompleteSelectedProfile
         configurationSaved = complete
         showConfiguration = !complete
         pendingProfileSwitch = complete
+        if changedProfile { bluetooth.requestHardwareBeep() }
         switchToSelectedProfileIfPossible()
+    }
+
+    private func beginNewProfile() {
+        guard savedProfiles.count < BambuPrinterProfileStore.maximumProfiles else { return }
+        selectedProfileID = UUID().uuidString
+        selectedPrinterKind = .unknown
+        profileDisplayName = "Máy \(savedProfiles.count + 1)"
+        printerIP = ""
+        printerSerial = ""
+        accessCode = ""
+        configurationSaved = false
+        automaticConfigurationAttempted = false
+        pendingProfileSwitch = false
+        showConfiguration = true
     }
 
     private func requestStopCapture() {
@@ -1427,18 +1583,30 @@ struct H2DTimelapseView: View {
     private func syncFleetWhenPossible() {
         guard configurationSaved, bluetooth.isH2DBridge,
               !bluetooth.isConfiguring, !bluetooth.isSwitchingPrinter else { return }
-        bluetooth.syncFleetProfiles(selectedKind: selectedPrinterKind)
+        bluetooth.syncFleetProfiles(selectedProfileID: selectedProfileID)
     }
 
     private func profileAccessibilityText(
-        kind: BambuPrinterKind,
+        profile: BambuPrinterProfile,
         status: BambuFleetStatus
     ) -> String {
-        let selection = selectedPrinterKind == kind ? "đang được chọn để chụp" : "không được chọn để chụp"
-        if status.hasCriticalError { return "\(kind.rawValue), có lỗi, \(selection)" }
-        if status.hasActivePrintJob { return "\(kind.rawValue), đang in \(status.printPercent) phần trăm, \(selection)" }
-        if status.isOnline { return "\(kind.rawValue), đang trực tuyến, \(selection)" }
-        return "\(kind.rawValue), chưa trực tuyến, \(selection)"
+        let selection = selectedProfileID == profile.id ? "đang được chọn để chụp" : "không được chọn để chụp"
+        if status.hasCriticalError { return "\(profile.displayName), có lỗi, \(selection)" }
+        if status.hasActivePrintJob { return "\(profile.displayName), đang in \(status.printPercent) phần trăm, \(selection)" }
+        if status.isOnline { return "\(profile.displayName), đang trực tuyến, \(selection)" }
+        return "\(profile.displayName), chưa trực tuyến, \(selection)"
+    }
+
+    private func effectiveFleetStatus(for profile: BambuPrinterProfile) -> BambuFleetStatus {
+        var status = bluetooth.fleetStatus(for: profile)
+        if profile.id == selectedProfileID && bluetooth.isPrintSessionActive {
+            status.isConfigured = true
+            status.isOnline = true
+            status.hasActivePrintJob = true
+            status.printState = bluetooth.h2dPrintState
+            status.printPercent = bluetooth.h2dPrintPercent
+        }
+        return status
     }
 
     private var hasCompleteSelectedProfile: Bool {
@@ -1456,12 +1624,8 @@ struct H2DTimelapseView: View {
         automaticConfigurationAttempted = true
         configurationSaved = true
         showConfiguration = false
-        bluetooth.selectStoredPrinterProfile(
-            selectedPrinterKind,
-            printerIP: printerIP,
-            printerSerial: printerSerial,
-            accessCode: accessCode
-        )
+        guard let profile = BambuPrinterProfileStore.profile(id: selectedProfileID) else { return }
+        bluetooth.selectStoredPrinterProfile(profile, accessCode: accessCode)
     }
 
     private func reconcileBridgeWithSelectedProfile() {
@@ -1473,7 +1637,11 @@ struct H2DTimelapseView: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .uppercased()
         guard !desired.isEmpty, !reported.isEmpty, desired != reported else { return }
-        bluetooth.prepareForPrinterProfile(selectedPrinterKind, serial: desired)
+        bluetooth.prepareForPrinterProfile(
+            selectedPrinterKind,
+            serial: desired,
+            profileID: selectedProfileID
+        )
         pendingProfileSwitch = true
         switchToSelectedProfileIfPossible()
     }
@@ -1626,10 +1794,19 @@ struct H2DTimelapseView: View {
         let kind = detected == .unknown ? selectedPrinterKind : detected
         guard kind != .unknown else { return }
         selectedPrinterKind = kind
-        BambuPrinterProfileStore.save(
-            BambuPrinterProfile(kind: kind, ip: printerIP, serial: printerSerial)
+        let profileID = selectedProfileID.isEmpty ? UUID().uuidString : selectedProfileID
+        let profile = BambuPrinterProfile(
+            profileID: profileID,
+            kind: kind,
+            ip: printerIP,
+            serial: printerSerial,
+            customName: profileDisplayName
         )
+        selectedProfileID = profileID
+        profileDisplayName = profile.displayName
+        BambuPrinterProfileStore.save(profile)
         H2DAccessCodeStore.save(accessCode, for: kind)
+        H2DAccessCodeStore.save(accessCode, forProfileID: profileID)
         savedProfiles = BambuPrinterProfileStore.load()
         syncFleetWhenPossible()
     }

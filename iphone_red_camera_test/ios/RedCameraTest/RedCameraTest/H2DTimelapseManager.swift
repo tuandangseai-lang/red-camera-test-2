@@ -536,7 +536,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         }
 
         if request.playsShutterSound, request.jobID != "TEST" {
-            // Play the supplied Sony double-shutter sample once per logical
+            // Play the supplied iPhone shutter sample once per logical
             // layer. Reading seven temporary candidate frames remains silent.
             DispatchQueue.main.async { [weak self] in self?.playCameraSound() }
         }
@@ -554,7 +554,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                 player = loaded
             } else {
                 guard let url = Bundle.main.url(
-                    forResource: "sony-nex-7-double-shutter",
+                    forResource: "iphone-screenshot-shutter",
                     withExtension: "mp3"
                 ) else {
                     AudioServicesPlaySystemSound(1108)

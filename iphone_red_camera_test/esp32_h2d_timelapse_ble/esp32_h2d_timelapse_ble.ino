@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.13.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.14.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -76,15 +76,15 @@ constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint32_t CONFIG_NETWORK_QUIET_MS = 8000;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
-// Eight WS2812B packages are active: pixels 0...3 hold the steady state colour
-// and pixels 4...7 show the same colour with the configured animation/progress.
+// Seven WS2812B packages are active: pixels 0...3 hold the steady state colour
+// and pixels 4...6 show the configured animation/progress.
 // DATA -> GPIO5 through 330 ohms; 5V/GND must share GND with the ESP32.
 constexpr uint8_t LED_STRIP_PIN = 5;
 constexpr uint16_t LED_STATUS_COUNT = 4;
-constexpr uint16_t LED_ANIMATED_COUNT = 4;
+constexpr uint16_t LED_ANIMATED_COUNT = 3;
 constexpr uint16_t LED_ACTIVE_COUNT = LED_STATUS_COUNT + LED_ANIMATED_COUNT;
-// The installed strip contains ten packages, but only the first eight are in
-// use. Keep the final two in each transmitted frame so they are actively
+// The installed strip contains ten packages, but only the first seven are in
+// use. Keep the final three in each transmitted frame so they are actively
 // cleared instead of retaining a colour from an earlier firmware build.
 constexpr uint16_t LED_PHYSICAL_COUNT = 10;
 // Controls use INPUT_PULLUP: each button/switch contact closes to GND.
@@ -99,7 +99,7 @@ constexpr uint32_t BUZZER_ON_MS = 180;
 constexpr uint32_t BUZZER_OFF_MS = 100;
 constexpr uint8_t LED_MIN_BRIGHTNESS = 0;
 constexpr uint8_t LED_MAX_BRIGHTNESS = 255;
-constexpr uint8_t LED_FIXED_BRIGHTNESS_PERCENT = 95;
+constexpr uint8_t LED_DEFAULT_BRIGHTNESS_PERCENT = 95;
 constexpr uint8_t LED_IDLE_MAX_SCALE = 102;  // 40% of the normal LED level.
 constexpr uint32_t LED_REFRESH_MS = 35;
 constexpr uint32_t INPUT_REFRESH_MS = 20;
@@ -122,8 +122,8 @@ struct BridgeSettings {
   }
 };
 
-constexpr uint8_t FLEET_PRINTER_COUNT = 3;
-constexpr uint8_t BACKGROUND_MONITOR_COUNT = 2;
+constexpr uint8_t FLEET_PRINTER_COUNT = 5;
+constexpr uint8_t BACKGROUND_MONITOR_COUNT = 4;
 
 struct FleetProfile {
   String kind;
@@ -165,15 +165,19 @@ WiFiClientSecure tlsClient;
 PubSubClient mqtt(tlsClient);
 WiFiClientSecure fleetTls0;
 WiFiClientSecure fleetTls1;
+WiFiClientSecure fleetTls2;
+WiFiClientSecure fleetTls3;
 WiFiClient fleetProbeClient;
 PubSubClient fleetMqtt0(fleetTls0);
 PubSubClient fleetMqtt1(fleetTls1);
+PubSubClient fleetMqtt2(fleetTls2);
+PubSubClient fleetMqtt3(fleetTls3);
 FleetProfile fleetProfiles[FLEET_PRINTER_COUNT];
 FleetRuntime fleetRuntimes[FLEET_PRINTER_COUNT];
 int8_t selectedFleetIndex = -1;
-int8_t monitorProfileIndex[BACKGROUND_MONITOR_COUNT] = {-1, -1};
-uint32_t monitorLastAttemptAt[BACKGROUND_MONITOR_COUNT] = {0, 0};
-uint32_t monitorSequenceId[BACKGROUND_MONITOR_COUNT] = {0, 0};
+int8_t monitorProfileIndex[BACKGROUND_MONITOR_COUNT] = {-1, -1, -1, -1};
+uint32_t monitorLastAttemptAt[BACKGROUND_MONITOR_COUNT] = {0, 0, 0, 0};
+uint32_t monitorSequenceId[BACKGROUND_MONITOR_COUNT] = {0, 0, 0, 0};
 int8_t activeFleetMonitorSlot = -1;
 uint32_t activeFleetMonitorSince = 0;
 uint32_t lastFleetRefreshAt = 0;
@@ -209,6 +213,8 @@ bool printErrorActive = false;
 bool criticalAlarmLatched = false;
 bool physicalCriticalAcknowledged = false;
 volatile bool buzzerEnabled = true;
+volatile uint8_t buzzerVolumePercent = 100;
+volatile uint8_t ledBrightnessPercent = Config::LED_DEFAULT_BRIGHTNESS_PERCENT;
 bool lastReportedPrinterAlert = false;
 bool lastReportedPrinterAlertCritical = false;
 uint32_t printErrorCode = 0;
@@ -254,6 +260,9 @@ uint32_t lastLedRefreshAt = 0;
 uint32_t modeEntryFlashUntil = 0;
 uint32_t printCompleteBlueUntil = 0;
 uint32_t buzzerBeepUntil = 0;
+uint32_t settingsPreviewUntil = 0;
+uint8_t settingsPreviewPercent = 0;
+uint8_t settingsPreviewType = 0;  // 1 = buzzer, 2 = LED brightness.
 uint32_t lastInputRefreshAt = 0;
 uint32_t modeCandidateSince = 0;
 uint32_t holdCandidateSince = 0;
@@ -332,6 +341,17 @@ int8_t fleetIndexForKind(String kind) {
 }
 
 int8_t fleetIndexForSerial(const String &serial) {
+  String normalized = serial;
+  normalized.trim();
+  normalized.toUpperCase();
+  for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
+    String candidate = fleetProfiles[i].printerSerial;
+    candidate.trim();
+    candidate.toUpperCase();
+    if (!normalized.isEmpty() && candidate == normalized) return i;
+  }
+  // Compatibility fallback for settings saved by firmware <= 1.13.0, where
+  // A1/H2D/P2S were hard-wired to slots 0/1/2.
   return fleetIndexForKind(printerModelFromSerial(serial));
 }
 
@@ -384,6 +404,13 @@ void reportFleetStatus(uint8_t index, bool force = false) {
                   (online ? runtime.state : "OFFLINE") + "," +
                   constrain(runtime.percent, 0, 100) + "," +
                   static_cast<unsigned long>(runtime.printErrorCode));
+  queuePhoneEvent(String("H2D,FLEET_SLOT,") + index + "," + kind + "," +
+                  (configured ? 1 : 0) + "," + (online ? 1 : 0) + "," +
+                  (active ? 1 : 0) + "," + (critical ? 1 : 0) + "," +
+                  (online ? runtime.state : "OFFLINE") + "," +
+                  constrain(runtime.percent, 0, 100) + "," +
+                  static_cast<unsigned long>(runtime.printErrorCode) + "," +
+                  safeEventField(profile.printerSerial));
   runtime.lastReportedConfigured = configured;
   runtime.lastReportedOnline = online;
   runtime.lastReportedActive = active;
@@ -607,7 +634,9 @@ String fleetPreferenceKey(uint8_t index, const char *suffix) {
 
 void loadFleetProfiles() {
   for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
-    fleetProfiles[i].kind = i == 0 ? "A1" : i == 1 ? "H2D" : "P2S";
+    const String legacyKind = i == 0 ? "A1" : i == 1 ? "H2D" : i == 2 ? "P2S" : "";
+    fleetProfiles[i].kind = preferences.getString(
+        fleetPreferenceKey(i, "kind").c_str(), legacyKind);
     fleetProfiles[i].printerIp =
         preferences.getString(fleetPreferenceKey(i, "ip").c_str(), "");
     fleetProfiles[i].printerSerial =
@@ -620,10 +649,13 @@ void loadFleetProfiles() {
 bool saveFleetProfile(uint8_t index, const FleetProfile &profile) {
   if (index >= FLEET_PRINTER_COUNT || !profile.complete()) return false;
   const bool changed = fleetProfiles[index].printerIp != profile.printerIp ||
+                       fleetProfiles[index].kind != profile.kind ||
                        fleetProfiles[index].printerSerial !=
                            profile.printerSerial ||
                        fleetProfiles[index].accessCode != profile.accessCode;
   const bool wrote =
+      preferences.putString(fleetPreferenceKey(index, "kind").c_str(),
+                            profile.kind) == profile.kind.length() &&
       preferences.putString(fleetPreferenceKey(index, "ip").c_str(),
                             profile.printerIp) == profile.printerIp.length() &&
       preferences.putString(fleetPreferenceKey(index, "ser").c_str(),
@@ -634,18 +666,17 @@ bool saveFleetProfile(uint8_t index, const FleetProfile &profile) {
   if (!wrote) return false;
   if (changed) fleetRuntimes[index] = FleetRuntime();
   fleetProfiles[index] = profile;
-  fleetProfiles[index].kind =
-      index == 0 ? "A1" : index == 1 ? "H2D" : "P2S";
   reportFleetStatus(index, true);
   return true;
 }
 
 void clearFleetProfile(uint8_t index) {
   if (index >= FLEET_PRINTER_COUNT) return;
+  preferences.remove(fleetPreferenceKey(index, "kind").c_str());
   preferences.remove(fleetPreferenceKey(index, "ip").c_str());
   preferences.remove(fleetPreferenceKey(index, "ser").c_str());
   preferences.remove(fleetPreferenceKey(index, "acc").c_str());
-  fleetProfiles[index].kind = index == 0 ? "A1" : index == 1 ? "H2D" : "P2S";
+  fleetProfiles[index].kind = "";
   fleetProfiles[index].printerIp = "";
   fleetProfiles[index].printerSerial = "";
   fleetProfiles[index].accessCode = "";
@@ -661,6 +692,9 @@ void loadSettings() {
   settings.printerSerial = preferences.getString("serial", "");
   settings.accessCode = preferences.getString("access", "");
   buzzerEnabled = preferences.getBool("buzzer", true);
+  buzzerVolumePercent = preferences.getUChar("buzzVol", 100);
+  ledBrightnessPercent = preferences.getUChar(
+      "ledLevel", Config::LED_DEFAULT_BRIGHTNESS_PERCENT);
   pendingSettings = settings;
   loadFleetProfiles();
   selectedFleetIndex = fleetIndexForSerial(settings.printerSerial);
@@ -1327,7 +1361,12 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
   // so the previous job's three-hour blue completion indication ends now.
   if (isActivePrintState(printState)) {
     printCompleteBlueUntil = 0;
-    if (!wasActiveSession) requestBuzzerBeep();
+    // Beep only at a genuine new-job start. Transient RUNNING/PAUSE/PREPARE
+    // packets during a layer transition must never produce a standby beep.
+    if (!wasActiveSession && !wasRunning && currentLayer <= 1 &&
+        printPercent <= 1) {
+      requestBuzzerBeep();
+    }
   }
 
   // PREPARE may already report layer 0/1 while the bed is heating. Baseline
@@ -1467,7 +1506,12 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
 }
 
 PubSubClient &fleetMqttForSlot(uint8_t slot) {
-  return slot == 0 ? fleetMqtt0 : fleetMqtt1;
+  switch (slot) {
+    case 0: return fleetMqtt0;
+    case 1: return fleetMqtt1;
+    case 2: return fleetMqtt2;
+    default: return fleetMqtt3;
+  }
 }
 
 void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
@@ -1520,7 +1564,8 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
       }
     }
   }
-  if (hasState && isActivePrintState(runtime.state) && !wasActiveSession) {
+  if (hasState && isActivePrintState(runtime.state) && !wasActiveSession &&
+      runtime.percent <= 1) {
     requestBuzzerBeep();
   }
   if (hasState && isCompletedPrintState(runtime.state) && wasActiveSession) {
@@ -1552,6 +1597,14 @@ void onFleetMqtt1(char *, uint8_t *payload, unsigned int length) {
   processFleetMqttMessage(1, payload, length);
 }
 
+void onFleetMqtt2(char *, uint8_t *payload, unsigned int length) {
+  processFleetMqttMessage(2, payload, length);
+}
+
+void onFleetMqtt3(char *, uint8_t *payload, unsigned int length) {
+  processFleetMqttMessage(3, payload, length);
+}
+
 void publishFleetStatusRequest(uint8_t slot) {
   if (slot >= BACKGROUND_MONITOR_COUNT) return;
   const int8_t profileIndex = monitorProfileIndex[slot];
@@ -1568,7 +1621,7 @@ void publishFleetStatusRequest(uint8_t slot) {
 }
 
 void refreshFleetMonitorAssignments() {
-  int8_t desired[BACKGROUND_MONITOR_COUNT] = {-1, -1};
+  int8_t desired[BACKGROUND_MONITOR_COUNT] = {-1, -1, -1, -1};
   uint8_t count = 0;
   bool assignmentsChanged = false;
   for (uint8_t i = 0; i < FLEET_PRINTER_COUNT && count < BACKGROUND_MONITOR_COUNT;
@@ -2003,7 +2056,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.13.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.14.0");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2043,7 +2096,9 @@ void handlePhoneCommand(String command) {
   if (head == "H2D_WIFI_SSID" || head == "H2D_WIFI_PASS" ||
       head == "H2D_IP" || head == "H2D_SERIAL" || head == "H2D_CODE" ||
       head == "H2D_SAVE" || head == "H2D_PROFILE" ||
-      head == "H2D_PROFILE_CLEAR" || head == "H2D_SELECT") {
+      head == "H2D_PROFILE_CLEAR" || head == "H2D_SELECT" ||
+      head == "H2D_PROFILE_SLOT" || head == "H2D_PROFILE_SLOT_CLEAR" ||
+      head == "H2D_SELECT_SLOT") {
     lastConfigurationCommandAt = millis();
   }
 
@@ -2074,6 +2129,71 @@ void handlePhoneCommand(String command) {
       networkResetPending = true;
     } else {
       queuePhoneEvent("H2D,ERROR,Cấu hình thiếu hoặc IP máy in chưa đúng");
+    }
+  } else if (head == "H2D_PROFILE_SLOT") {
+    const int first = argument.indexOf(',');
+    const int second = first < 0 ? -1 : argument.indexOf(',', first + 1);
+    const int third = second < 0 ? -1 : argument.indexOf(',', second + 1);
+    const int fourth = third < 0 ? -1 : argument.indexOf(',', third + 1);
+    if (first <= 0 || second <= first || third <= second || fourth <= third) {
+      queuePhoneEvent("H2D,ERROR,Hồ sơ theo vị trí không đúng định dạng");
+      return;
+    }
+    const int slot = argument.substring(0, first).toInt();
+    FleetProfile profile;
+    profile.kind = argument.substring(first + 1, second);
+    profile.kind.toUpperCase();
+    profile.printerIp = decodeBase64(argument.substring(second + 1, third));
+    profile.printerSerial = decodeBase64(argument.substring(third + 1, fourth));
+    profile.accessCode = decodeBase64(argument.substring(fourth + 1));
+    if (slot < 0 || slot >= FLEET_PRINTER_COUNT || !profile.complete() ||
+        !saveFleetProfile(slot, profile)) {
+      queuePhoneEvent("H2D,ERROR,Không lưu được hồ sơ máy in theo vị trí");
+      return;
+    }
+    fleetAssignmentsPending = true;
+    queuePhoneEvent(String("H2D,CFG_ACK,PROFILE_SLOT_") + slot);
+  } else if (head == "H2D_PROFILE_SLOT_CLEAR") {
+    const int slot = argument.toInt();
+    if (slot >= 0 && slot < FLEET_PRINTER_COUNT) {
+      clearFleetProfile(slot);
+      fleetAssignmentsPending = true;
+    }
+    queuePhoneEvent(String("H2D,CFG_ACK,PROFILE_SLOT_CLEAR_") + slot);
+  } else if (head == "H2D_SELECT_SLOT") {
+    const int8_t index = argument.toInt();
+    if (index < 0 || index >= FLEET_PRINTER_COUNT ||
+        !fleetProfiles[index].complete()) {
+      queuePhoneEvent("H2D,ERROR,Chưa có hồ sơ máy được chọn để chụp");
+      return;
+    }
+    const FleetProfile &profile = fleetProfiles[index];
+    const bool needsReconnect =
+        selectedFleetIndex != index || settings.printerIp != profile.printerIp ||
+        settings.printerSerial != profile.printerSerial ||
+        settings.accessCode != profile.accessCode;
+    selectedFleetIndex = index;
+    physicalCriticalAcknowledged = fleetRuntimes[index].physicalAlarmAcknowledged;
+    if (needsReconnect) {
+      settings.printerIp = profile.printerIp;
+      settings.printerSerial = profile.printerSerial;
+      settings.accessCode = profile.accessCode;
+      pendingSettings = settings;
+      preferences.putString("printerIp", settings.printerIp);
+      preferences.putString("serial", settings.printerSerial);
+      preferences.putString("access", settings.accessCode);
+      resetPrinterRuntimeForProfileSwitch();
+      clearPhoneEventQueue();
+      queuePhoneEvent("H2D,CFG_ACK,SELECT");
+      if (primeSelectedPrintFromFleet(index)) reportPrintStatus(true);
+      keepWifiOnNetworkReset = true;
+      networkResetPending = true;
+      lastConfigurationCommandAt = 0;
+    } else {
+      fleetAssignmentsPending = true;
+      syncSelectedFleetRuntime(true);
+      queuePhoneEvent("H2D,CFG_ACK,SELECT");
+      lastConfigurationCommandAt = 0;
     }
   } else if (head == "H2D_PROFILE") {
     const int first = argument.indexOf(',');
@@ -2197,6 +2317,22 @@ void handlePhoneCommand(String command) {
     preferences.putBool("buzzer", buzzerEnabled);
     if (!buzzerEnabled) setBuzzerOutput(false);
     queueHardwareControl("BUZZER", buzzerEnabled ? 1 : 0);
+  } else if (head == "H2D_BUZZER_VOLUME") {
+    buzzerVolumePercent = constrain(argument.toInt(), 0, 100);
+    preferences.putUChar("buzzVol", buzzerVolumePercent);
+    settingsPreviewPercent = buzzerVolumePercent;
+    settingsPreviewType = 1;
+    settingsPreviewUntil = millis() + 3000;
+    queueHardwareControl("BUZZER_VOLUME", buzzerVolumePercent);
+  } else if (head == "H2D_LED_BRIGHTNESS") {
+    ledBrightnessPercent = constrain(argument.toInt(), 0, 100);
+    preferences.putUChar("ledLevel", ledBrightnessPercent);
+    settingsPreviewPercent = ledBrightnessPercent;
+    settingsPreviewType = 2;
+    settingsPreviewUntil = millis() + 3000;
+    queueHardwareControl("LED_BRIGHTNESS", ledBrightnessPercent);
+  } else if (head == "H2D_BEEP") {
+    requestBuzzerBeep();
   } else if (head == "H2D_STATUS" || head == "APP_READY" || head == "PING") {
     sendCurrentStatus();
     // The command callback runs on NimBLE's host task. Defer publishStatus-
@@ -2273,13 +2409,15 @@ void reportHardwareControls() {
   queueHardwareControl("MODE", hardwareMode);
   queueHardwareControl("HOLD", hardwareHoldPressed ? 1 : 0);
   queueHardwareControl("BUZZER", buzzerEnabled ? 1 : 0);
+  queueHardwareControl("BUZZER_VOLUME", buzzerVolumePercent);
+  queueHardwareControl("LED_BRIGHTNESS", ledBrightnessPercent);
 }
 
 uint8_t fixedLedBrightness() {
-  // The potentiometer has been removed. Every normal state uses a predictable
-  // fixed 95% ceiling so all eight packages have matching colour/brightness.
+  // The potentiometer has been removed. Brightness is controlled by the SE
+  // app and persisted on ESP32, so every mode uses the same predictable level.
   return static_cast<uint16_t>(Config::LED_MAX_BRIGHTNESS) *
-         Config::LED_FIXED_BRIGHTNESS_PERCENT / 100;
+         constrain(ledBrightnessPercent, 0, 100) / 100;
 }
 
 void updateHardwareInputs() {
@@ -2294,6 +2432,10 @@ void updateHardwareInputs() {
   } else if (hardwareMode != modeCandidate &&
              now - modeCandidateSince >= Config::INPUT_DEBOUNCE_MS) {
     hardwareMode = modeCandidate;
+    // A physical mode change dismisses the temporary volume/brightness meter
+    // immediately and returns the strip to printer/error/idle presentation.
+    settingsPreviewUntil = 0;
+    settingsPreviewType = 0;
     // Rotating to another position is the physical acknowledgement gesture.
     // It clears this ESP32's completion light and silences every currently
     // latched alarm without clearing the error shown by the iPhone/printer.
@@ -2359,13 +2501,36 @@ void fillAnimatedLeds(uint32_t color) {
   }
 }
 
+void drawSettingsLevel() {
+  const float filled = static_cast<float>(settingsPreviewPercent) *
+                       Config::LED_ACTIVE_COUNT / 100.0f;
+  const uint8_t red = settingsPreviewType == 1 ? 0 : 255;
+  const uint8_t green = settingsPreviewType == 1 ? 145 : 190;
+  const uint8_t blue = settingsPreviewType == 1 ? 255 : 0;
+  for (uint16_t i = 0; i < Config::LED_ACTIVE_COUNT; ++i) {
+    const float portion = constrain(filled - i, 0.0f, 1.0f);
+    if (portion <= 0.001f) continue;
+    const uint8_t scale = static_cast<uint8_t>(55.0f + portion * 200.0f);
+    // Setting feedback remains visible even while the requested normal LED
+    // brightness is near zero; it is only a three-second level meter.
+    ledStrip.setPixelColor(
+        i, ledStrip.Color(static_cast<uint16_t>(red) * scale / 255,
+                          static_cast<uint16_t>(green) * scale / 255,
+                          static_cast<uint16_t>(blue) * scale / 255));
+  }
+}
+
 void setBuzzerOutput(bool enabled) {
-  digitalWrite(Config::BUZZER_PIN,
-               enabled == Config::BUZZER_ACTIVE_HIGH ? HIGH : LOW);
+  const uint8_t activeDuty = static_cast<uint16_t>(
+      constrain(buzzerVolumePercent, 0, 100)) * 255 / 100;
+  const uint8_t duty = Config::BUZZER_ACTIVE_HIGH
+      ? (enabled ? activeDuty : 0)
+      : (enabled ? 255 - activeDuty : 255);
+  ledcWrite(Config::BUZZER_PIN, duty);
 }
 
 void requestBuzzerBeep(uint32_t durationMs) {
-  if (!buzzerEnabled) return;
+  if (!buzzerEnabled || buzzerVolumePercent == 0) return;
   buzzerBeepUntil = millis() + (durationMs < 40 ? 40 : durationMs);
 }
 
@@ -2456,6 +2621,11 @@ void updateLedStrip() {
     fillStatusLeds(ledColor(255, 0, 0));
     fillAnimatedLeds(alarmOn ? ledColor(255, 0, 0)
                              : ledStrip.Color(0, 0, 0));
+  } else if (settingsPreviewType != 0 &&
+             static_cast<int32_t>(settingsPreviewUntil - now) > 0) {
+    // App sliders temporarily become a seven-segment physical level meter.
+    // It expires after three seconds or instantly when the rotary mode moves.
+    drawSettingsLevel();
   } else if (printCompleteBlueUntil != 0 &&
              static_cast<int32_t>(printCompleteBlueUntil - now) > 0) {
     // Completion is blue for three hours. The leading four stay blue while
@@ -2485,8 +2655,9 @@ void updateLedStrip() {
     // A print command owns green immediately, including heating, homing,
     // calibration, nozzle cleaning and filament changes. Yellow is reserved
     // for an idle/flash state only.
-    // Pixels 0...3 stay green. Pixels 4...7 are the four clockwise progress
-    // pixels that use the same green and match the iPhone border.
+    // Pixels 0...3 stay green. Pixels 4...6 are the three progress pixels.
+    // Future progress is white; the active segment cross-fades continuously
+    // from white to green, and completed segments remain solid green.
     fillStatusLeds(ledColor(0, 255, 58));
     const float filledPixels =
         smoothLedProgress(now) * Config::LED_ANIMATED_COUNT / 100.0f;
@@ -2494,9 +2665,7 @@ void updateLedStrip() {
       const uint16_t pixel = Config::LED_STATUS_COUNT + i;
       const float portion = constrain(filledPixels - i, 0.0f, 1.0f);
       if (portion <= 0.001f) {
-        // Future progress pixels are truly off. Even a faint green base can
-        // look almost full through a diffuser and hides the completion edge.
-        ledStrip.setPixelColor(pixel, ledStrip.Color(0, 0, 0));
+        ledStrip.setPixelColor(pixel, ledColor(255, 255, 255));
         continue;
       }
       if (portion >= 0.999f) {
@@ -2505,12 +2674,13 @@ void updateLedStrip() {
         ledStrip.setPixelColor(pixel, ledColor(0, 255, 58));
         continue;
       }
-      // The active segment starts at true 0% and rises smoothly only as far
-      // as 50% brightness. It snaps to the full completed level at the exact
-      // segment boundary, while the following segment stays black.
+      // White fades out at the same rate that green fades in. The resulting
+      // cross-fade has no dark jump between percentage updates.
       const float eased = portion * portion * (3.0f - 2.0f * portion);
-      const uint8_t scale = static_cast<uint8_t>(eased * 128.0f);
-      ledStrip.setPixelColor(pixel, scaledLedColor(0, 255, 58, scale));
+      const uint8_t white = static_cast<uint8_t>((1.0f - eased) * 255.0f);
+      const uint8_t greenBlue = static_cast<uint8_t>(
+          (1.0f - eased) * 255.0f + eased * 58.0f);
+      ledStrip.setPixelColor(pixel, ledColor(white, 255, greenBlue));
     }
   } else if (hardwareMode == 0) {
     // Centre is the normal waiting position. Match the iPhone standby effect
@@ -2531,7 +2701,7 @@ void updateLedStrip() {
 
 void setup() {
   Serial.begin(115200);
-  pinMode(Config::BUZZER_PIN, OUTPUT);
+  ledcAttach(Config::BUZZER_PIN, 20000, 8);
   setBuzzerOutput(false);
   // Drive a known waiting colour before Wi-Fi/BLE/MQTT startup. This prevents
   // the strip from briefly retaining the green/red frame shown before reset.
@@ -2540,7 +2710,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.13.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.14.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
@@ -2555,6 +2725,8 @@ void setup() {
   tlsClient.setInsecure();  // Bambu uses a per-device/self-signed LAN certificate.
   fleetTls0.setInsecure();
   fleetTls1.setInsecure();
+  fleetTls2.setInsecure();
+  fleetTls3.setInsecure();
   // The library defaults to a 30-second TCP wait and a 120-second TLS wait.
   // An offline A1/P2S would therefore freeze BLE and leave the iPhone stuck on
   // “đang kết nối”. LAN printers should answer within these short bounds.
@@ -2562,8 +2734,12 @@ void setup() {
   tlsClient.setHandshakeTimeout(Config::MQTT_TLS_HANDSHAKE_TIMEOUT_SECONDS);
   fleetTls0.setConnectionTimeout(Config::FLEET_TCP_TIMEOUT_MS);
   fleetTls1.setConnectionTimeout(Config::FLEET_TCP_TIMEOUT_MS);
+  fleetTls2.setConnectionTimeout(Config::FLEET_TCP_TIMEOUT_MS);
+  fleetTls3.setConnectionTimeout(Config::FLEET_TCP_TIMEOUT_MS);
   fleetTls0.setHandshakeTimeout(Config::FLEET_TLS_HANDSHAKE_TIMEOUT_SECONDS);
   fleetTls1.setHandshakeTimeout(Config::FLEET_TLS_HANDSHAKE_TIMEOUT_SECONDS);
+  fleetTls2.setHandshakeTimeout(Config::FLEET_TLS_HANDSHAKE_TIMEOUT_SECONDS);
+  fleetTls3.setHandshakeTimeout(Config::FLEET_TLS_HANDSHAKE_TIMEOUT_SECONDS);
   mqtt.setServer(settings.printerIp.c_str(), Config::MQTT_PORT);
   mqtt.setCallback(onMqttMessage);
   mqtt.setKeepAlive(Config::MQTT_KEEPALIVE_SECONDS);
@@ -2571,12 +2747,20 @@ void setup() {
   mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
   fleetMqtt0.setCallback(onFleetMqtt0);
   fleetMqtt1.setCallback(onFleetMqtt1);
+  fleetMqtt2.setCallback(onFleetMqtt2);
+  fleetMqtt3.setCallback(onFleetMqtt3);
   fleetMqtt0.setKeepAlive(60);
   fleetMqtt1.setKeepAlive(60);
+  fleetMqtt2.setKeepAlive(60);
+  fleetMqtt3.setKeepAlive(60);
   fleetMqtt0.setSocketTimeout(2);
   fleetMqtt1.setSocketTimeout(2);
+  fleetMqtt2.setSocketTimeout(2);
+  fleetMqtt3.setSocketTimeout(2);
   fleetMqtt0.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
   fleetMqtt1.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+  fleetMqtt2.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+  fleetMqtt3.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
   refreshFleetMonitorAssignments();
   if (settings.complete()) {
     reportStatus("WIFI_CONNECTING");
