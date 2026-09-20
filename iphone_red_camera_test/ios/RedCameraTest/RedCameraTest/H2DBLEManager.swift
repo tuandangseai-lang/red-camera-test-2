@@ -115,7 +115,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         }
         // Firmware <= 1.13.0 reported only by model. That fallback is safe
         // when the user has a single profile of this model, but would mix two
-        // same-model printers and paint the wrong tab on a five-profile setup.
+        // same-model printers and paint the wrong tab on a multi-profile setup.
         if BambuPrinterProfileStore.load().filter({ $0.kind == profile.kind }).count == 1 {
             return fleetStatus(for: profile.kind)
         }
@@ -198,7 +198,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     var isStoppingPrint: Bool {
         switch h2dPrintState.uppercased() {
         case "STOP", "STOPPED", "CANCEL", "CANCELED", "CANCELLED", "FAILED":
-            return !hasActiveCriticalPrinterAlert
+            return !hasSelectedCriticalPrinterAlert
         default:
             return false
         }
@@ -226,6 +226,22 @@ final class H2DBLEManager: NSObject, ObservableObject {
         guard hasCriticalPrinterAlert else { return false }
         let failedState = ["FAILED", "ERROR"].contains(h2dPrintState.uppercased())
         return isPrintSessionActive || failedState
+    }
+
+    /// Critical state belonging to the profile currently shown by the main
+    /// screen. Background faults remain red on their own profile button and
+    /// are handled by ESP32's buzzer, but must not make the selected screen
+    /// alternate red/yellow while the two-minute fleet scan is running.
+    var hasSelectedCriticalPrinterAlert: Bool {
+        if selectedCriticalAlertIsActive { return true }
+        let selectedSerial = normalizeSerial(printerSerial)
+        if let selected = BambuPrinterProfileStore.load().first(where: {
+            normalizeSerial($0.serial) == selectedSerial
+        }) {
+            return fleetStatus(for: selected).hasCriticalError
+        }
+        let selected = printerKind
+        return selected != .unknown && fleetStatus(for: selected).hasCriticalError
     }
 
     var activeCriticalPrinterKind: BambuPrinterKind? {
@@ -877,7 +893,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.isH2DReady = false
-            if !self.hasActiveCriticalPrinterAlert {
+            if !self.hasSelectedCriticalPrinterAlert {
                 self.h2dBridgeStatus = "Mất dữ liệu \(self.printerDisplayName) • ESP32 đang tự kết nối lại"
             }
         }
@@ -1158,7 +1174,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 break
             }
             hasBridgeError = status == "BUFFER_ERROR" || status == "MQTT_AUTH_FAILED"
-            if !hasActiveCriticalPrinterAlert {
+            if !hasSelectedCriticalPrinterAlert {
                 h2dBridgeStatus = status == "BUFFER_ERROR"
                     ? "ESP32 thiếu bộ nhớ nhận gói \(printerDisplayName) • hãy khởi động lại"
                     : known[status] ?? fields.dropFirst(2).joined(separator: " • ")
@@ -1194,7 +1210,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 hasCriticalPrinterAlert = false
                 printerAlertText = ""
             }
-            if !hasActiveCriticalPrinterAlert {
+            if !hasSelectedCriticalPrinterAlert {
                 if isStoppingPrint {
                     h2dBridgeStatus = "\(printerDisplayName) đang dừng bản in"
                 } else if isPausedPrint {

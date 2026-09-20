@@ -362,7 +362,7 @@ struct H2DTimelapseView: View {
     }
 
     private var printerIslandState: PrinterIslandState {
-        if bluetooth.hasActiveCriticalPrinterAlert || visibleBridgeError { return .error }
+        if bluetooth.hasSelectedCriticalPrinterAlert || visibleBridgeError { return .error }
         if timelapse.isStopping || bluetooth.isStoppingPrint { return .stopping }
         if bluetooth.isPausedPrint { return .paused }
         if !bluetooth.isConnected { return .connecting }
@@ -404,7 +404,7 @@ struct H2DTimelapseView: View {
         case .paused: return "\(printerName) • ĐANG TẠM DỪNG"
         case .completed: return "\(printerName) • ĐÃ IN XONG"
         case .error:
-            if bluetooth.hasActiveCriticalPrinterAlert {
+            if bluetooth.hasSelectedCriticalPrinterAlert {
                 return "\(bluetooth.activeCriticalPrinterDisplayName) • CÓ LỖI"
             }
             return bluetooth.isConnected ? "\(printerName) • CÓ LỖI" : "ESP32 • MẤT KẾT NỐI"
@@ -920,7 +920,7 @@ struct H2DTimelapseView: View {
                 .padding(.top, 2)
             }
             if bluetooth.hasActivePrinterAlert &&
-                !bluetooth.hasActiveCriticalPrinterAlert &&
+                !bluetooth.hasSelectedCriticalPrinterAlert &&
                 !bluetooth.printerAlertText.isEmpty {
                 Label(bluetooth.printerAlertText, systemImage: "exclamationmark.triangle.fill")
                     .font(.custom("Arial", size: 11).weight(.semibold))
@@ -931,7 +931,7 @@ struct H2DTimelapseView: View {
     }
 
     private var bridgeAccentColor: Color {
-        if visibleBridgeError || bluetooth.hasActiveCriticalPrinterAlert { return .red }
+        if visibleBridgeError || bluetooth.hasSelectedCriticalPrinterAlert { return .red }
         if bluetooth.hasActivePrinterAlert { return cinemaAmber }
         return bluetooth.isH2DReady ? cinemaGreen : cinemaAmber
     }

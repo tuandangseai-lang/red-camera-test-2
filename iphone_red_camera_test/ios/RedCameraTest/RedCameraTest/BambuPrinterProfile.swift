@@ -52,7 +52,7 @@ struct BambuPrinterProfile: Codable, Equatable, Identifiable {
 }
 
 enum BambuPrinterProfileStore {
-    static let maximumProfiles = 5
+    static let maximumProfiles = 3
     private static let key = "SE.Bambu.printerProfiles.v2"
     private static let legacyKey = "SE.Bambu.printerProfiles.v1"
 

@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.14.6
+// SE Bambu Timelapse Bridge for classic ESP32 v1.14.8
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -35,12 +35,13 @@ constexpr uint16_t MQTT_FALLBACK_BUFFER_BYTES = 23552;
 // payload buffer is kept small until TLS is established, then expanded before
 // subscribing to Bambu reports.
 constexpr uint16_t MQTT_CONNECT_BUFFER_BYTES = 1024;
-// The selected timelapse printer owns the only large MQTT/TLS session. A
-// classic ESP32 cannot keep another Bambu TLS session and a second large
-// pushall buffer without fragmenting heap. Fleet power indicators therefore
-// use the lightweight TCP probes below; the selected printer keeps a stable,
-// uninterrupted MQTT stream for iPhone status and timelapse events.
-constexpr uint16_t FLEET_MQTT_BUFFER_BYTES = 4096;
+// While a background profile is sampled the selected client's receive buffer
+// is temporarily released. This lets the short-lived scanner use a full-size
+// buffer too; Bambu pushall packets are about 22 KB and were silently dropped
+// by the former 4-KB scanner, leaving an active printer yellow until its tab
+// was selected manually.
+constexpr uint16_t FLEET_MQTT_BUFFER_BYTES = 24576;
+constexpr uint16_t FLEET_MQTT_FALLBACK_BUFFER_BYTES = 23552;
 constexpr uint32_t WIFI_RETRY_MS = 12000;
 // A printer profile switch keeps the Wi-Fi association alive and only
 // rebuilds MQTT.  A short retry interval makes an idle/offline target fail
@@ -60,11 +61,11 @@ constexpr uint32_t FLEET_PROBE_PERIOD_MS = 900;
 constexpr uint32_t FLEET_PROBE_TIMEOUT_MS = 350;
 constexpr uint32_t FLEET_ONLINE_GRACE_MS = 6500;
 constexpr uint8_t FLEET_OFFLINE_FAILURES = 3;
-// The two non-selected printers are sampled sequentially through independent
-// TLS clients. Only one short-lived fleet client is active at a time, so the
-// selected printer keeps its uninterrupted timelapse MQTT session.
-constexpr uint32_t FLEET_REFRESH_PERIOD_MS = 60000;
-constexpr uint32_t FLEET_MONITOR_DWELL_MS = 1500;
+// Every two minutes the two non-selected profiles are checked one at a time.
+// The UI selection never changes: the scanner reports an active/error state
+// immediately, closes, and the selected printer resumes normal MQTT reads.
+constexpr uint32_t FLEET_REFRESH_PERIOD_MS = 120000;
+constexpr uint32_t FLEET_MONITOR_DWELL_MS = 1400;
 constexpr uint32_t FLEET_MONITOR_RETRY_GAP_MS = 250;
 constexpr uint32_t PRINT_COMPLETE_BLUE_MS = 3UL * 60UL * 60UL * 1000UL;
 constexpr uint32_t PRINT_COMPLETE_PULSE_MS = 4000;
@@ -108,10 +109,10 @@ constexpr uint32_t LED_REFRESH_MS = 35;
 constexpr uint32_t INPUT_REFRESH_MS = 20;
 constexpr uint32_t INPUT_DEBOUNCE_MS = 140;
 // The maintained three-position rotary contact can chatter for much longer
-// than a momentary button.  Accept a new position only after it has remained
-// continuously stable, and never let residual chatter produce another beep.
+// than a momentary button. Accept a new position only after it has remained
+// continuously stable; hardwareMode then guarantees one event/beep per
+// accepted position without suppressing a quick deliberate 1 -> 2 -> 3 move.
 constexpr uint32_t MODE_INPUT_DEBOUNCE_MS = 650;
-constexpr uint32_t MODE_BEEP_LOCKOUT_MS = 1800;
 constexpr uint32_t BUZZER_BEEP_MS = 150;
 }  // namespace Config
 
@@ -130,8 +131,8 @@ struct BridgeSettings {
   }
 };
 
-constexpr uint8_t FLEET_PRINTER_COUNT = 5;
-constexpr uint8_t BACKGROUND_MONITOR_COUNT = 4;
+constexpr uint8_t FLEET_PRINTER_COUNT = 3;
+constexpr uint8_t BACKGROUND_MONITOR_COUNT = 2;
 
 struct FleetProfile {
   String kind;
@@ -180,11 +181,17 @@ PubSubClient fleetMqtt(fleetTls);
 FleetProfile fleetProfiles[FLEET_PRINTER_COUNT];
 FleetRuntime fleetRuntimes[FLEET_PRINTER_COUNT];
 int8_t selectedFleetIndex = -1;
-int8_t monitorProfileIndex[BACKGROUND_MONITOR_COUNT] = {-1, -1, -1, -1};
-uint32_t monitorLastAttemptAt[BACKGROUND_MONITOR_COUNT] = {0, 0, 0, 0};
-uint32_t monitorSequenceId[BACKGROUND_MONITOR_COUNT] = {0, 0, 0, 0};
+int8_t monitorProfileIndex[BACKGROUND_MONITOR_COUNT] = {-1, -1};
+uint32_t monitorLastAttemptAt[BACKGROUND_MONITOR_COUNT] = {0, 0};
+uint32_t monitorSequenceId[BACKGROUND_MONITOR_COUNT] = {0, 0};
 int8_t activeFleetMonitorSlot = -1;
 int8_t activeFleetProfileIndex = -1;
+bool fleetSampleReceived = false;
+// The classic ESP32 cannot hold two TLS sessions plus a 24-KB Bambu pushall
+// buffer reliably. A fleet refresh therefore parks the selected MQTT session,
+// samples the two background profiles in sequence, then reconnects the selected
+// profile without changing the iPhone's visible selection.
+bool fleetPrimaryPaused = false;
 uint32_t activeFleetMonitorSince = 0;
 uint32_t lastFleetRefreshAt = 0;
 uint32_t nextFleetMonitorAttemptAt = 0;
@@ -272,7 +279,6 @@ uint8_t settingsPreviewPercent = 0;
 uint8_t settingsPreviewType = 0;  // 1 = buzzer, 2 = LED brightness.
 uint32_t lastInputRefreshAt = 0;
 uint32_t modeCandidateSince = 0;
-uint32_t lastModeBeepAt = 0;
 uint32_t holdCandidateSince = 0;
 uint32_t lastProgressTickAt = 0;
 volatile uint32_t lastConfigurationCommandAt = 0;
@@ -286,6 +292,8 @@ void reportHardwareControls();
 void queueHardwareControl(const char *name, int value);
 void setBuzzerOutput(bool enabled);
 void requestBuzzerBeep(uint32_t durationMs = Config::BUZZER_BEEP_MS);
+void pauseSelectedMqttForFleetScan();
+void resumeSelectedMqttAfterFleetScan();
 
 void queuePhoneEvent(const String &event) {
   portENTER_CRITICAL(&eventMux);
@@ -1548,7 +1556,11 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
     runtime.state = state;
     if (state == "ERROR") {
       runtime.criticalLatched = true;
-      if (previousState != "ERROR") runtime.physicalAlarmAcknowledged = false;
+      // Preserve a physical acknowledgement while the same incident remains
+      // latched. Some printers alternate ERROR/PREPARE status packets during
+      // recovery; re-arming on every state oscillation made the strip jump
+      // continuously between red and yellow.
+      if (!wasCritical) runtime.physicalAlarmAcknowledged = false;
     }
     if (isStoppedPrintState(state)) {
       runtime.criticalLatched = false;
@@ -1585,7 +1597,14 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
                   static_cast<unsigned long>(runtime.printErrorCode),
                   runtime.state.c_str());
   }
-  reportFleetStatus(profileIndex);
+  // The very first complete packet owns this two-minute sample. Publish it to
+  // the phone immediately, then let maintainFleetMonitors close the scanner
+  // and restore the selected printer on the next loop iteration.
+  Serial.printf("[FLEET] sampled %s: %u bytes, state=%s, percent=%d\n",
+                fleetProfiles[profileIndex].kind.c_str(), length,
+                runtime.state.c_str(), runtime.percent);
+  fleetSampleReceived = true;
+  reportFleetStatus(profileIndex, true);
 }
 
 void onFleetMqtt(char *, uint8_t *payload, unsigned int length) {
@@ -1608,7 +1627,7 @@ void publishFleetStatusRequest(uint8_t slot) {
 }
 
 void refreshFleetMonitorAssignments() {
-  int8_t desired[BACKGROUND_MONITOR_COUNT] = {-1, -1, -1, -1};
+  int8_t desired[BACKGROUND_MONITOR_COUNT] = {-1, -1};
   uint8_t count = 0;
   bool assignmentsChanged = false;
   for (uint8_t i = 0; i < FLEET_PRINTER_COUNT && count < BACKGROUND_MONITOR_COUNT;
@@ -1631,6 +1650,7 @@ void refreshFleetMonitorAssignments() {
       fleetMqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
       activeFleetMonitorSlot = -1;
       activeFleetProfileIndex = -1;
+      fleetSampleReceived = false;
     }
     monitorProfileIndex[slot] = desired[slot];
     monitorLastAttemptAt[slot] = 0;
@@ -1638,6 +1658,7 @@ void refreshFleetMonitorAssignments() {
   if (assignmentsChanged) {
     activeFleetMonitorSlot = -1;
     activeFleetMonitorSince = 0;
+    fleetSampleReceived = false;
     fleetRefreshInProgress = false;
     fleetRefreshRequested = true;
     fleetMonitorCursor = 0;
@@ -1660,6 +1681,32 @@ void disconnectFleetMonitors(bool markOffline = true) {
   activeFleetMonitorSlot = -1;
   activeFleetProfileIndex = -1;
   activeFleetMonitorSince = 0;
+  fleetSampleReceived = false;
+}
+
+void pauseSelectedMqttForFleetScan() {
+  if (fleetPrimaryPaused) return;
+  Serial.printf("[FLEET] pausing selected %s for two-minute background scan\n",
+                printerModelFromSerial(settings.printerSerial).c_str());
+  if (mqtt.connected()) mqtt.disconnect();
+  tlsClient.stop();
+  mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+  mqttWasConnected = false;
+  fleetPrimaryPaused = true;
+  consecutiveStatusPublishFailures = 0;
+}
+
+void resumeSelectedMqttAfterFleetScan() {
+  if (!fleetPrimaryPaused) return;
+  if (fleetMqtt.connected()) fleetMqtt.disconnect();
+  fleetTls.stop();
+  fleetMqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+  fleetPrimaryPaused = false;
+  lastMqttAttemptAt = 0;
+  lastStatusRequestAt = 0;
+  statusRequestPending = false;
+  Serial.printf("[FLEET] returning to selected %s\n",
+                printerModelFromSerial(settings.printerSerial).c_str());
 }
 
 bool startFleetMonitor(uint8_t slot) {
@@ -1669,12 +1716,12 @@ bool startFleetMonitor(uint8_t slot) {
   const FleetProfile &profile = fleetProfiles[profileIndex];
   if (!profile.complete() || !fleetRuntimes[profileIndex].online) return false;
 
-  // Both printers use TLS and the classic ESP32 cannot keep H2D's 24-KB MQTT
-  // packet buffer allocated during a second handshake. Pause reads from the
-  // selected session and temporarily release only its MQTT packet buffer; its
-  // TLS socket remains connected and queued data is read after this sample.
-  mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+  // Release the selected TLS session before opening the scanner. Merely
+  // shrinking its MQTT buffer is not sufficient: mbedTLS still owns enough
+  // heap to make a 24-KB background pushall allocation fail.
+  pauseSelectedMqttForFleetScan();
   PubSubClient &client = fleetMqtt;
+  fleetSampleReceived = false;
   client.setServer(profile.printerIp.c_str(), Config::MQTT_PORT);
   client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
   const uint64_t chip = ESP.getEfuseMac();
@@ -1690,16 +1737,6 @@ bool startFleetMonitor(uint8_t slot) {
     client.disconnect();
     client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
     activeFleetProfileIndex = -1;
-    expandSelectedMqttReceiveBuffer();
-    return false;
-  }
-  if (!client.setBufferSize(Config::FLEET_MQTT_BUFFER_BYTES)) {
-    Serial.printf("[FLEET] %s cannot allocate %u-byte sample buffer\n",
-                  profile.kind.c_str(), Config::FLEET_MQTT_BUFFER_BYTES);
-    client.disconnect();
-    client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
-    activeFleetProfileIndex = -1;
-    expandSelectedMqttReceiveBuffer();
     return false;
   }
   const String reportTopic = "device/" + profile.printerSerial + "/report";
@@ -1708,13 +1745,26 @@ bool startFleetMonitor(uint8_t slot) {
     client.disconnect();
     client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
     activeFleetProfileIndex = -1;
-    expandSelectedMqttReceiveBuffer();
     return false;
   }
   activeFleetMonitorSlot = slot;
   activeFleetProfileIndex = profileIndex;
   activeFleetMonitorSince = millis();
+  // Subscribe and publish while the buffer is still small so TLS has enough
+  // contiguous heap for outgoing records. No incoming packet is processed
+  // until client.loop(), after the receive buffer is expanded below.
   publishFleetStatusRequest(slot);
+  if (!client.setBufferSize(Config::FLEET_MQTT_BUFFER_BYTES) &&
+      !client.setBufferSize(Config::FLEET_MQTT_FALLBACK_BUFFER_BYTES) &&
+      !client.setBufferSize(22528)) {
+    Serial.printf("[FLEET] %s cannot allocate full status buffer\n",
+                  profile.kind.c_str());
+    client.disconnect();
+    client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+    activeFleetMonitorSlot = -1;
+    activeFleetProfileIndex = -1;
+    return false;
+  }
   return true;
 }
 
@@ -1808,34 +1858,32 @@ void maintainFleetMonitors() {
   // transitions.  Do not start a second TLS handshake until the first valid
   // selected-printer packet has arrived; this prevents a large H2D pushall
   // from being starved by background monitoring during startup/reconnect.
-  if (WiFi.status() != WL_CONNECTED || !mqttWasConnected || !statusDataSeen ||
-      (lastConfigurationCommandAt != 0 &&
-       now - lastConfigurationCommandAt < Config::CONFIG_NETWORK_QUIET_MS)) {
+  const bool selectedReady = mqttWasConnected && statusDataSeen;
+  const bool configurationQuiet =
+      lastConfigurationCommandAt != 0 &&
+      now - lastConfigurationCommandAt < Config::CONFIG_NETWORK_QUIET_MS;
+  if (WiFi.status() != WL_CONNECTED || configurationQuiet ||
+      (!fleetPrimaryPaused && !fleetRefreshInProgress && !selectedReady)) {
     if (activeFleetMonitorSlot >= 0) {
       disconnectFleetMonitors(false);
-      if (mqttWasConnected) expandSelectedMqttReceiveBuffer();
     }
     fleetRefreshInProgress = false;
+    resumeSelectedMqttAfterFleetScan();
     return;
   }
 
   if (activeFleetMonitorSlot >= 0) {
     PubSubClient &client = fleetMqtt;
     const bool sessionAlive = client.connected() && client.loop();
-    if (sessionAlive && now - activeFleetMonitorSince <
-                            Config::FLEET_MONITOR_DWELL_MS) {
+    if (sessionAlive && !fleetSampleReceived &&
+        now - activeFleetMonitorSince < Config::FLEET_MONITOR_DWELL_MS) {
       return;
     }
     client.disconnect();
     client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
     activeFleetMonitorSlot = -1;
     activeFleetProfileIndex = -1;
-    if (!expandSelectedMqttReceiveBuffer()) {
-      reportStatus("BUFFER_ERROR");
-      mqtt.disconnect();
-      mqttWasConnected = false;
-      return;
-    }
+    fleetSampleReceived = false;
     activeFleetMonitorSince = 0;
     ++fleetMonitorCursor;
     nextFleetMonitorAttemptAt = now + Config::FLEET_MONITOR_RETRY_GAP_MS;
@@ -1858,6 +1906,7 @@ void maintainFleetMonitors() {
     for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
       reportFleetStatus(i, true);
     }
+    resumeSelectedMqttAfterFleetScan();
     return;
   }
   if (static_cast<int32_t>(nextFleetMonitorAttemptAt - now) > 0) return;
@@ -1937,6 +1986,7 @@ void disconnectNetwork(bool keepWifi = false) {
   // last confirmed fleet state; reachability probes decide whether a printer
   // is actually powered off.
   disconnectFleetMonitors(false);
+  fleetPrimaryPaused = false;
   if (!keepWifi) WiFi.disconnect(false, false);
   mqttWasConnected = false;
   statusDataSeen = false;
@@ -1963,7 +2013,8 @@ void processDeferredNetworkWork() {
     fleetAssignmentsPending = false;
     refreshFleetMonitorAssignments();
   }
-  if (statusRequestPending && mqttWasConnected && activeFleetMonitorSlot < 0) {
+  if (statusRequestPending && mqttWasConnected && !fleetPrimaryPaused &&
+      !fleetRefreshInProgress && activeFleetMonitorSlot < 0) {
     statusRequestPending = false;
     publishStatusRequest();
   }
@@ -1990,8 +2041,14 @@ void maintainMqtt() {
       millis() - lastConfigurationCommandAt < Config::CONFIG_NETWORK_QUIET_MS) {
     return;
   }
+  // A fleet refresh deliberately owns the only practical TLS session.
+  // Reconnecting the selected printer here would recreate the heap collision
+  // that caused background profiles to remain yellow until manually selected.
+  if (fleetPrimaryPaused || fleetRefreshInProgress ||
+      activeFleetMonitorSlot >= 0) {
+    return;
+  }
   if (mqttWasConnected) {
-    if (activeFleetMonitorSlot >= 0) return;
     // Some H2D firmware revisions do not immediately answer the first
     // pushall sent right after MQTT subscription. Retry only while no fresh
     // print data is arriving, so opening SE in the middle of a job reliably
@@ -2089,7 +2146,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.14.6");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.14.8");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2102,7 +2159,7 @@ void sendCurrentStatus() {
     reportStatus("CONFIG_REQUIRED");
   } else if (WiFi.status() != WL_CONNECTED) {
     reportStatus("WIFI_CONNECTING");
-  } else if (!mqttWasConnected) {
+  } else if (!mqttWasConnected && !fleetPrimaryPaused) {
     reportStatus("MQTT_CONNECTING");
   } else {
     if (!statusDataSeen) {
@@ -2340,7 +2397,14 @@ void handlePhoneCommand(String command) {
     printCompleteBlueUntil = 0;
     queuePhoneEvent("H2D,COMPLETE_ACK");
   } else if (head == "H2D_FLEET_REFRESH") {
-    fleetRefreshRequested = true;
+    // The phone may repeat its refresh request while profile acknowledgements
+    // are still draining over BLE. Coalesce those retries so a just-completed
+    // scan is not immediately run a second time.
+    if (!fleetRefreshInProgress && activeFleetMonitorSlot < 0 &&
+        (lastFleetRefreshAt == 0 ||
+         millis() - lastFleetRefreshAt >= 15000)) {
+      fleetRefreshRequested = true;
+    }
     for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
       reportFleetStatus(i, true);
     }
@@ -2484,15 +2548,9 @@ void updateHardwareInputs() {
       // timelapse mode unambiguous before live printer colours take over.
       modeEntryFlashUntil = now + 1000;
     }
-    // One deliberate rotary move produces one short beep.  A dirty contact
-    // may briefly revisit the previous/centre state, so suppress any second
-    // beep during the mechanical settling window while still updating the
-    // final MODE event once the new position is genuinely stable.
-    if (lastModeBeepAt == 0 ||
-        now - lastModeBeepAt >= Config::MODE_BEEP_LOCKOUT_MS) {
-      requestBuzzerBeep();
-      lastModeBeepAt = now;
-    }
+    // One accepted stable position produces exactly one short beep. A quick
+    // deliberate move through all three positions is not rate-limited.
+    requestBuzzerBeep();
     queueHardwareControl("MODE", hardwareMode);
     Serial.printf("[CONTROL] rotary mode %d\n", hardwareMode);
   }
@@ -2751,7 +2809,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.14.6");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.14.8");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
@@ -2801,7 +2859,8 @@ void loop() {
   mqtt.setServer(settings.printerIp.c_str(), Config::MQTT_PORT);
   maintainWiFi();
   maintainMqtt();
-  if (mqttWasConnected && activeFleetMonitorSlot < 0) {
+  if (mqttWasConnected && !fleetPrimaryPaused && !fleetRefreshInProgress &&
+      activeFleetMonitorSlot < 0) {
     const bool mqttLoopOk = mqtt.loop();
     // PubSubClient changes its state to MQTT_CONNECTION_LOST when available()
     // detects a remote close. Use state(), not another TLS connected() probe;
