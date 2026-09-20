@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.14.8
+// SE Bambu Timelapse Bridge for classic ESP32 v1.14.9
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -2146,7 +2146,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.14.8");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.14.9");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2601,6 +2601,17 @@ void fillAnimatedLeds(uint32_t color) {
 }
 
 void drawSettingsLevel() {
+  if (settingsPreviewType == 2) {
+    // Brightness is a global intensity control, not a bar graph. Keep every
+    // active LED on and dim/brighten the entire strip together so lowering the
+    // slider never looks like LEDs are being removed from the effect.
+    const uint8_t scale = static_cast<uint16_t>(
+        constrain(settingsPreviewPercent, 0, 100)) * 255 / 100;
+    fillLedStrip(ledStrip.Color(
+        static_cast<uint16_t>(255) * scale / 255,
+        static_cast<uint16_t>(190) * scale / 255, 0));
+    return;
+  }
   const float filled = static_cast<float>(settingsPreviewPercent) *
                        Config::LED_ACTIVE_COUNT / 100.0f;
   const uint8_t red = settingsPreviewType == 1 ? 0 : 255;
@@ -2722,8 +2733,9 @@ void updateLedStrip() {
                              : ledStrip.Color(0, 0, 0));
   } else if (settingsPreviewType != 0 &&
              static_cast<int32_t>(settingsPreviewUntil - now) > 0) {
-    // App sliders temporarily become a seven-segment physical level meter.
-    // It expires after three seconds or instantly when the rotary mode moves.
+    // Buzzer volume uses a segment meter. LED brightness keeps the whole strip
+    // at one intensity. Both expire after three seconds or immediately when
+    // the rotary mode moves.
     drawSettingsLevel();
   } else if (printCompleteBlueUntil != 0 &&
              static_cast<int32_t>(printCompleteBlueUntil - now) > 0) {
@@ -2809,7 +2821,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.14.8");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.14.9");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
