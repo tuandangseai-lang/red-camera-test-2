@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.15.8
+// SE Bambu Timelapse Bridge for classic ESP32 v1.15.9
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -116,7 +116,10 @@ constexpr uint32_t BUZZER_VOLUME_PWM_HZ = 100;
 constexpr uint8_t BUZZER_VOLUME_PWM_BITS = 10;
 constexpr uint16_t BUZZER_VOLUME_PWM_MAX =
     (1u << BUZZER_VOLUME_PWM_BITS) - 1u;
-constexpr uint16_t BUZZER_MIN_AUDIBLE_DUTY = 120;
+// Active three-pin buzzer modules can stall when their supply pulse becomes
+// too narrow. Keep every non-zero setting above the reliable start threshold;
+// the quadratic curve still provides a clearly quieter lower half.
+constexpr uint16_t BUZZER_MIN_AUDIBLE_DUTY = 220;
 constexpr uint8_t LED_MIN_BRIGHTNESS = 0;
 constexpr uint8_t LED_MAX_BRIGHTNESS = 255;
 constexpr uint8_t LED_DEFAULT_BRIGHTNESS_PERCENT = 95;
@@ -1399,7 +1402,7 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
     // Beep only at a genuine new-job start. Transient RUNNING/PAUSE/PREPARE
     // packets during a layer transition must never produce a standby beep.
     if (!wasActiveSession && !wasRunning) {
-      requestBuzzerBeep();
+      requestBuzzerBeep(80);
     }
   }
 
@@ -1605,7 +1608,7 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
     // so its first observed percentage is sometimes already above 1%.
     // The IDLE -> active edge is the reliable one-shot signal; do not require
     // an early percentage or non-selected printers can begin silently.
-    requestBuzzerBeep();
+    requestBuzzerBeep(80);
   }
   if (hasState && isCompletedPrintState(runtime.state) && wasActiveSession) {
     requestBuzzerBeep(240);
@@ -2186,7 +2189,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.15.8");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.15.9");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2453,11 +2456,18 @@ void handlePhoneCommand(String command) {
     if (!buzzerEnabled) setBuzzerOutput(false);
     queueHardwareControl("BUZZER", buzzerEnabled ? 1 : 0);
   } else if (head == "H2D_BUZZER_VOLUME") {
-    buzzerVolumePercent = constrain(argument.toInt(), 0, 100);
-    preferences.putUChar("buzzVol", buzzerVolumePercent);
+    const uint8_t requestedVolume = constrain(argument.toInt(), 0, 100);
+    const bool volumeChanged = requestedVolume != buzzerVolumePercent;
+    buzzerVolumePercent = requestedVolume;
+    if (volumeChanged) {
+      preferences.putUChar("buzzVol", buzzerVolumePercent);
+    }
     settingsPreviewPercent = buzzerVolumePercent;
     settingsPreviewType = 1;
     settingsPreviewUntil = millis() + 3000;
+    // One short preview confirms the final slider value. Duplicate retry
+    // packets are idempotent and therefore never produce a second beep.
+    if (volumeChanged) requestBuzzerBeep(110);
     queueHardwareControl("BUZZER_VOLUME", buzzerVolumePercent);
   } else if (head == "H2D_LED_BRIGHTNESS") {
     ledBrightnessPercent = constrain(argument.toInt(), 0, 100);
@@ -2895,7 +2905,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.8");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.9");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

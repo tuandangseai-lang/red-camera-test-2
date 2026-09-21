@@ -149,6 +149,24 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         }
     }
 
+    func setCaptureScreenBrightness(_ normalizedLevel: Double) {
+        let brightness = CGFloat(min(1, max(0, normalizedLevel)))
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if self.originalBrightness == nil {
+                self.originalBrightness = UIScreen.main.brightness
+            }
+            // Flash mode intentionally keeps the display at the physical
+            // minimum. Remember the new slider value and restore it as soon as
+            // flash mode is left.
+            if self.isFlashModeActive {
+                self.brightnessBeforeFlashMode = brightness
+            } else {
+                UIScreen.main.brightness = brightness
+            }
+        }
+    }
+
     func disarm(deleteFrames: Bool = false) {
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -979,14 +997,14 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             if success {
                 self.capturedFrameCount = storedFrameCount
                 self.lastCapturedLayer = max(self.lastCapturedLayer, finishedLayer)
-                self.statusText = "Đã chụp lớp \(finishedLayer) • camera sẵn sàng cho lớp kế tiếp"
+                self.statusText = "Đã lưu ảnh • camera sẵn sàng cho lần chụp kế tiếp"
                 if let preview {
                     self.recentFramePreviews.removeAll { $0.layer == preview.layer }
                     self.recentFramePreviews.insert(preview, at: 0)
                     self.recentFramePreviews = Array(self.recentFramePreviews.prefix(8))
                 }
             } else {
-                self.statusText = "Chụp lớp \(finishedLayer) lỗi • chờ tín hiệu tiếp theo"
+                self.statusText = "Chụp ảnh lỗi • chờ tín hiệu tiếp theo"
             }
             self.didStoreFrame?(finishedLayer, success)
         }
@@ -1801,9 +1819,15 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
 
     private func setDimmedDisplay() {
         if originalBrightness == nil { originalBrightness = UIScreen.main.brightness }
-        // Timelapse mode keeps the app in the foreground for iOS camera access.
-        // Use the actual minimum instead of leaving a visible 1% glow.
-        UIScreen.main.brightness = 0.0
+        // The user can keep the old battery-saving minimum or raise the screen
+        // from the vertical control on the timelapse page. The stored default is
+        // zero, so first use remains fully dimmed.
+        let stored = UserDefaults.standard.object(
+            forKey: "SE.H2D.captureScreenBrightness"
+        ) as? NSNumber
+        UIScreen.main.brightness = CGFloat(
+            min(1, max(0, stored?.doubleValue ?? 0))
+        )
     }
 
     private func showMonitorDisplay() {

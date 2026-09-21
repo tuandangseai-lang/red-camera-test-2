@@ -15,6 +15,7 @@ struct H2DTimelapseView: View {
     @AppStorage("SE.H2D.hardwareBuzzerEnabled") private var hardwareBuzzerEnabled = true
     @AppStorage("SE.H2D.hardwareBuzzerVolume") private var hardwareBuzzerVolume = 1.0
     @AppStorage("SE.H2D.hardwareLEDBrightness") private var hardwareLEDBrightness = 0.95
+    @AppStorage("SE.H2D.captureScreenBrightness") private var captureScreenBrightness = 0.0
     @State private var wifiPassword = ""
     @State private var accessCode = ""
     @State private var showConfiguration = true
@@ -38,7 +39,8 @@ struct H2DTimelapseView: View {
     @State private var completionDismissWorkItem: DispatchWorkItem?
     @State private var acknowledgedFleetCompletions: Set<String> = []
     @State private var pendingFleetCompletionAcknowledgements: Set<String> = []
-    @State private var hardwareLevelSendWorkItem: DispatchWorkItem?
+    @State private var buzzerVolumeSendWorkItem: DispatchWorkItem?
+    @State private var ledBrightnessSendWorkItem: DispatchWorkItem?
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -123,10 +125,13 @@ struct H2DTimelapseView: View {
                 bluetooth.setHardwareBuzzerEnabled(enabled)
             }
             .onChange(of: hardwareBuzzerVolume) { _, _ in
-                scheduleHardwareLevelSync()
+                scheduleHardwareBuzzerVolumeSync()
             }
             .onChange(of: hardwareLEDBrightness) { _, _ in
-                scheduleHardwareLevelSync()
+                scheduleHardwareLEDBrightnessSync()
+            }
+            .onChange(of: captureScreenBrightness) { _, brightness in
+                timelapse.setCaptureScreenBrightness(brightness)
             }
     }
 
@@ -399,7 +404,7 @@ struct H2DTimelapseView: View {
                 return "\(printerName) • \(bluetooth.h2dPrintPercent)% • \(bluetooth.remainingPrintTimeText.uppercased())"
             }
             return "\(printerName) • ĐANG IN \(bluetooth.h2dPrintPercent)%"
-        case .capturing: return "\(printerName) • CHỤP LỚP \(max(1, bluetooth.h2dCurrentLayer))"
+        case .capturing: return "\(printerName) • ĐANG CHỤP ẢNH"
         case .connecting: return "ESP32 • ĐANG KẾT NỐI \(printerName)"
         case .stopping: return "\(printerName) • ĐANG DỪNG"
         case .paused: return "\(printerName) • ĐANG TẠM DỪNG"
@@ -615,12 +620,6 @@ struct H2DTimelapseView: View {
                     .disabled(!bluetooth.isH2DReady)
                     .opacity(bluetooth.isH2DReady ? 1 : 0.42)
 
-                    Label(
-                        "Giữ SE ở màn hình trước. Màn hình sẽ hạ sáng; camera chỉ chụp khi ESP32 báo lớp vừa hoàn tất.",
-                        systemImage: "lock.shield.fill"
-                    )
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.48))
                 }
                 .padding(16)
             }
@@ -771,21 +770,12 @@ struct H2DTimelapseView: View {
 
     private var cinemaProjectorStandby: some View {
         ZStack {
-            LinearGradient(
-                colors: [.black.opacity(0.95), Color(red: 0.025, green: 0.075, blue: 0.09)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
+            Color.black.opacity(0.72)
 
             ZStack {
-                Image("CinemaProjectorOutline")
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .foregroundStyle(.white.opacity(0.76))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 21)
-                    .shadow(color: cinemaCyan.opacity(0.42), radius: 8)
+                Image(systemName: "video.slash.fill")
+                    .font(.system(size: 34, weight: .light))
+                    .foregroundStyle(.white.opacity(0.24))
                     .opacity(isFlashArtworkActive ? 0 : 1)
                     .scaleEffect(isFlashArtworkActive ? 0.97 : 1)
 
@@ -798,14 +788,6 @@ struct H2DTimelapseView: View {
                 .scaleEffect(isFlashArtworkActive ? 1 : 0.97)
             }
             .animation(.easeInOut(duration: 0.24), value: isFlashArtworkActive)
-
-            LinearGradient(
-                colors: [.clear, cinemaCyan.opacity(0.09), .clear],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 34)
-            .offset(y: -62)
 
             VStack {
                 HStack {
@@ -825,10 +807,6 @@ struct H2DTimelapseView: View {
             .font(.system(size: 7, weight: .bold, design: .monospaced))
             .foregroundStyle(.white.opacity(0.45))
             .padding(12)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(cinemaCyan.opacity(0.24), lineWidth: 1)
         }
     }
 
@@ -1204,37 +1182,42 @@ struct H2DTimelapseView: View {
     private var activeCaptureView: some View {
         VStack(spacing: 14) {
             Spacer(minLength: 8)
-            if timelapse.isLiveMonitorVisible && !timelapse.isRendering {
-                HStack {
-                    Spacer(minLength: 0)
-                    H2DCameraPreview(
-                        session: timelapse.previewSession,
-                        rotationAngle: timelapse.cameraRotationAngle
-                    )
-                    .frame(width: 180, height: 320)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .overlay(alignment: .topTrailing) {
-                        HStack(spacing: 8) {
-                            Button {
-                                timelapse.rotateCamera180()
-                            } label: {
-                                Image(systemName: "rotate.right")
+            ZStack(alignment: .trailing) {
+                if timelapse.isLiveMonitorVisible && !timelapse.isRendering {
+                    HStack {
+                        Spacer(minLength: 0)
+                        H2DCameraPreview(
+                            session: timelapse.previewSession,
+                            rotationAngle: timelapse.cameraRotationAngle
+                        )
+                        .frame(width: 180, height: 320)
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .overlay(alignment: .topTrailing) {
+                            HStack(spacing: 8) {
+                                Button {
+                                    timelapse.rotateCamera180()
+                                } label: {
+                                    Image(systemName: "rotate.right")
+                                }
+                                Button {
+                                    timelapse.setLiveMonitorVisible(false)
+                                } label: {
+                                    Image(systemName: "xmark")
+                                }
                             }
-                            Button {
-                                timelapse.setLiveMonitorVisible(false)
-                            } label: {
-                                Image(systemName: "xmark")
-                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.black.opacity(0.72))
+                            .padding(10)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.black.opacity(0.72))
-                        .padding(10)
+                        Spacer(minLength: 0)
                     }
-                    Spacer(minLength: 0)
+                    .padding(.horizontal, 18)
+                } else {
+                    activeCinemaStandbyHUD
                 }
-                .padding(.horizontal, 18)
-            } else {
-                activeCinemaStandbyHUD
+
+                captureScreenBrightnessControl
+                    .padding(.trailing, 12)
             }
 
             Text(timelapse.statusText)
@@ -1385,25 +1368,12 @@ struct H2DTimelapseView: View {
 
     private var activeCinemaStandbyHUD: some View {
         ZStack {
-            ZStack {
-                Image("CinemaProjectorOutline")
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .foregroundStyle(.white.opacity(0.17))
-                    .frame(width: 206, height: 366)
-                    .shadow(color: cinemaCyan.opacity(0.28), radius: 12)
-                    .opacity(isFlashArtworkActive ? 0 : 1)
-                    .scaleEffect(isFlashArtworkActive ? 0.97 : 1)
-
+            if isFlashArtworkActive {
                 CinemaLightningArtwork(
                     tint: cinemaAmber
                 )
                 .frame(width: 170, height: 270)
-                .opacity(isFlashArtworkActive ? 1 : 0)
-                .scaleEffect(isFlashArtworkActive ? 1 : 0.97)
             }
-            .animation(.easeInOut(duration: 0.24), value: isFlashArtworkActive)
 
             Group {
                 Circle()
@@ -1453,13 +1423,40 @@ struct H2DTimelapseView: View {
         }
     }
 
+    private var captureScreenBrightnessControl: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "sun.max.fill")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(cinemaAmber)
+
+            Slider(value: $captureScreenBrightness, in: 0...1, step: 0.01)
+                .tint(cinemaAmber)
+                .frame(width: 132)
+                .rotationEffect(.degrees(-90))
+                .frame(width: 30, height: 132)
+
+            Text("\(Int((captureScreenBrightness * 100).rounded()))%")
+                .font(.system(size: 9, weight: .black, design: .monospaced))
+                .monospacedDigit()
+                .foregroundStyle(.white.opacity(0.72))
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 11)
+        .background(.black.opacity(0.62), in: Capsule())
+        .overlay { Capsule().stroke(.white.opacity(0.10), lineWidth: 1) }
+        .opacity(isFlashArtworkActive ? 0.34 : 1)
+        .disabled(isFlashArtworkActive)
+        .accessibilityLabel("Độ sáng màn hình iPhone")
+        .accessibilityValue("\(Int((captureScreenBrightness * 100).rounded())) phần trăm")
+    }
+
     private var capturedFramesCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 9) {
                 Image(systemName: timelapse.isCapturing ? "camera.fill" : "camera.badge.clock")
                     .foregroundStyle(timelapse.isCapturing ? Color.blue : Color.green)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(timelapse.isCapturing ? "iPhone đang chụp ảnh lớp" : "Chế độ chụp đang hoạt động")
+                    Text(timelapse.isCapturing ? "iPhone đang chụp ảnh" : "Chế độ chụp đang hoạt động")
                         .font(.custom("Arial", size: 13).weight(.bold))
                     Text(
                         bluetooth.h2dStatusCode == "ARMED"
@@ -1494,14 +1491,6 @@ struct H2DTimelapseView: View {
                                 .scaledToFill()
                                 .frame(width: 82, height: 58)
                                 .clipped()
-                                .overlay(alignment: .bottomLeading) {
-                                    Text("Lớp \(frame.layer)")
-                                        .font(.custom("Arial", size: 9).weight(.bold))
-                                        .padding(.horizontal, 5)
-                                        .padding(.vertical, 3)
-                                        .background(.black.opacity(0.72), in: Capsule())
-                                        .padding(5)
-                                }
                                 .clipShape(RoundedRectangle(cornerRadius: 10))
                         }
                     }
@@ -1556,14 +1545,30 @@ struct H2DTimelapseView: View {
         }
     }
 
-    private func scheduleHardwareLevelSync() {
-        hardwareLevelSendWorkItem?.cancel()
+    private func scheduleHardwareBuzzerVolumeSync() {
+        buzzerVolumeSendWorkItem?.cancel()
+        let percent = Int((hardwareBuzzerVolume * 100).rounded())
         let workItem = DispatchWorkItem {
-            bluetooth.setHardwareBuzzerVolume(Int((hardwareBuzzerVolume * 100).rounded()))
-            bluetooth.setHardwareLEDBrightness(Int((hardwareLEDBrightness * 100).rounded()))
+            bluetooth.setHardwareBuzzerVolume(percent)
+            // A second idempotent delivery protects the final slider value if a
+            // printer-status packet occupied the BLE write channel at release.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.40) {
+                guard Int((hardwareBuzzerVolume * 100).rounded()) == percent else { return }
+                bluetooth.setHardwareBuzzerVolume(percent)
+            }
         }
-        hardwareLevelSendWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
+        buzzerVolumeSendWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16, execute: workItem)
+    }
+
+    private func scheduleHardwareLEDBrightnessSync() {
+        ledBrightnessSendWorkItem?.cancel()
+        let percent = Int((hardwareLEDBrightness * 100).rounded())
+        let workItem = DispatchWorkItem {
+            bluetooth.setHardwareLEDBrightness(percent)
+        }
+        ledBrightnessSendWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16, execute: workItem)
     }
 
     private func activateProfile(_ profile: BambuPrinterProfile) {
