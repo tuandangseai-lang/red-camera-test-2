@@ -473,7 +473,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             self.isStopping = false
             self.isLiveMonitorVisible = false
             self.recentFramePreviews = []
-            self.statusText = "Màn hình tối • đang chờ lớp in đầu tiên"
+            self.statusText = "Chế độ timelapse tiết kiệm pin"
             self.setDimmedDisplay()
             UIApplication.shared.isIdleTimerDisabled = true
         }

@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.58 build137 - mot nhip buzzer va thanh tien do quay
+name: Tao IPA SE v9.59 build138 - don giao dien timelapse va flash
 
 on:
   workflow_dispatch:
@@ -121,7 +121,7 @@ jobs:
           grep -q "setViewActive" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "scheduleHardwareControls" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "if changed" "RedCameraTest/H2DBLEManager.swift"
-          grep -q "đang đồng bộ loại nhựa" "RedCameraTest/H2DTimelapseView.swift"
+          ! grep -q "đang đồng bộ loại nhựa\|đang đồng bộ nhựa" "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'hasPrefix("22E")' "RedCameraTest/BambuPrinterProfile.swift"
           grep -q "hasActivePrinterAlert" "RedCameraTest/H2DBLEManager.swift"
           grep -q "hasActiveCriticalPrinterAlert" "RedCameraTest/H2DBLEManager.swift"
@@ -193,19 +193,19 @@ jobs:
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test -f "$APP_PATH/iphone-screenshot-shutter.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.58"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "137"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.59"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "138"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.58-build137-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.59-build138-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.58-build137-unsigned-ipa
-          path: SE-v9.58-build137-unsigned.ipa
+          name: SE-v9.59-build138-unsigned-ipa
+          path: SE-v9.59-build138-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -301,6 +301,10 @@ jobs:
           grep -q 'BUZZER_MAX_SINGLE_PULSE_MS = 150' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'Hoàn thành lúc' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DBLEManager.swift
           grep -q 'TIẾN ĐỘ IN THỜI GIAN THỰC' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DTimelapseView.swift
+          grep -q 'Chế độ timelapse tiết kiệm pin' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DTimelapseManager.swift
+          grep -q 'Flash mode should show only the clean lightning artwork' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DTimelapseView.swift
+          ! grep -q 'đang đồng bộ nhựa\|đang đồng bộ loại nhựa' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DTimelapseView.swift
+          ! grep -q 'safeAreaInset(edge: .top' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DTimelapseView.swift
           grep -q 'A background printer may be discovered' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'MODE_INPUT_DEBOUNCE_MS = 220' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'currentLayer > 0' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino

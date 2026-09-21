@@ -267,10 +267,6 @@ struct H2DTimelapseView: View {
             screenEdgeLEDStrip
                 .ignoresSafeArea()
         }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            printerStatusIsland
-                .padding(.bottom, 6)
-        }
         .onAppear {
             timelapse.setViewActive(true)
             savedProfiles = BambuPrinterProfileStore.load()
@@ -905,18 +901,6 @@ struct H2DTimelapseView: View {
                 }
                 .padding(.vertical, 2)
             }
-            HStack(spacing: 8) {
-                Image(systemName: "shippingbox.fill")
-                    .foregroundStyle(bluetooth.filamentType.isEmpty ? .gray : .orange)
-                if bluetooth.filamentType.isEmpty {
-                    Text("\(printerName) • đang đồng bộ loại nhựa")
-                        .font(.custom("Arial", size: 12).weight(.semibold))
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("\(printerName) • \(bluetooth.materialDescription)")
-                        .font(.custom("Arial", size: 12).weight(.bold))
-                }
-            }
             if bluetooth.hasTemperatureTelemetry || bluetooth.hasFanTelemetry {
                 VStack(alignment: .leading, spacing: 6) {
                     if bluetooth.hasTemperatureTelemetry { temperatureTelemetryRows }
@@ -1278,18 +1262,6 @@ struct H2DTimelapseView: View {
                 capturePrintProgressRail
             }
 
-            HStack(spacing: 7) {
-                Image(systemName: "cube.fill")
-                    .foregroundStyle(bluetooth.filamentType.isEmpty ? .gray : .orange)
-                Text(
-                    bluetooth.filamentType.isEmpty
-                        ? "\(printerName) • đang đồng bộ nhựa"
-                        : "\(printerName) • \(bluetooth.materialDescription)"
-                )
-                    .font(.custom("Arial", size: 11).weight(.bold))
-                    .foregroundStyle(bluetooth.filamentType.isEmpty ? .secondary : .primary)
-            }
-
             if bluetooth.hasTemperatureTelemetry || bluetooth.hasFanTelemetry {
                 VStack(spacing: 4) {
                     if bluetooth.hasTemperatureTelemetry { temperatureTelemetryRows }
@@ -1432,35 +1404,40 @@ struct H2DTimelapseView: View {
             }
             .animation(.easeInOut(duration: 0.24), value: isFlashArtworkActive)
 
-            Circle()
-                .stroke(.white.opacity(0.07), lineWidth: 7)
-                .frame(width: 150, height: 150)
-            Circle()
-                .trim(from: 0, to: min(1, max(0.015, printerProgress)))
-                .stroke(
-                    AngularGradient(
-                        colors: [cinemaAmber, cinemaCyan, cinemaGreen],
-                        center: .center
-                    ),
-                    style: StrokeStyle(lineWidth: 7, lineCap: .round)
-                )
-                .frame(width: 150, height: 150)
-                .rotationEffect(.degrees(-90))
-                .shadow(color: cinemaCyan.opacity(0.35), radius: 6)
-                .animation(.linear(duration: 0.3), value: bluetooth.h2dCurrentLayer)
+            Group {
+                Circle()
+                    .stroke(.white.opacity(0.07), lineWidth: 7)
+                    .frame(width: 150, height: 150)
+                Circle()
+                    .trim(from: 0, to: min(1, max(0.015, printerProgress)))
+                    .stroke(
+                        AngularGradient(
+                            colors: [cinemaAmber, cinemaCyan, cinemaGreen],
+                            center: .center
+                        ),
+                        style: StrokeStyle(lineWidth: 7, lineCap: .round)
+                    )
+                    .frame(width: 150, height: 150)
+                    .rotationEffect(.degrees(-90))
+                    .shadow(color: cinemaCyan.opacity(0.35), radius: 6)
+                    .animation(.linear(duration: 0.3), value: bluetooth.h2dCurrentLayer)
 
-            VStack(spacing: 6) {
-                Image(systemName: timelapse.isRendering ? "film.stack.fill" : "camera.aperture")
-                    .font(.system(size: 25, weight: .semibold))
-                    .foregroundStyle(timelapse.isRendering ? cinemaCyan : cinemaAmber)
-                Text("\(timelapse.capturedFrameCount)")
-                    .font(.system(size: 38, weight: .black, design: .rounded))
-                    .monospacedDigit()
-                Text("FRAMES CAPTURED")
-                    .font(.system(size: 8, weight: .black, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.42))
-                    .tracking(0.7)
+                VStack(spacing: 6) {
+                    Image(systemName: timelapse.isRendering ? "film.stack.fill" : "camera.aperture")
+                        .font(.system(size: 25, weight: .semibold))
+                        .foregroundStyle(timelapse.isRendering ? cinemaCyan : cinemaAmber)
+                    Text("\(timelapse.capturedFrameCount)")
+                        .font(.system(size: 38, weight: .black, design: .rounded))
+                        .monospacedDigit()
+                    Text("FRAMES CAPTURED")
+                        .font(.system(size: 8, weight: .black, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.42))
+                        .tracking(0.7)
+                }
             }
+            // Flash mode should show only the clean lightning artwork.
+            .opacity(isFlashArtworkActive ? 0 : 1)
+            .animation(.easeInOut(duration: 0.18), value: isFlashArtworkActive)
         }
         .frame(height: 330)
         .overlay(alignment: .bottom) {
