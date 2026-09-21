@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.15.2
+// SE Bambu Timelapse Bridge for classic ESP32 v1.15.3
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -109,9 +109,10 @@ constexpr uint32_t BUZZER_OFF_MS = 100;
 // A three-pin active buzzer needs a full logic-level pulse to start its own
 // oscillator. High-frequency PWM was interpreted as OFF at every setting
 // below 100%. Keep each pulse at full voltage and control perceived loudness
-// with a slow burst envelope instead. Every non-zero level remains audible.
-constexpr uint32_t BUZZER_VOLUME_GATE_PERIOD_MS = 100;
-constexpr uint32_t BUZZER_MIN_AUDIBLE_ON_MS = 12;
+// with one full-voltage pulse instead. Pulse length controls perceived
+// loudness without splitting a short notification into two audible beeps.
+constexpr uint32_t BUZZER_MIN_AUDIBLE_PULSE_MS = 35;
+constexpr uint32_t BUZZER_MAX_SINGLE_PULSE_MS = 150;
 constexpr uint8_t LED_MIN_BRIGHTNESS = 0;
 constexpr uint8_t LED_MAX_BRIGHTNESS = 255;
 constexpr uint8_t LED_DEFAULT_BRIGHTNESS_PERCENT = 95;
@@ -288,7 +289,7 @@ uint32_t modeEntryFlashUntil = 0;
 uint32_t printCompleteBlueUntil = 0;
 uint32_t buzzerBeepUntil = 0;
 bool buzzerOutputRequested = false;
-uint32_t buzzerVolumeGateStartedAt = 0;
+uint32_t buzzerPulseStartedAt = 0;
 uint32_t settingsPreviewUntil = 0;
 uint8_t settingsPreviewPercent = 0;
 uint8_t settingsPreviewType = 0;  // 1 = buzzer, 2 = LED brightness.
@@ -2177,7 +2178,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.15.2");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.15.3");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2678,21 +2679,19 @@ void setBuzzerOutput(bool enabled) {
     // Start every beep/alarm burst with a guaranteed full-voltage pulse. A
     // short beep therefore remains audible even at the minimum setting.
     buzzerOutputRequested = true;
-    buzzerVolumeGateStartedAt = now;
+    buzzerPulseStartedAt = now;
   }
   if (volume >= 100) {
     digitalWrite(Config::BUZZER_PIN, activeLevel);
     return;
   }
 
-  const uint32_t onMs = Config::BUZZER_MIN_AUDIBLE_ON_MS +
-      (Config::BUZZER_VOLUME_GATE_PERIOD_MS -
-       Config::BUZZER_MIN_AUDIBLE_ON_MS) *
+  const uint32_t pulseMs = Config::BUZZER_MIN_AUDIBLE_PULSE_MS +
+      (Config::BUZZER_MAX_SINGLE_PULSE_MS -
+       Config::BUZZER_MIN_AUDIBLE_PULSE_MS) *
           static_cast<uint32_t>(volume) / 100;
-  const uint32_t phase =
-      (now - buzzerVolumeGateStartedAt) %
-      Config::BUZZER_VOLUME_GATE_PERIOD_MS;
-  digitalWrite(Config::BUZZER_PIN, phase < onMs ? activeLevel : inactiveLevel);
+  const bool pulseActive = (now - buzzerPulseStartedAt) < pulseMs;
+  digitalWrite(Config::BUZZER_PIN, pulseActive ? activeLevel : inactiveLevel);
 }
 
 void requestBuzzerBeep(uint32_t durationMs) {
@@ -2878,7 +2877,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.2");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.3");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

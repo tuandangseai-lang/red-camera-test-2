@@ -93,18 +93,18 @@ final class H2DBLEManager: NSObject, ObservableObject {
 
     var remainingPrintTimeText: String {
         guard h2dRemainingMinutes >= 0 else { return "Đang tính thời gian còn lại" }
-        if h2dRemainingMinutes == 0 { return "Còn dưới 1 phút" }
+        if h2dRemainingMinutes == 0 { return "Thời gian còn lại: dưới 1 phút" }
         let hours = h2dRemainingMinutes / 60
         let minutes = h2dRemainingMinutes % 60
-        if hours == 0 { return "Còn \(minutes) phút" }
-        if minutes == 0 { return "Còn \(hours) giờ" }
-        return "Còn \(hours) giờ \(minutes) phút"
+        if hours == 0 { return "Thời gian còn lại: \(minutes) phút" }
+        if minutes == 0 { return "Thời gian còn lại: \(hours) giờ" }
+        return "Thời gian còn lại: \(hours) giờ \(minutes) phút"
     }
 
     var estimatedPrintFinishText: String {
         guard h2dRemainingMinutes > 0 else { return "" }
         let finish = Date.now.addingTimeInterval(Double(h2dRemainingMinutes) * 60)
-        return "Xong khoảng \(finish.formatted(date: .omitted, time: .shortened))"
+        return "Hoàn thành lúc \(finish.formatted(date: .omitted, time: .shortened))"
     }
 
     var hasTemperatureTelemetry: Bool {

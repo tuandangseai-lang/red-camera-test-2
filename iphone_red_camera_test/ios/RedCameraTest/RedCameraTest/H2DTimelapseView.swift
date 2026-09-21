@@ -458,33 +458,22 @@ struct H2DTimelapseView: View {
         .accessibilityLabel(printerIslandTitle)
     }
 
-    /// A low-cost status light that hugs the physical screen edge.  The
-    /// printing segment starts at 12 o'clock and advances clockwise with the
-    /// printer's reported progress; all other states use a steady/breathing
-    /// colour and do not continuously redraw the camera preview.
+    /// Keep the screen edge quiet during normal use. It is reserved for the
+    /// two states that require immediate attention: a printer fault or an
+    /// active stop request. Capture and print progress use the horizontal rail.
     private var screenEdgeLEDStrip: some View {
-        let isPrinting = printerIslandState == .printing
-        let isBlinking = printerIslandState == .error
-        let isCompleted = printerIslandState == .completed
-        let shouldShowEdge = printerIslandState != .idle && printerIslandState != .connecting
-        let progress: Double? = isPrinting ? min(1, max(0, printerProgress)) : nil
-        // Capturing temporarily paints the whole edge blue. Keep the green
-        // printing animation's anchor alive underneath so it resumes from the
-        // same live position instead of restarting at 12 o'clock.
-        let preservesPrintingProgress =
-            printerIslandState == .capturing && isLayerPrintingOrChangingFilament
+        let isError = printerIslandState == .error
+        let shouldShowEdge = isError || printerIslandState == .stopping
 
         return ScreenEdgeLEDStrip(
-            color: printerIslandState.color,
-            progress: progress,
-            remainingSeconds: bluetooth.h2dRemainingMinutes > 0
-                ? Double(bluetooth.h2dRemainingMinutes) * 60.0
-                : nil,
-            blinks: isBlinking,
-            breathingPeriod: isCompleted ? 4.0 : nil,
-            minimumOpacity: isCompleted ? 0.02 : 1.0,
+            color: .red,
+            progress: nil,
+            remainingSeconds: nil,
+            blinks: isError,
+            breathingPeriod: nil,
+            minimumOpacity: 1.0,
             maximumOpacity: 1.0,
-            preservesProgressWhenHidden: preservesPrintingProgress
+            preservesProgressWhenHidden: false
         )
         .opacity(shouldShowEdge ? 1 : 0)
         .padding(.horizontal, 4)
@@ -1285,6 +1274,10 @@ struct H2DTimelapseView: View {
                     .foregroundStyle(.orange.opacity(0.65))
             }
 
+            if bluetooth.isPrintSessionActive || selectedFleetStatus.hasActivePrintJob {
+                capturePrintProgressRail
+            }
+
             HStack(spacing: 7) {
                 Image(systemName: "cube.fill")
                     .foregroundStyle(bluetooth.filamentType.isEmpty ? .gray : .orange)
@@ -1375,6 +1368,46 @@ struct H2DTimelapseView: View {
                 .padding(.horizontal, 24)
         }
         .background(Color.clear)
+    }
+
+    private var capturePrintProgressRail: some View {
+        VStack(spacing: 7) {
+            HStack(alignment: .lastTextBaseline) {
+                Text("TIẾN ĐỘ IN THỜI GIAN THỰC")
+                    .font(.system(size: 9, weight: .black, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.46))
+                Spacer(minLength: 8)
+                Text("\(bluetooth.h2dPrintPercent)%")
+                    .font(.system(size: 18, weight: .black, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(cinemaGreen)
+            }
+
+            CinemaProgressRail(progress: printerProgress, tint: cinemaGreen)
+
+            HStack(spacing: 7) {
+                Image(systemName: "timer")
+                    .foregroundStyle(cinemaCyan)
+                Text(bluetooth.remainingPrintTimeText)
+                    .fontWeight(.bold)
+                Spacer(minLength: 8)
+                if !bluetooth.estimatedPrintFinishText.isEmpty {
+                    Text(bluetooth.estimatedPrintFinishText)
+                        .foregroundStyle(.white.opacity(0.56))
+                }
+            }
+            .font(.system(size: 10, design: .rounded))
+            .monospacedDigit()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(.white.opacity(0.07), lineWidth: 1)
+        }
+        .padding(.horizontal, 22)
+        .accessibilityElement(children: .combine)
     }
 
     private var activeCinemaStandbyHUD: some View {
