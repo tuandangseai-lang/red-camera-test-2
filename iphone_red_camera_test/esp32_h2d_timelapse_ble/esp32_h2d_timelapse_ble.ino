@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.15.6
+// SE Bambu Timelapse Bridge for classic ESP32 v1.15.7
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -61,11 +61,12 @@ constexpr uint32_t FLEET_PROBE_PERIOD_MS = 900;
 constexpr uint32_t FLEET_PROBE_TIMEOUT_MS = 350;
 constexpr uint32_t FLEET_ONLINE_GRACE_MS = 6500;
 constexpr uint8_t FLEET_OFFLINE_FAILURES = 3;
-// Every two minutes one non-selected profile is checked, rotating between the
-// two background printers.  Sampling both in one pass kept the selected MQTT
-// session offline for 6+ seconds and made the iPhone status visibly oscillate.
-// One sample per pass returns to the selected printer as soon as possible.
-constexpr uint32_t FLEET_REFRESH_PERIOD_MS = 120000;
+// Check one non-selected profile every five seconds and rotate between the two
+// background printers.  A newly-started job is therefore normally detected in
+// 5-10 seconds instead of waiting for the former two-minute sweep.  Sampling
+// one printer per pass still returns to the selected printer immediately and
+// avoids keeping two TLS/MQTT sessions in the classic ESP32's limited heap.
+constexpr uint32_t FLEET_REFRESH_PERIOD_MS = 5000;
 constexpr uint8_t FLEET_SAMPLES_PER_REFRESH = 1;
 // H2D's full 22-KB pushall can arrive noticeably later than A1/P2S. Keep the
 // short-lived scanner open long enough to receive that packet, otherwise an
@@ -1398,8 +1399,7 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
     printCompleteBlueUntil = 0;
     // Beep only at a genuine new-job start. Transient RUNNING/PAUSE/PREPARE
     // packets during a layer transition must never produce a standby beep.
-    if (!wasActiveSession && !wasRunning && currentLayer <= 1 &&
-        printPercent <= 1) {
+    if (!wasActiveSession && !wasRunning) {
       requestBuzzerBeep();
     }
   }
@@ -1602,8 +1602,8 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
     }
   }
   if (hasState && isActivePrintState(runtime.state) && !wasActiveSession) {
-    // A background printer may be discovered up to one fleet-scan interval
-    // after it started, so its first observed percentage is often above 1%.
+    // A background printer may be discovered a few seconds after it started,
+    // so its first observed percentage is sometimes already above 1%.
     // The IDLE -> active edge is the reliable one-shot signal; do not require
     // an early percentage or non-selected printers can begin silently.
     requestBuzzerBeep();
@@ -1619,7 +1619,7 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
                   static_cast<unsigned long>(runtime.printErrorCode),
                   runtime.state.c_str());
   }
-  // The very first complete packet owns this two-minute sample. Publish it to
+  // The very first complete packet owns this background sample. Publish it to
   // the phone immediately, then let maintainFleetMonitors close the scanner
   // and restore the selected printer on the next loop iteration.
   Serial.printf("[FLEET] sampled %s: %u bytes, state=%s, percent=%d\n",
@@ -1708,7 +1708,7 @@ void disconnectFleetMonitors(bool markOffline = true) {
 
 void pauseSelectedMqttForFleetScan() {
   if (fleetPrimaryPaused) return;
-  Serial.printf("[FLEET] pausing selected %s for two-minute background scan\n",
+  Serial.printf("[FLEET] pausing selected %s for fast background scan\n",
                 printerModelFromSerial(settings.printerSerial).c_str());
   if (mqtt.connected()) mqtt.disconnect();
   tlsClient.stop();
@@ -1928,6 +1928,10 @@ void maintainFleetMonitors() {
     }
     fleetRefreshRequested = false;
     fleetRefreshInProgress = true;
+    // Measure the refresh period from the start of the scan, not its end. This
+    // prevents the TLS handshake/dwell time from being added to every cycle
+    // and keeps the start-event latency bounded and predictable.
+    lastFleetRefreshAt = now;
     fleetMonitorCursor = 0;
     fleetSamplesThisRefresh = 0;
     nextFleetMonitorAttemptAt = now;
@@ -1935,7 +1939,6 @@ void maintainFleetMonitors() {
 
   if (fleetMonitorCursor >= BACKGROUND_MONITOR_COUNT) {
     fleetRefreshInProgress = false;
-    lastFleetRefreshAt = now;
     for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
       reportFleetStatus(i, true);
     }
@@ -2181,7 +2184,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.15.3");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.15.7");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2890,7 +2893,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.6");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.7");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
