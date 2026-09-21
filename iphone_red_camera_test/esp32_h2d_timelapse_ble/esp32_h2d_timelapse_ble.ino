@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.15.7
+// SE Bambu Timelapse Bridge for classic ESP32 v1.15.8
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -61,13 +61,12 @@ constexpr uint32_t FLEET_PROBE_PERIOD_MS = 900;
 constexpr uint32_t FLEET_PROBE_TIMEOUT_MS = 350;
 constexpr uint32_t FLEET_ONLINE_GRACE_MS = 6500;
 constexpr uint8_t FLEET_OFFLINE_FAILURES = 3;
-// Check one non-selected profile every five seconds and rotate between the two
-// background printers.  A newly-started job is therefore normally detected in
-// 5-10 seconds instead of waiting for the former two-minute sweep.  Sampling
-// one printer per pass still returns to the selected printer immediately and
-// avoids keeping two TLS/MQTT sessions in the classic ESP32's limited heap.
-constexpr uint32_t FLEET_REFRESH_PERIOD_MS = 5000;
-constexpr uint8_t FLEET_SAMPLES_PER_REFRESH = 1;
+// Every fifteen seconds, temporarily preserve the selected profile, scan both
+// non-selected printers in sequence, then restore the user's selected profile.
+// The longer interval prevents rapid TLS reconnects from fragmenting heap or
+// making the iPhone state flash between colours.
+constexpr uint32_t FLEET_REFRESH_PERIOD_MS = 15000;
+constexpr uint8_t FLEET_SAMPLES_PER_REFRESH = 2;
 // H2D's full 22-KB pushall can arrive noticeably later than A1/P2S. Keep the
 // short-lived scanner open long enough to receive that packet, otherwise an
 // H2D fault could be missed until its profile was selected manually.
@@ -1909,10 +1908,9 @@ void maintainFleetMonitors() {
     fleetSampleReceived = false;
     activeFleetMonitorSince = 0;
     ++fleetSamplesThisRefresh;
-    nextFleetMonitorSlot =
-        (completedSlot + 1) % BACKGROUND_MONITOR_COUNT;
-    // One successful background sample is enough for this pass. Return to the
-    // selected printer immediately; the other slot is sampled next cycle.
+    // fleetMonitorCursor is the offset from the pass's starting slot. Keep
+    // nextFleetMonitorSlot unchanged until the entire pass ends; updating both
+    // values here would select the same background printer twice.
     if (fleetSamplesThisRefresh >= Config::FLEET_SAMPLES_PER_REFRESH) {
       fleetMonitorCursor = BACKGROUND_MONITOR_COUNT;
     } else {
@@ -1939,6 +1937,10 @@ void maintainFleetMonitors() {
 
   if (fleetMonitorCursor >= BACKGROUND_MONITOR_COUNT) {
     fleetRefreshInProgress = false;
+    // Rotate which background printer is sampled first on the next pass while
+    // always returning MQTT to the user's currently selected profile below.
+    nextFleetMonitorSlot =
+        (nextFleetMonitorSlot + 1) % BACKGROUND_MONITOR_COUNT;
     for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
       reportFleetStatus(i, true);
     }
@@ -2184,7 +2186,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.15.7");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.15.8");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2893,7 +2895,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.7");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.8");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
