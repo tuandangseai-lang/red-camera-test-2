@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.15.4
+// SE Bambu Timelapse Bridge for classic ESP32 v1.15.5
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -85,12 +85,12 @@ constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint32_t CONFIG_NETWORK_QUIET_MS = 8000;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
-// Seven WS2812B packages are active: pixels 0...3 hold the steady state colour
-// and pixels 4...6 show the configured animation/progress.
+// Seven WS2812B packages are active: pixels 0...2 hold the steady state colour
+// and pixels 3...6 show the configured animation/progress.
 // DATA -> GPIO5 through 330 ohms; 5V/GND must share GND with the ESP32.
 constexpr uint8_t LED_STRIP_PIN = 5;
-constexpr uint16_t LED_STATUS_COUNT = 4;
-constexpr uint16_t LED_ANIMATED_COUNT = 3;
+constexpr uint16_t LED_STATUS_COUNT = 3;
+constexpr uint16_t LED_ANIMATED_COUNT = 4;
 constexpr uint16_t LED_ACTIVE_COUNT = LED_STATUS_COUNT + LED_ANIMATED_COUNT;
 // The installed strip contains ten packages, but only the first seven are in
 // use. Keep the final three in each transmitted frame so they are actively
@@ -2768,7 +2768,7 @@ void updateLedStrip() {
   if (anyCriticalError) {
     // Every printer fault overrides the physical strip immediately, selected
     // or background. The phone does not need to be open and no profile switch
-    // is required. Four leading LEDs stay red while the four effect LEDs
+    // is required. Three leading LEDs stay red while the four effect LEDs
     // flash rapidly until the printer itself clears its error.
     const bool alarmOn = (now % 260) < 150;
     fillStatusLeds(ledColor(255, 0, 0));
@@ -2782,7 +2782,7 @@ void updateLedStrip() {
     drawSettingsLevel();
   } else if (printCompleteBlueUntil != 0 &&
              static_cast<int32_t>(printCompleteBlueUntil - now) > 0) {
-    // Completion is blue for three hours. The leading four stay blue while
+    // Completion is blue for three hours. The leading three stay blue while
     // the four effect LEDs fade smoothly in and out over a slow four-second
     // cycle instead of switching abruptly.
     fillStatusLeds(ledColor(0, 105, 255));
@@ -2809,7 +2809,7 @@ void updateLedStrip() {
     // A print command owns green immediately, including heating, homing,
     // calibration, nozzle cleaning and filament changes. Yellow is reserved
     // for an idle/flash state only.
-    // Pixels 0...3 stay green. Pixels 4...6 are the three progress pixels.
+    // Pixels 0...2 stay green. Pixels 3...6 are the four progress pixels.
     // Future progress is white at exactly 30% of the green channel level. The
     // active segment cross-fades continuously from that dim white to full
     // green, and completed segments remain solid green.
@@ -2853,6 +2853,13 @@ void updateLedStrip() {
     fillStatusLeds(ledColor(255, 190, 0));
     fillAnimatedLeds(ledColor(255, 190, 0));
   }
+  // The installed strip may contain additional packages. Force every pixel
+  // outside the seven-LED layout to black in every frame so LED 8+ can never
+  // retain green from a previous firmware/layout.
+  for (uint16_t i = Config::LED_ACTIVE_COUNT;
+       i < Config::LED_PHYSICAL_COUNT; ++i) {
+    ledStrip.setPixelColor(i, 0);
+  }
   ledStrip.show();
 }
 
@@ -2868,7 +2875,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.4");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.5");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
