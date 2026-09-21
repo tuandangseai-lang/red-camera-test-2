@@ -82,6 +82,7 @@ struct H2DTimelapseView: View {
                 Button("OK") {
                     acknowledgedAlarmID = currentAlarmID
                     printerAlarm.stop()
+                    bluetooth.acknowledgeCriticalPrinterAlarm()
                 }
             } message: {
                 Text(bluetooth.activeCriticalPrinterAlertText.isEmpty
@@ -1732,6 +1733,15 @@ struct H2DTimelapseView: View {
     }
 
     private var currentAlarmID: String {
+        // Include every active fleet incident. If a second printer develops a
+        // fault while the first one is already acknowledged, this signature
+        // changes and the alarm is presented again instead of staying silent.
+        let fleetSignature = savedProfiles.compactMap { profile -> String? in
+            let status = bluetooth.fleetStatus(for: profile)
+            guard status.hasCriticalError else { return nil }
+            return "\(profile.id):\(status.printErrorCode):\(status.printState)"
+        }.sorted().joined(separator: "|")
+        if !fleetSignature.isEmpty { return fleetSignature }
         let detail = bluetooth.activeCriticalPrinterAlertText
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return "\(bluetooth.activeCriticalPrinterDisplayName)|\(detail.isEmpty ? "critical" : detail)"
@@ -1806,9 +1816,8 @@ struct H2DTimelapseView: View {
             acknowledgedAlarmID = ""
             return
         }
-        // A fault on another profile remains visible in red on the iPhone,
-        // while ESP32's own buzzer handles it. Moving to that profile transfers
-        // the audible/modal alarm to the phone without losing the fault.
+        // Every saved printer owns the same fleet-level alarm path. The user
+        // must not have to open the faulty profile before the siren can start.
         guard bluetooth.shouldPlayPhonePrinterAlarm else {
             printerAlarm.stop()
             showCriticalPrinterAlarm = false

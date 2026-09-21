@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.15.5
+// SE Bambu Timelapse Bridge for classic ESP32 v1.15.6
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -2463,6 +2463,21 @@ void handlePhoneCommand(String command) {
     queueHardwareControl("LED_BRIGHTNESS", ledBrightnessPercent);
   } else if (head == "H2D_BEEP") {
     requestBuzzerBeep();
+  } else if (head == "H2D_ALARM_ACK") {
+    // The iPhone OK button acknowledges the incidents that are active right
+    // now, regardless of which printer tab is selected. The fault remains red
+    // in the UI; a new error code/state transition clears this acknowledgement
+    // and immediately re-arms the repeating physical alarm.
+    if (criticalAlarmLatched && !isStoppedPrintState(printState)) {
+      physicalCriticalAcknowledged = true;
+    }
+    for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
+      if (fleetRuntimeCritical(fleetRuntimes[i])) {
+        fleetRuntimes[i].physicalAlarmAcknowledged = true;
+      }
+    }
+    syncSelectedFleetRuntime(true);
+    queuePhoneEvent("H2D,ALARM_ACK");
   } else if (head == "H2D_STATUS" || head == "APP_READY" || head == "PING") {
     sendCurrentStatus();
     // The command callback runs on NimBLE's host task. Defer publishStatus-
@@ -2875,7 +2890,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.5");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.6");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.60 build139 - am may chieu va am luong buzzer
+name: Tao IPA SE v9.61 build140 - canh bao loi toan bo may in
 
 on:
   workflow_dispatch:
@@ -198,19 +198,19 @@ jobs:
           test -f "$APP_PATH/iphone-screenshot-shutter.mp3"
           test -f "$APP_PATH/cine-projector-loop.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.60"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "139"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.61"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "140"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.60-build139-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.61-build140-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.60-build139-unsigned-ipa
-          path: SE-v9.60-build139-unsigned.ipa
+          name: SE-v9.61-build140-unsigned-ipa
+          path: SE-v9.61-build140-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -300,6 +300,9 @@ jobs:
           grep -q 'maximumProfiles = 3' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/BambuPrinterProfile.swift
           grep -q 'H2D_PROFILE_SLOT' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'H2D_BUZZER_VOLUME' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'H2D_ALARM_ACK' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'A fault is a fleet-level safety event' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DBLEManager.swift
+          ! grep -q 'return criticalKind == printerKind' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DBLEManager.swift
           grep -q 'settingsPreviewUntil' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'Brightness is a global intensity control' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'BUZZER_VOLUME_PWM_HZ = 100' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
@@ -324,7 +327,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.15.5
+          name: SE-Bambu-ESP32-v1.15.6
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

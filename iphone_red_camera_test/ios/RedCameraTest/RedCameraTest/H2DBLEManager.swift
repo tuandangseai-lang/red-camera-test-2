@@ -287,14 +287,11 @@ final class H2DBLEManager: NSObject, ObservableObject {
     }
 
     var shouldPlayPhonePrinterAlarm: Bool {
-        if let criticalProfile = activeCriticalPrinterProfile {
-            return normalizeSerial(criticalProfile.serial) == normalizeSerial(printerSerial)
-        }
-        guard let criticalKind = activeCriticalPrinterKind else { return false }
-        // ESP32 owns the buzzer for a non-selected printer. The iPhone keeps
-        // showing that printer in red, but only plays its siren for the profile
-        // currently selected for timelapse.
-        return criticalKind == printerKind
+        // A fault is a fleet-level safety event, not a timelapse-selection
+        // event.  Previously the red dot appeared for a background printer but
+        // the siren was gated behind selecting that profile.  Let every saved
+        // printer start the iPhone alarm as soon as its fleet status turns red.
+        hasActiveCriticalPrinterAlert
     }
 
     var activeCriticalPrinterDisplayName: String {
@@ -657,6 +654,13 @@ final class H2DBLEManager: NSObject, ObservableObject {
 
     func acknowledgeH2DFrame(layer: Int, success: Bool) {
         send("H2D_ACK,\(max(0, layer)),\(success ? 1 : 0)")
+    }
+
+    func acknowledgeCriticalPrinterAlarm() {
+        // Silence only the currently known incident on the physical bridge.
+        // The printer's red state remains visible, and a new error code will
+        // re-arm both the iPhone and ESP32 alarms automatically.
+        _ = send("H2D_ALARM_ACK")
     }
 
     func requestFleetRefresh() {
