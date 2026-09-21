@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "9.59"
-    CURRENT_PROJECT_VERSION: "138"
+    MARKETING_VERSION: "9.60"
+    CURRENT_PROJECT_VERSION: "139"
 targets:
   RedCameraTest:
     type: application
@@ -24,6 +24,7 @@ targets:
       - path: RedCameraTest/Assets.xcassets
       - path: RedCameraTest/fire-alarm-sound.mp3
       - path: RedCameraTest/iphone-screenshot-shutter.mp3
+      - path: RedCameraTest/cine-projector-loop.mp3
     info:
       path: RedCameraTest/Info.plist
       properties:
@@ -42,8 +43,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: vn.rockettracker.RedCameraTest
-        MARKETING_VERSION: "9.59"
-        CURRENT_PROJECT_VERSION: "138"
+        MARKETING_VERSION: "9.60"
+        CURRENT_PROJECT_VERSION: "139"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"

@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.59 build138 - don giao dien timelapse va flash
+name: Tao IPA SE v9.60 build139 - am may chieu va am luong buzzer
 
 on:
   workflow_dispatch:
@@ -49,6 +49,7 @@ jobs:
           test -f "RedCameraTest/PrinterAlarmPlayer.swift"
           test -f "RedCameraTest/fire-alarm-sound.mp3"
           test -f "RedCameraTest/iphone-screenshot-shutter.mp3"
+          test -f "RedCameraTest/cine-projector-loop.mp3"
           grep -q 'case "SNAP"' "RedCameraTest/H2DBLEManager.swift"
           grep -q 'case "CFG_ACK"' "RedCameraTest/H2DBLEManager.swift"
           grep -q 'case "ALERT"' "RedCameraTest/H2DBLEManager.swift"
@@ -78,6 +79,9 @@ jobs:
           grep -q "playCameraSound(minimumVolume: 0.55)" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "setCategory(.playback" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "iphone-screenshot-shutter" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "cine-projector-loop" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "setProjectorSoundActive(blinking)" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q "created.numberOfLoops = -1" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "AVCaptureVideoDataOutput" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "copyPixelBuffer" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q "centerDarkRatio" "RedCameraTest/H2DTimelapseManager.swift"
@@ -192,20 +196,21 @@ jobs:
           test -f "$APP_PATH/Assets.car"
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test -f "$APP_PATH/iphone-screenshot-shutter.mp3"
+          test -f "$APP_PATH/cine-projector-loop.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.59"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "138"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.60"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "139"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.59-build138-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.60-build139-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.59-build138-unsigned-ipa
-          path: SE-v9.59-build138-unsigned.ipa
+          name: SE-v9.60-build139-unsigned-ipa
+          path: SE-v9.60-build139-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -297,8 +302,9 @@ jobs:
           grep -q 'H2D_BUZZER_VOLUME' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'settingsPreviewUntil' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'Brightness is a global intensity control' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'BUZZER_MIN_AUDIBLE_PULSE_MS = 35' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'BUZZER_MAX_SINGLE_PULSE_MS = 150' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'BUZZER_VOLUME_PWM_HZ = 100' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'BUZZER_VOLUME_PWM_BITS = 10' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'curved = static_cast<uint32_t>(volume) \* volume' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'Hoàn thành lúc' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DBLEManager.swift
           grep -q 'TIẾN ĐỘ IN THỜI GIAN THỰC' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DTimelapseView.swift
           grep -q 'Chế độ timelapse tiết kiệm pin' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DTimelapseManager.swift
@@ -318,7 +324,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.15.3
+          name: SE-Bambu-ESP32-v1.15.4
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

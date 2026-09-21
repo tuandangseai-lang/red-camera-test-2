@@ -92,6 +92,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     private var captureFrameWaitDeadline: Date?
     private var hardwareTorchGeneration = 0
     private var shutterSoundPlayer: AVAudioPlayer?
+    private var projectorSoundPlayer: AVAudioPlayer?
     private var effectSoundLevel: Float = 0.7
 
     func preparePreview() {
@@ -144,6 +145,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.effectSoundLevel = level
             self?.shutterSoundPlayer?.volume = level
+            self?.projectorSoundPlayer?.volume = level
         }
     }
 
@@ -275,6 +277,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             guard let self else { return }
             self.hardwareTorchGeneration &+= 1
             let generation = self.hardwareTorchGeneration
+            self.setProjectorSoundActive(blinking)
 
             guard steady || blinking else {
                 self.leaveFlashDisplayMode()
@@ -295,6 +298,7 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
                 self.sessionQueue.async {
                     guard generation == self.hardwareTorchGeneration else { return }
                     guard granted else {
+                        self.setProjectorSoundActive(false)
                         self.leaveFlashDisplayMode()
                         self.publishStatus("Hãy cấp quyền Camera để công tắc điều khiển đèn flash")
                         return
@@ -571,6 +575,45 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
             player.play()
         } catch {
             AudioServicesPlaySystemSound(1108)
+        }
+    }
+
+    /// The supplied 72-second projector recording follows the physical film
+    /// button: start immediately when the flash begins pulsing, loop while the
+    /// button is held, and stop without a fade when it is released.
+    private func setProjectorSoundActive(_ active: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard active else {
+                self.projectorSoundPlayer?.stop()
+                self.projectorSoundPlayer?.currentTime = 0
+                return
+            }
+            do {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, mode: .default, options: [.duckOthers])
+                try session.setActive(true)
+                let player: AVAudioPlayer
+                if let loaded = self.projectorSoundPlayer {
+                    player = loaded
+                } else {
+                    guard let url = Bundle.main.url(
+                        forResource: "cine-projector-loop",
+                        withExtension: "mp3"
+                    ) else { return }
+                    let created = try AVAudioPlayer(contentsOf: url)
+                    created.numberOfLoops = -1
+                    created.prepareToPlay()
+                    self.projectorSoundPlayer = created
+                    player = created
+                }
+                guard !player.isPlaying else { return }
+                player.currentTime = 0
+                player.volume = self.effectSoundLevel
+                player.play()
+            } catch {
+                self.projectorSoundPlayer?.stop()
+            }
         }
     }
 
