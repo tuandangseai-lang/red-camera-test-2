@@ -1198,7 +1198,7 @@ struct H2DTimelapseView: View {
     private var activeCaptureView: some View {
         VStack(spacing: 14) {
             Spacer(minLength: 8)
-            ZStack(alignment: .trailing) {
+            ZStack {
                 if timelapse.isLiveMonitorVisible && !timelapse.isRendering {
                     HStack {
                         Spacer(minLength: 0)
@@ -1232,9 +1232,6 @@ struct H2DTimelapseView: View {
                     activeCinemaStandbyHUD
                 }
 
-                captureScreenBrightnessControl
-                    // Keep the pill close to the right edge without clipping it.
-                    .padding(.trailing, 8)
             }
             .frame(maxWidth: .infinity)
 
@@ -1456,7 +1453,7 @@ struct H2DTimelapseView: View {
                 }
             } label: {
                 HStack(spacing: 7) {
-                    ZStack(alignment: captureScreenBrightness > 0.01 ? .trailing : .leading) {
+                    ZStack(alignment: captureScreenBrightness > 0.01 ? .bottom : .top) {
                         Capsule()
                             .fill(
                                 captureScreenBrightness > 0.01
@@ -1476,7 +1473,7 @@ struct H2DTimelapseView: View {
                                 .foregroundStyle(.black.opacity(0.78))
                             }
                     }
-                    .frame(width: 64, height: 36)
+                    .frame(width: 36, height: 64)
                     .overlay {
                         Capsule()
                             .stroke(cinemaAmber.opacity(captureScreenBrightness > 0.01 ? 0.54 : 0.20), lineWidth: 1.2)
@@ -1531,7 +1528,7 @@ struct H2DTimelapseView: View {
 
     private var capturedFramesCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 9) {
+            HStack(alignment: .top, spacing: 9) {
                 Image(systemName: timelapse.isCapturing ? "camera.fill" : "camera.badge.clock")
                     .foregroundStyle(timelapse.isCapturing ? Color.blue : Color.green)
                 VStack(alignment: .leading, spacing: 2) {
@@ -1545,11 +1542,14 @@ struct H2DTimelapseView: View {
                         .font(.custom("Arial", size: 11).monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
-                Spacer()
+                Spacer(minLength: 6)
                 if timelapse.isCapturing {
                     ProgressView()
                         .tint(.blue)
+                        .padding(.top, 8)
                 }
+                captureScreenBrightnessControl
+                    .layoutPriority(1)
             }
 
             if timelapse.recentFramePreviews.isEmpty {
