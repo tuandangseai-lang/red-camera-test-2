@@ -1192,7 +1192,7 @@ struct H2DTimelapseView: View {
     private var activeCaptureView: some View {
         VStack(spacing: 14) {
             Spacer(minLength: 8)
-            ZStack(alignment: .leading) {
+            ZStack(alignment: .trailing) {
                 if timelapse.isLiveMonitorVisible && !timelapse.isRendering {
                     HStack {
                         Spacer(minLength: 0)
@@ -1227,7 +1227,8 @@ struct H2DTimelapseView: View {
                 }
 
                 captureScreenBrightnessControl
-                    .padding(.leading, 12)
+                    // Roughly one centimetre from the right edge on iPhone.
+                    .padding(.trailing, 28)
             }
             .frame(maxWidth: .infinity)
 
@@ -1443,15 +1444,15 @@ struct H2DTimelapseView: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "sun.max.fill")
-                        .font(.system(size: 13, weight: .bold))
+                        .font(.system(size: 19, weight: .black))
                     if showCaptureBrightnessSlider {
                         Text("\(Int((captureScreenBrightness * 100).rounded()))%")
-                            .font(.system(size: 9, weight: .black, design: .monospaced))
+                            .font(.system(size: 11, weight: .black, design: .monospaced))
                             .monospacedDigit()
                     }
                 }
                 .foregroundStyle(cinemaAmber)
-                .frame(minWidth: 24, minHeight: 24)
+                .frame(minWidth: 34, minHeight: 34)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -1464,9 +1465,9 @@ struct H2DTimelapseView: View {
             if showCaptureBrightnessSlider {
                 Slider(value: $captureScreenBrightness, in: 0...1, step: 0.01)
                     .tint(cinemaAmber)
-                    .frame(width: 150)
+                    .frame(width: 164)
                     .rotationEffect(.degrees(-90))
-                    .frame(width: 30, height: 150)
+                    .frame(width: 38, height: 164)
                     .transition(
                         .asymmetric(
                             insertion: .opacity.combined(with: .scale(scale: 0.86, anchor: .top)),
@@ -1480,10 +1481,11 @@ struct H2DTimelapseView: View {
                     .transition(.opacity)
             }
         }
-        .padding(.horizontal, showCaptureBrightnessSlider ? 9 : 8)
-        .padding(.vertical, showCaptureBrightnessSlider ? 11 : 8)
-        .background(.black.opacity(0.62), in: Capsule())
-        .overlay { Capsule().stroke(.white.opacity(0.10), lineWidth: 1) }
+        .padding(.horizontal, showCaptureBrightnessSlider ? 11 : 8)
+        .padding(.vertical, showCaptureBrightnessSlider ? 12 : 8)
+        .background(.black.opacity(0.74), in: Capsule())
+        .overlay { Capsule().stroke(cinemaAmber.opacity(0.34), lineWidth: 1.2) }
+        .shadow(color: cinemaAmber.opacity(0.25), radius: 7)
         .opacity(isFlashArtworkActive ? 0.34 : 1)
         .disabled(isFlashArtworkActive)
         .animation(.spring(response: 0.30, dampingFraction: 0.82), value: showCaptureBrightnessSlider)

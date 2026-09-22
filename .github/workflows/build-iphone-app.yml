@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.63 build142 - khoi phuc may chieu va thanh sang thu gon
+name: Tao IPA SE v9.64 build143 - nut sang lon ben phai
 
 on:
   workflow_dispatch:
@@ -198,19 +198,19 @@ jobs:
           test -f "$APP_PATH/iphone-screenshot-shutter.mp3"
           test -f "$APP_PATH/cine-projector-loop.mp3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.63"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "142"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.64"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "143"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.63-build142-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.64-build143-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.63-build142-unsigned-ipa
-          path: SE-v9.63-build142-unsigned.ipa
+          name: SE-v9.64-build143-unsigned-ipa
+          path: SE-v9.64-build143-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
