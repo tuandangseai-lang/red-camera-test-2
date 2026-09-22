@@ -42,6 +42,7 @@ struct H2DTimelapseView: View {
     @State private var buzzerVolumeSendWorkItem: DispatchWorkItem?
     @State private var ledBrightnessSendWorkItem: DispatchWorkItem?
     @State private var showCaptureBrightnessSlider = false
+    @State private var captureBrightnessCollapseWorkItem: DispatchWorkItem?
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -133,6 +134,9 @@ struct H2DTimelapseView: View {
             }
             .onChange(of: captureScreenBrightness) { _, brightness in
                 timelapse.setCaptureScreenBrightness(brightness)
+                if showCaptureBrightnessSlider {
+                    scheduleCaptureBrightnessAutoCollapse()
+                }
             }
     }
 
@@ -333,6 +337,8 @@ struct H2DTimelapseView: View {
             }
         }
         .onDisappear {
+            captureBrightnessCollapseWorkItem?.cancel()
+            captureBrightnessCollapseWorkItem = nil
             timelapse.restoreDisplayWhenLeaving()
             timelapse.setHardwareTorch(steady: false, blinking: false, keepCameraWarm: false)
             if !timelapse.isArmed { timelapse.stopPreview() }
@@ -1227,8 +1233,8 @@ struct H2DTimelapseView: View {
                 }
 
                 captureScreenBrightnessControl
-                    // Roughly one centimetre from the right edge on iPhone.
-                    .padding(.trailing, 28)
+                    // Keep the pill close to the right edge without clipping it.
+                    .padding(.trailing, 8)
             }
             .frame(maxWidth: .infinity)
 
@@ -1438,21 +1444,51 @@ struct H2DTimelapseView: View {
     private var captureScreenBrightnessControl: some View {
         VStack(spacing: showCaptureBrightnessSlider ? 8 : 0) {
             Button {
+                let willExpand = !showCaptureBrightnessSlider
                 withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
-                    showCaptureBrightnessSlider.toggle()
+                    showCaptureBrightnessSlider = willExpand
+                }
+                if willExpand {
+                    scheduleCaptureBrightnessAutoCollapse()
+                } else {
+                    captureBrightnessCollapseWorkItem?.cancel()
+                    captureBrightnessCollapseWorkItem = nil
                 }
             } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "sun.max.fill")
-                        .font(.system(size: 19, weight: .black))
+                HStack(spacing: 7) {
+                    ZStack(alignment: captureScreenBrightness > 0.01 ? .trailing : .leading) {
+                        Capsule()
+                            .fill(
+                                captureScreenBrightness > 0.01
+                                    ? cinemaAmber.opacity(0.34)
+                                    : Color.white.opacity(0.09)
+                            )
+                        Circle()
+                            .fill(captureScreenBrightness > 0.01 ? cinemaAmber : Color.white.opacity(0.42))
+                            .padding(3)
+                            .overlay {
+                                Image(
+                                    systemName: captureScreenBrightness > 0.01
+                                        ? "sun.max.fill"
+                                        : "sun.min.fill"
+                                )
+                                .font(.system(size: 12, weight: .black))
+                                .foregroundStyle(.black.opacity(0.78))
+                            }
+                    }
+                    .frame(width: 64, height: 36)
+                    .overlay {
+                        Capsule()
+                            .stroke(cinemaAmber.opacity(captureScreenBrightness > 0.01 ? 0.54 : 0.20), lineWidth: 1.2)
+                    }
+
                     if showCaptureBrightnessSlider {
                         Text("\(Int((captureScreenBrightness * 100).rounded()))%")
                             .font(.system(size: 11, weight: .black, design: .monospaced))
                             .monospacedDigit()
+                            .foregroundStyle(cinemaAmber)
                     }
                 }
-                .foregroundStyle(cinemaAmber)
-                .frame(minWidth: 34, minHeight: 34)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -1481,8 +1517,8 @@ struct H2DTimelapseView: View {
                     .transition(.opacity)
             }
         }
-        .padding(.horizontal, showCaptureBrightnessSlider ? 11 : 8)
-        .padding(.vertical, showCaptureBrightnessSlider ? 12 : 8)
+        .padding(.horizontal, showCaptureBrightnessSlider ? 11 : 5)
+        .padding(.vertical, showCaptureBrightnessSlider ? 12 : 5)
         .background(.black.opacity(0.74), in: Capsule())
         .overlay { Capsule().stroke(cinemaAmber.opacity(0.34), lineWidth: 1.2) }
         .shadow(color: cinemaAmber.opacity(0.25), radius: 7)
@@ -1612,6 +1648,22 @@ struct H2DTimelapseView: View {
         }
         ledBrightnessSendWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.16, execute: workItem)
+    }
+
+    private func scheduleCaptureBrightnessAutoCollapse() {
+        captureBrightnessCollapseWorkItem?.cancel()
+        guard showCaptureBrightnessSlider else {
+            captureBrightnessCollapseWorkItem = nil
+            return
+        }
+        let workItem = DispatchWorkItem {
+            withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
+                showCaptureBrightnessSlider = false
+            }
+            captureBrightnessCollapseWorkItem = nil
+        }
+        captureBrightnessCollapseWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: workItem)
     }
 
     private func activateProfile(_ profile: BambuPrinterProfile) {
