@@ -41,6 +41,7 @@ struct H2DTimelapseView: View {
     @State private var pendingFleetCompletionAcknowledgements: Set<String> = []
     @State private var buzzerVolumeSendWorkItem: DispatchWorkItem?
     @State private var ledBrightnessSendWorkItem: DispatchWorkItem?
+    @State private var showCaptureBrightnessSlider = false
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -770,12 +771,21 @@ struct H2DTimelapseView: View {
 
     private var cinemaProjectorStandby: some View {
         ZStack {
-            Color.black.opacity(0.72)
+            LinearGradient(
+                colors: [.black.opacity(0.95), Color(red: 0.025, green: 0.075, blue: 0.09)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
 
             ZStack {
-                Image(systemName: "video.slash.fill")
-                    .font(.system(size: 34, weight: .light))
-                    .foregroundStyle(.white.opacity(0.24))
+                Image("CinemaProjectorOutline")
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(.white.opacity(0.76))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 21)
+                    .shadow(color: cinemaCyan.opacity(0.42), radius: 8)
                     .opacity(isFlashArtworkActive ? 0 : 1)
                     .scaleEffect(isFlashArtworkActive ? 0.97 : 1)
 
@@ -1182,7 +1192,7 @@ struct H2DTimelapseView: View {
     private var activeCaptureView: some View {
         VStack(spacing: 14) {
             Spacer(minLength: 8)
-            ZStack(alignment: .trailing) {
+            ZStack(alignment: .leading) {
                 if timelapse.isLiveMonitorVisible && !timelapse.isRendering {
                     HStack {
                         Spacer(minLength: 0)
@@ -1217,8 +1227,9 @@ struct H2DTimelapseView: View {
                 }
 
                 captureScreenBrightnessControl
-                    .padding(.trailing, 12)
+                    .padding(.leading, 12)
             }
+            .frame(maxWidth: .infinity)
 
             Text(timelapse.statusText)
                 .font(.custom("Arial", size: 15).weight(.semibold))
@@ -1424,28 +1435,58 @@ struct H2DTimelapseView: View {
     }
 
     private var captureScreenBrightnessControl: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "sun.max.fill")
-                .font(.system(size: 13, weight: .bold))
+        VStack(spacing: showCaptureBrightnessSlider ? 8 : 0) {
+            Button {
+                withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
+                    showCaptureBrightnessSlider.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "sun.max.fill")
+                        .font(.system(size: 13, weight: .bold))
+                    if showCaptureBrightnessSlider {
+                        Text("\(Int((captureScreenBrightness * 100).rounded()))%")
+                            .font(.system(size: 9, weight: .black, design: .monospaced))
+                            .monospacedDigit()
+                    }
+                }
                 .foregroundStyle(cinemaAmber)
+                .frame(minWidth: 24, minHeight: 24)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(
+                showCaptureBrightnessSlider
+                    ? "Thu gọn thanh độ sáng màn hình"
+                    : "Mở thanh độ sáng màn hình"
+            )
 
-            Slider(value: $captureScreenBrightness, in: 0...1, step: 0.01)
-                .tint(cinemaAmber)
-                .frame(width: 132)
-                .rotationEffect(.degrees(-90))
-                .frame(width: 30, height: 132)
+            if showCaptureBrightnessSlider {
+                Slider(value: $captureScreenBrightness, in: 0...1, step: 0.01)
+                    .tint(cinemaAmber)
+                    .frame(width: 150)
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 30, height: 150)
+                    .transition(
+                        .asymmetric(
+                            insertion: .opacity.combined(with: .scale(scale: 0.86, anchor: .top)),
+                            removal: .opacity.combined(with: .scale(scale: 0.86, anchor: .top))
+                        )
+                    )
 
-            Text("\(Int((captureScreenBrightness * 100).rounded()))%")
-                .font(.system(size: 9, weight: .black, design: .monospaced))
-                .monospacedDigit()
-                .foregroundStyle(.white.opacity(0.72))
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 8, weight: .black))
+                    .foregroundStyle(.white.opacity(0.45))
+                    .transition(.opacity)
+            }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 11)
+        .padding(.horizontal, showCaptureBrightnessSlider ? 9 : 8)
+        .padding(.vertical, showCaptureBrightnessSlider ? 11 : 8)
         .background(.black.opacity(0.62), in: Capsule())
         .overlay { Capsule().stroke(.white.opacity(0.10), lineWidth: 1) }
         .opacity(isFlashArtworkActive ? 0.34 : 1)
         .disabled(isFlashArtworkActive)
+        .animation(.spring(response: 0.30, dampingFraction: 0.82), value: showCaptureBrightnessSlider)
         .accessibilityLabel("Độ sáng màn hình iPhone")
         .accessibilityValue("\(Int((captureScreenBrightness * 100).rounded())) phần trăm")
     }
