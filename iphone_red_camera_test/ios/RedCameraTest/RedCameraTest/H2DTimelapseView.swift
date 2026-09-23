@@ -16,6 +16,7 @@ struct H2DTimelapseView: View {
     @AppStorage("SE.H2D.hardwareBuzzerVolume") private var hardwareBuzzerVolume = 1.0
     @AppStorage("SE.H2D.hardwareLEDBrightness") private var hardwareLEDBrightness = 0.95
     @AppStorage("SE.H2D.captureScreenBrightness") private var captureScreenBrightness = 0.0
+    @AppStorage("SE.AppLanguage") private var appLanguageCode = SEAppLanguage.vietnamese.rawValue
     @State private var wifiPassword = ""
     @State private var accessCode = ""
     @State private var showConfiguration = true
@@ -76,22 +77,23 @@ struct H2DTimelapseView: View {
 
     var body: some View {
         observedContent
+            .environment(\.locale, Locale(identifier: appLanguageCode))
             .onChange(of: bluetooth.hardwareControlRevision) { _, _ in
                 scheduleHardwareControls()
             }
             .onChange(of: timelapse.isRendering) { _, rendering in
                 if !rendering { applyHardwareControls(force: true) }
             }
-            .alert("\(bluetooth.activeCriticalPrinterDisplayName) đang có lỗi", isPresented: $showCriticalPrinterAlarm) {
+            .alert(localizedStatus("\(bluetooth.activeCriticalPrinterDisplayName) đang có lỗi"), isPresented: $showCriticalPrinterAlarm) {
                 Button("OK") {
                     acknowledgedAlarmID = currentAlarmID
                     printerAlarm.stop()
                     bluetooth.acknowledgeCriticalPrinterAlarm()
                 }
             } message: {
-                Text(bluetooth.activeCriticalPrinterAlertText.isEmpty
+                Text(localizedStatus(bluetooth.activeCriticalPrinterAlertText.isEmpty
                     ? "Hãy kiểm tra màn hình máy in. Âm báo sẽ tự tắt khi lỗi được xử lý."
-                    : bluetooth.activeCriticalPrinterAlertText)
+                    : bluetooth.activeCriticalPrinterAlertText))
             }
             .confirmationDialog(
                 "Bạn muốn xử lý các ảnh đã chụp thế nào?",
@@ -430,7 +432,7 @@ struct H2DTimelapseView: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(printerIslandState.color)
 
-            Text(printerIslandTitle)
+            Text(localizedStatus(printerIslandTitle))
                 .font(.system(size: 11, weight: .bold, design: .monospaced))
                 .monospacedDigit()
                 .lineLimit(1)
@@ -464,7 +466,7 @@ struct H2DTimelapseView: View {
         // content instead of stretching across the entire screen.
         .fixedSize(horizontal: true, vertical: false)
         .shadow(color: printerIslandState.color.opacity(0.16), radius: 10, y: 3)
-        .accessibilityLabel(printerIslandTitle)
+        .accessibilityLabel(localizedStatus(printerIslandTitle))
     }
 
     /// Keep the screen edge quiet during normal use. It is reserved for the
@@ -586,6 +588,7 @@ struct H2DTimelapseView: View {
                 VStack(spacing: 16) {
                     cinemaSystemHeader
                     cameraCard
+                    flashAndDisplayCard
                     bridgeStatusCard
                     configurationCard
 
@@ -664,7 +667,7 @@ struct H2DTimelapseView: View {
                     .tracking(0.7)
             }
             Spacer(minLength: 6)
-            VStack(alignment: .trailing, spacing: 5) {
+            VStack(alignment: .trailing, spacing: 6) {
                 HStack(spacing: 5) {
                     Circle()
                         .fill(bluetooth.isConnected ? cinemaGreen : .red)
@@ -675,9 +678,27 @@ struct H2DTimelapseView: View {
                 .font(.system(size: 9, weight: .bold, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.74))
 
-                Text("V9.49")
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.34))
+                HStack(spacing: 6) {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            appLanguageCode = appLanguageCode == SEAppLanguage.vietnamese.rawValue
+                                ? SEAppLanguage.english.rawValue
+                                : SEAppLanguage.vietnamese.rawValue
+                        }
+                    } label: {
+                        Text(appLanguageCode == SEAppLanguage.vietnamese.rawValue ? "TV" : "EN")
+                            .font(.system(size: 9, weight: .black, design: .monospaced))
+                            .frame(width: 28, height: 20)
+                            .background(cinemaCyan.opacity(0.12), in: Capsule())
+                            .overlay { Capsule().stroke(cinemaCyan.opacity(0.38), lineWidth: 1) }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(appLanguageCode == "vi" ? "Đổi sang tiếng Anh" : "Switch to Vietnamese")
+
+                    Text("V9.67")
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.34))
+                }
             }
         }
         .padding(.horizontal, 2)
@@ -775,6 +796,44 @@ struct H2DTimelapseView: View {
         return timelapse.isPreviewRunning ? cinemaGreen : cinemaAmber
     }
 
+    private var flashAndDisplayCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 9) {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 14, weight: .black))
+                    .foregroundStyle(cinemaAmber)
+                    .frame(width: 30, height: 30)
+                    .background(cinemaAmber.opacity(0.12), in: Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("ĐÈN FLASH & MÀN HÌNH")
+                        .font(.system(size: 11, weight: .black, design: .monospaced))
+                    Text("Điều khiển flash được đặt ngoài màn hình timelapse để tránh chạm nhầm khi đang chụp.")
+                        .font(.system(size: 9, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.46))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                captureScreenBrightnessControl
+            }
+
+            Button {
+                timelapse.setTorchEnabled(!timelapse.isFlashModeActive)
+            } label: {
+                Label(
+                    timelapse.isFlashModeActive ? "Tắt đèn flash" : "Bật đèn flash",
+                    systemImage: timelapse.isFlashModeActive ? "bolt.fill" : "bolt.slash.fill"
+                )
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .frame(maxWidth: .infinity, minHeight: 34)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(timelapse.isFlashModeActive ? .yellow : .gray.opacity(0.55))
+            .disabled(!timelapse.canUseTorch)
+            .opacity(timelapse.canUseTorch ? 1 : 0.42)
+        }
+        .cardStyle()
+    }
+
     private var cinemaProjectorStandby: some View {
         ZStack {
             LinearGradient(
@@ -846,7 +905,7 @@ struct H2DTimelapseView: View {
                     Text("PRINTER TELEMETRY")
                         .font(.system(size: 9, weight: .black, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.38))
-                    Text(bluetooth.h2dBridgeStatus)
+                    Text(localizedStatus(bluetooth.h2dBridgeStatus))
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .lineLimit(2)
                 }
@@ -866,7 +925,7 @@ struct H2DTimelapseView: View {
                         Text(
                             isLayerPrintingOrChangingFilament
                                 ? "LAYER \(bluetooth.h2dCurrentLayer) / \(bluetooth.h2dTotalLayers)"
-                                : bluetooth.h2dStageText.uppercased()
+                                : localizedStatus(bluetooth.h2dStageText).uppercased()
                         )
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.58))
@@ -882,11 +941,11 @@ struct H2DTimelapseView: View {
                         HStack(spacing: 7) {
                             Image(systemName: "timer")
                                 .foregroundStyle(cinemaCyan)
-                            Text(bluetooth.remainingPrintTimeText)
+                            Text(localizedStatus(bluetooth.remainingPrintTimeText))
                                 .fontWeight(.bold)
                             Spacer(minLength: 8)
                             if !bluetooth.estimatedPrintFinishText.isEmpty {
-                                Text(bluetooth.estimatedPrintFinishText)
+                                Text(localizedStatus(bluetooth.estimatedPrintFinishText))
                                     .foregroundStyle(.white.opacity(0.55))
                             }
                         }
@@ -910,7 +969,7 @@ struct H2DTimelapseView: View {
             if bluetooth.hasActivePrinterAlert &&
                 !bluetooth.hasSelectedCriticalPrinterAlert &&
                 !bluetooth.printerAlertText.isEmpty {
-                Label(bluetooth.printerAlertText, systemImage: "exclamationmark.triangle.fill")
+                Label(localizedStatus(bluetooth.printerAlertText), systemImage: "exclamationmark.triangle.fill")
                     .font(.custom("Arial", size: 11).weight(.semibold))
                     .foregroundStyle(.orange)
             }
@@ -1121,7 +1180,7 @@ struct H2DTimelapseView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(selectedProfileID == profile.id ? .blue : .gray.opacity(0.34))
-                    .accessibilityLabel(profileAccessibilityText(profile: profile, status: fleet))
+                    .accessibilityLabel(localizedStatus(profileAccessibilityText(profile: profile, status: fleet)))
                     .disabled(bluetooth.isSwitchingPrinter && selectedProfileID == profile.id)
                     .draggable(profile.id)
                     .dropDestination(for: String.self) { identifiers, _ in
@@ -1160,9 +1219,9 @@ struct H2DTimelapseView: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(cinemaCyan)
 
-                Text(bluetooth.printerSwitchPhaseText.isEmpty
+                Text(localizedStatus(bluetooth.printerSwitchPhaseText.isEmpty
                     ? "Đang chuyển sang \(selectedPrinterKind.rawValue)"
-                    : bluetooth.printerSwitchPhaseText)
+                    : bluetooth.printerSwitchPhaseText))
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.82))
                     .lineLimit(1)
@@ -1235,14 +1294,14 @@ struct H2DTimelapseView: View {
             }
             .frame(maxWidth: .infinity)
 
-            Text(timelapse.statusText)
+            Text(localizedStatus(timelapse.statusText))
                 .font(.custom("Arial", size: 15).weight(.semibold))
                 .foregroundStyle(.white.opacity(0.58))
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 28)
 
             if bluetooth.h2dTotalLayers > 0 {
-                Text(
+                Text(localizedStatus(
                     timelapse.isStopping
                         ? "\(printerName) • đang dừng chụp và ghép ảnh"
                         : bluetooth.isStoppingPrint
@@ -1252,7 +1311,7 @@ struct H2DTimelapseView: View {
                             : isLayerPrintingOrChangingFilament
                         ? "\(printerName) • đang in lớp \(bluetooth.h2dCurrentLayer)/\(bluetooth.h2dTotalLayers)"
                         : "\(printerName) • \(bluetooth.h2dStageText.lowercased())"
-                )
+                ))
                     .font(.custom("Arial", size: 13).monospacedDigit().weight(.bold))
                     .foregroundStyle(.orange.opacity(0.65))
             }
@@ -1299,26 +1358,6 @@ struct H2DTimelapseView: View {
                             : "Hiện hình xem trước"
                     )
 
-                    Button {
-                        timelapse.setTorchEnabled(!timelapse.isFlashModeActive)
-                    } label: {
-                        Label(
-                            timelapse.isFlashModeActive ? "Tắt đèn flash" : "Bật đèn flash",
-                            systemImage: timelapse.isFlashModeActive
-                                ? "bolt.fill"
-                                : "bolt.slash.fill"
-                        )
-                            .labelStyle(.iconOnly)
-                            .frame(width: 44, height: 32)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(timelapse.isFlashModeActive ? .yellow : .gray)
-                    .disabled(!timelapse.canUseTorch)
-                    .opacity(timelapse.canUseTorch ? 1 : 0.42)
-                    .accessibilityLabel(
-                        timelapse.isFlashModeActive ? "Tắt đèn flash" : "Bật đèn flash"
-                    )
-
                     Button(role: .destructive) {
                         requestStopCapture()
                     } label: {
@@ -1359,11 +1398,11 @@ struct H2DTimelapseView: View {
             HStack(spacing: 7) {
                 Image(systemName: "timer")
                     .foregroundStyle(cinemaCyan)
-                Text(bluetooth.remainingPrintTimeText)
+                Text(localizedStatus(bluetooth.remainingPrintTimeText))
                     .fontWeight(.bold)
                 Spacer(minLength: 8)
                 if !bluetooth.estimatedPrintFinishText.isEmpty {
-                    Text(bluetooth.estimatedPrintFinishText)
+                    Text(localizedStatus(bluetooth.estimatedPrintFinishText))
                         .foregroundStyle(.white.opacity(0.56))
                 }
             }
@@ -1532,13 +1571,15 @@ struct H2DTimelapseView: View {
                 Image(systemName: timelapse.isCapturing ? "camera.fill" : "camera.badge.clock")
                     .foregroundStyle(timelapse.isCapturing ? Color.blue : Color.green)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(timelapse.isCapturing ? "iPhone đang chụp ảnh" : "Chế độ chụp đang hoạt động")
+                    Text(localizedStatus(
+                        timelapse.isCapturing ? "iPhone đang chụp ảnh" : "Chế độ chụp đang hoạt động"
+                    ))
                         .font(.custom("Arial", size: 13).weight(.bold))
-                    Text(
+                    Text(localizedStatus(
                         bluetooth.h2dStatusCode == "ARMED"
                             ? "ESP32 đã nhận chụp • đã lưu \(timelapse.capturedFrameCount) ảnh"
                             : "Đang đồng bộ ESP32 • đã lưu \(timelapse.capturedFrameCount) ảnh"
-                    )
+                    ))
                         .font(.custom("Arial", size: 11).monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -1548,8 +1589,6 @@ struct H2DTimelapseView: View {
                         .tint(.blue)
                         .padding(.top, 8)
                 }
-                captureScreenBrightnessControl
-                    .layoutPriority(1)
             }
 
             if timelapse.recentFramePreviews.isEmpty {
@@ -1595,11 +1634,11 @@ struct H2DTimelapseView: View {
 
     private func configurationLabel(_ title: String, detail: String? = nil) -> some View {
         HStack(spacing: 6) {
-            Text(title)
+            Text(LocalizedStringKey(title))
                 .font(.custom("Arial", size: 12).weight(.bold))
                 .foregroundStyle(.white.opacity(0.78))
             if let detail {
-                Text("• \(detail)")
+                Text("• \(localizedStatus(detail))")
                     .font(.custom("Arial", size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -1613,7 +1652,11 @@ struct H2DTimelapseView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Label(title, systemImage: systemImage)
+                Label {
+                    Text(LocalizedStringKey(title))
+                } icon: {
+                    Image(systemName: systemImage)
+                }
                 Spacer()
                 Text("\(Int((value.wrappedValue * 100).rounded()))%")
                     .monospacedDigit()
@@ -1622,6 +1665,10 @@ struct H2DTimelapseView: View {
             Slider(value: value, in: 0...1, step: 0.01)
                 .tint(cinemaCyan)
         }
+    }
+
+    private func localizedStatus(_ source: String) -> String {
+        SEStatusCopy.render(source, languageCode: appLanguageCode)
     }
 
     private func scheduleHardwareBuzzerVolumeSync() {

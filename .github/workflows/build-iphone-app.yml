@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.66 build145 - cong tac sang doc trong the chup
+name: Tao IPA SE v9.67 build146 - song LED tien do va song ngu
 
 on:
   workflow_dispatch:
@@ -44,6 +44,8 @@ jobs:
           test -f "RedCameraTest/H2DBLEManager.swift"
           test -f "RedCameraTest/H2DTimelapseManager.swift"
           test -f "RedCameraTest/H2DTimelapseView.swift"
+          test -f "RedCameraTest/SELanguage.swift"
+          test -f "RedCameraTest/en.lproj/Localizable.strings"
           test -f "RedCameraTest/BambuPrinterProfile.swift"
           test -f "RedCameraTest/BambuCredentialStore.swift"
           test -f "RedCameraTest/PrinterAlarmPlayer.swift"
@@ -140,6 +142,8 @@ jobs:
           grep -q "preservesProgressWhenHidden" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "ClockwiseScreenBorderShape" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "setCaptureScreenBrightness" "RedCameraTest/H2DTimelapseManager.swift"
+          grep -q 'SE.AppLanguage' "RedCameraTest/H2DTimelapseView.swift"
+          grep -q 'flashAndDisplayCard' "RedCameraTest/H2DTimelapseView.swift"
           grep -q "9.0 / 16.0" "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'case "FAILED": return .stopping' "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'Hiện hình xem trước' "RedCameraTest/H2DTimelapseView.swift"
@@ -197,20 +201,21 @@ jobs:
           test -f "$APP_PATH/fire-alarm-sound.mp3"
           test -f "$APP_PATH/iphone-screenshot-shutter.mp3"
           test -f "$APP_PATH/cine-projector-loop.mp3"
+          test -f "$APP_PATH/en.lproj/Localizable.strings"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.66"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "145"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.67"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "146"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.66-build145-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.67-build146-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.66-build145-unsigned-ipa
-          path: SE-v9.66-build145-unsigned.ipa
+          name: SE-v9.67-build146-unsigned-ipa
+          path: SE-v9.67-build146-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -293,8 +298,9 @@ jobs:
           grep -q 'modeEntryFlashUntil = now + 1000' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'hardwareMode == 0' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'breathingScale(now)' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'portion >= 0.999f' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'ledColor(77, 77, 77)' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'completedPixels + 1' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'FILAMENT_CHANGE_ERROR_GRACE_MS = 6000' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'promoteDeferredFilamentErrors' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'FLEET_PRINTER_COUNT = 3' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'fleetPrimaryPaused' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'maximumProfiles = 3' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/BambuPrinterProfile.swift
@@ -327,7 +333,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.15.9
+          name: SE-Bambu-ESP32-v1.16.0
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.15.9
+// SE Bambu Timelapse Bridge for classic ESP32 v1.16.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -78,6 +78,11 @@ constexpr uint32_t STATUS_PERIOD_MS = 2000;
 constexpr uint32_t TELEMETRY_PERIOD_MS = 1000;
 constexpr uint32_t STATUS_REQUEST_RETRY_MS = 3500;
 constexpr uint32_t PRINT_DATA_STALE_MS = 10000;
+// A user-initiated unload/load briefly raises a non-zero print_error on some
+// Bambu firmware versions.  Suppress that transition only while tray movement
+// is actually visible, then promote a still-present error after this short
+// grace period so a jam or a failed load is never hidden.
+constexpr uint32_t FILAMENT_CHANGE_ERROR_GRACE_MS = 6000;
 constexpr uint32_t DATA_TIMEOUT_MS = 45000;
 constexpr uint8_t MATERIAL_SYNC_RETRY_LIMIT = 5;
 constexpr uint8_t NOZZLE_SYNC_RETRY_LIMIT = 8;
@@ -175,6 +180,9 @@ struct FleetRuntime {
   bool criticalLatched = false;
   bool physicalAlarmAcknowledged = false;
   uint32_t printErrorCode = 0;
+  uint32_t deferredFilamentErrorCode = 0;
+  uint32_t filamentChangeGraceUntil = 0;
+  int stage = -1;
   uint32_t lastMessageAt = 0;
   uint32_t lastReachableAt = 0;
   uint8_t consecutiveProbeFailures = 0;
@@ -253,6 +261,8 @@ bool lastReportedPrinterAlert = false;
 bool lastReportedPrinterAlertCritical = false;
 uint32_t printErrorCode = 0;
 uint32_t lastReportedPrintErrorCode = 0;
+uint32_t deferredFilamentErrorCode = 0;
+uint32_t filamentChangeGraceUntil = 0;
 String printState = "IDLE";
 String activeJob = "0";
 String activeFilamentType = "";
@@ -1089,6 +1099,41 @@ bool extractJsonArrayHasItems(const uint8_t *payload, size_t length,
   return true;
 }
 
+bool isFilamentTransitionStage(int stage) {
+  // These are Bambu's material preparation / unload / load stages already
+  // shown by the iPhone as "Dang chuan bi vat lieu".
+  return stage == 4 || stage == 22 || stage == 24 || stage == 52 ||
+         stage == 77;
+}
+
+bool payloadShowsActiveFilamentTransition(const uint8_t *payload,
+                                          size_t length, int stage) {
+  if (!isFilamentTransitionStage(stage)) return false;
+  int trayNow = 255;
+  int trayPrevious = 255;
+  int trayTarget = 255;
+  const bool hasNow = extractLastJsonInt(payload, length, "tray_now", trayNow);
+  const bool hasPrevious =
+      extractLastJsonInt(payload, length, "tray_pre", trayPrevious);
+  const bool hasTarget =
+      extractLastJsonInt(payload, length, "tray_tar", trayTarget);
+
+  // No active tray while a valid target exists is the normal unload/load gap.
+  if (hasTarget && trayTarget >= 0 && trayTarget < 255 &&
+      (!hasNow || trayNow < 0 || trayNow == 255 || trayNow != trayTarget)) {
+    return true;
+  }
+  // A change from the previous tray to a different current tray is also a
+  // positive transition signal.  Stage alone is deliberately insufficient:
+  // a genuine "cannot load filament" error can use the same stage number.
+  return hasPrevious && hasNow && trayPrevious >= 0 && trayPrevious < 255 &&
+         trayNow >= 0 && trayNow < 255 && trayPrevious != trayNow;
+}
+
+bool filamentChangeGraceActive(uint32_t until) {
+  return until != 0 && static_cast<int32_t>(until - millis()) > 0;
+}
+
 bool findObjectRangeAfterKey(const uint8_t *payload, size_t length,
                              const char *key, size_t &start, size_t &end) {
   size_t searchFrom = 0;
@@ -1511,15 +1556,34 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
                        hasRemaining ? remaining : -1,
                        hasJob ? safeJobID(job) : activeJob);
   }
+  if (payloadShowsActiveFilamentTransition(payload, length, currentStage) &&
+      printState != "ERROR" && printState != "FAILED") {
+    filamentChangeGraceUntil =
+        millis() + Config::FILAMENT_CHANGE_ERROR_GRACE_MS;
+  }
   if (hasPrintError) {
     printErrorCode = incomingPrintError;
-    printErrorActive = incomingPrintError != 0;
     if (incomingPrintError == 0) {
       // A zero error code is the printer's acknowledgement/clear signal.
+      printErrorActive = false;
+      deferredFilamentErrorCode = 0;
+      filamentChangeGraceUntil = 0;
       criticalAlarmLatched = false;
       physicalCriticalAcknowledged = false;
+    } else if (!criticalAlarmLatched &&
+               filamentChangeGraceActive(filamentChangeGraceUntil) &&
+               printState != "ERROR" && printState != "FAILED") {
+      // An unload/load transition can momentarily reuse print_error. Hold this
+      // code without sounding; it is promoted below if it survives the grace
+      // window, while ERROR/FAILED always bypasses suppression immediately.
+      printErrorActive = false;
+      deferredFilamentErrorCode = incomingPrintError;
+      Serial.printf("[ALERT] defer filament-change error 0x%08lX\n",
+                    static_cast<unsigned long>(incomingPrintError));
     } else if (isActivePrintState(printState) || printState == "FAILED" ||
                printState == "ERROR") {
+      printErrorActive = true;
+      deferredFilamentErrorCode = 0;
       // Ignore old error codes contained in an idle pushall packet, but once a
       // real job fault is seen keep the alarm latched until the printer clears it.
       criticalAlarmLatched = true;
@@ -1530,6 +1594,8 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
     }
   }
   if (hasState && printState == "ERROR") {
+    printErrorActive = printErrorCode != 0;
+    deferredFilamentErrorCode = 0;
     criticalAlarmLatched = true;
     if (previousStateForAlarm != "ERROR" &&
         !selectedAlarmAlreadyAcknowledged(printErrorCode)) {
@@ -1563,9 +1629,11 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
   const bool hasState = extractLastJsonString(payload, length, "gcode_state", state);
   const bool hasPercent =
       extractLastJsonInt(payload, length, "mc_percent", percent);
+  int stage = runtime.stage;
+  const bool hasStage = extractLastJsonInt(payload, length, "stg_cur", stage);
   const bool hasPrintError =
       extractLastJsonUInt32(payload, length, "print_error", incomingError);
-  if (!hasState && !hasPercent && !hasPrintError) return;
+  if (!hasState && !hasPercent && !hasPrintError && !hasStage) return;
 
   runtime.online = true;
   runtime.lastMessageAt = millis();
@@ -1589,14 +1657,29 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
     }
   }
   if (hasPercent) runtime.percent = constrain(percent, 0, 100);
+  if (hasStage) runtime.stage = stage;
+  if (payloadShowsActiveFilamentTransition(payload, length, runtime.stage) &&
+      runtime.state != "ERROR" && runtime.state != "FAILED") {
+    runtime.filamentChangeGraceUntil =
+        millis() + Config::FILAMENT_CHANGE_ERROR_GRACE_MS;
+  }
   if (hasPrintError) {
     runtime.printErrorCode = incomingError;
-    runtime.printErrorActive = incomingError != 0;
     if (incomingError == 0) {
+      runtime.printErrorActive = false;
+      runtime.deferredFilamentErrorCode = 0;
+      runtime.filamentChangeGraceUntil = 0;
       runtime.criticalLatched = false;
       runtime.physicalAlarmAcknowledged = false;
+    } else if (!runtime.criticalLatched &&
+               filamentChangeGraceActive(runtime.filamentChangeGraceUntil) &&
+               runtime.state != "ERROR" && runtime.state != "FAILED") {
+      runtime.printErrorActive = false;
+      runtime.deferredFilamentErrorCode = incomingError;
     } else if (isActivePrintState(runtime.state) || runtime.state == "FAILED" ||
                runtime.state == "ERROR") {
+      runtime.printErrorActive = true;
+      runtime.deferredFilamentErrorCode = 0;
       runtime.criticalLatched = true;
       if (incomingError != previousError) {
         runtime.physicalAlarmAcknowledged = false;
@@ -2189,7 +2272,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.15.9");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.16.0");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2719,6 +2802,41 @@ void requestBuzzerBeep(uint32_t durationMs) {
   buzzerBeepUntil = millis() + (durationMs < 40 ? 40 : durationMs);
 }
 
+void promoteDeferredFilamentErrors() {
+  if (deferredFilamentErrorCode != 0 &&
+      !filamentChangeGraceActive(filamentChangeGraceUntil) &&
+      printErrorCode == deferredFilamentErrorCode &&
+      (isActivePrintState(printState) || printState == "ERROR" ||
+       printState == "FAILED")) {
+    printErrorActive = true;
+    criticalAlarmLatched = true;
+    physicalCriticalAcknowledged = false;
+    deferredFilamentErrorCode = 0;
+    Serial.printf("[ALERT] persistent filament error promoted 0x%08lX\n",
+                  static_cast<unsigned long>(printErrorCode));
+    reportPrinterAlert(true);
+    syncSelectedFleetRuntime();
+  }
+
+  for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
+    FleetRuntime &runtime = fleetRuntimes[i];
+    if (runtime.deferredFilamentErrorCode == 0 ||
+        filamentChangeGraceActive(runtime.filamentChangeGraceUntil) ||
+        runtime.printErrorCode != runtime.deferredFilamentErrorCode ||
+        !(isActivePrintState(runtime.state) || runtime.state == "ERROR" ||
+          runtime.state == "FAILED")) {
+      continue;
+    }
+    runtime.printErrorActive = true;
+    runtime.criticalLatched = true;
+    runtime.physicalAlarmAcknowledged = false;
+    runtime.deferredFilamentErrorCode = 0;
+    Serial.printf("[FLEET] persistent filament error promoted for %s\n",
+                  fleetProfiles[i].kind.c_str());
+    reportFleetStatus(i, true);
+  }
+}
+
 void updateBuzzerAlarm() {
   // ESP32 is the independent safety alarm. Every unacknowledged printer fault
   // sounds here even while the iPhone is connected; the phone may play its own
@@ -2840,34 +2958,42 @@ void updateLedStrip() {
     // calibration, nozzle cleaning and filament changes. Yellow is reserved
     // for an idle/flash state only.
     // Pixels 0...2 stay green. Pixels 3...6 are the four progress pixels.
-    // Future progress is white at exactly 30% of the green channel level. The
-    // active segment cross-fades continuously from that dim white to full
-    // green, and completed segments remain solid green.
+    // At 0%, the active pixel is dark and the final three are white at 30%.
+    // As the active pixel grows green, only the adjacent white pixel fades to
+    // black.  At the next quarter that now-dark pixel becomes the new green
+    // head and the following white pixel begins fading.  This moving boundary
+    // makes real progress much easier to read than a global white->green mix.
     fillStatusLeds(ledColor(0, 255, 58));
     const float filledPixels =
         smoothLedProgress(now) * Config::LED_ANIMATED_COUNT / 100.0f;
+    const uint16_t completedPixels = min(
+        Config::LED_ANIMATED_COUNT,
+        static_cast<uint16_t>(floorf(filledPixels)));
+    const float activePortion = completedPixels >= Config::LED_ANIMATED_COUNT
+        ? 1.0f
+        : constrain(filledPixels - completedPixels, 0.0f, 1.0f);
     for (uint16_t i = 0; i < Config::LED_ANIMATED_COUNT; ++i) {
       const uint16_t pixel = Config::LED_STATUS_COUNT + i;
-      const float portion = constrain(filledPixels - i, 0.0f, 1.0f);
-      if (portion <= 0.001f) {
-        ledStrip.setPixelColor(pixel, ledColor(77, 77, 77));
-        continue;
-      }
-      if (portion >= 0.999f) {
-        // A completed segment is the only progress state allowed to reach the
-        // fixed 95% power, so it remains unmistakable from the active segment.
+      if (i < completedPixels || completedPixels >= Config::LED_ANIMATED_COUNT) {
         ledStrip.setPixelColor(pixel, ledColor(0, 255, 58));
         continue;
       }
-      // Interpolate from 30%-white (77/255) to the full green state. This keeps
-      // unfinished LEDs visible without making them look completed.
-      const float eased = portion * portion * (3.0f - 2.0f * portion);
-      const uint8_t red = static_cast<uint8_t>((1.0f - eased) * 77.0f);
-      const uint8_t green = static_cast<uint8_t>(
-          77.0f + eased * (255.0f - 77.0f));
-      const uint8_t blue = static_cast<uint8_t>(
-          77.0f + eased * (58.0f - 77.0f));
-      ledStrip.setPixelColor(pixel, ledColor(red, green, blue));
+      if (i == completedPixels) {
+        const float eased = activePortion * activePortion *
+                            (3.0f - 2.0f * activePortion);
+        ledStrip.setPixelColor(
+            pixel, scaledLedColor(0, 255, 58,
+                                  static_cast<uint8_t>(eased * 255.0f)));
+        continue;
+      }
+      if (i == completedPixels + 1) {
+        const float fade = 1.0f - activePortion;
+        ledStrip.setPixelColor(
+            pixel, scaledLedColor(255, 255, 255,
+                                  static_cast<uint8_t>(fade * 77.0f)));
+      } else {
+        ledStrip.setPixelColor(pixel, scaledLedColor(255, 255, 255, 77));
+      }
     }
   } else if (hardwareMode == 0) {
     // Centre is the normal waiting position. Match the iPhone standby effect
@@ -2905,7 +3031,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.15.9");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.16.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
@@ -2948,6 +3074,7 @@ void loop() {
   // Wi-Fi/TLS work so the iPhone never mistakes a delayed ACK for old firmware.
   flushPhoneEvents();
   updateHardwareInputs();
+  promoteDeferredFilamentErrors();
   updateLedStrip();
   updateBuzzerAlarm();
   processDeferredNetworkWork();
