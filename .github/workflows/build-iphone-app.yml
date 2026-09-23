@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.67 build146 - song LED tien do va song ngu
+name: Tao IPA SE v9.68 build147 - do sang che do 3 va song ngu day du
 
 on:
   workflow_dispatch:
@@ -46,6 +46,7 @@ jobs:
           test -f "RedCameraTest/H2DTimelapseView.swift"
           test -f "RedCameraTest/SELanguage.swift"
           test -f "RedCameraTest/en.lproj/Localizable.strings"
+          test -f "RedCameraTest/vi.lproj/Localizable.strings"
           test -f "RedCameraTest/BambuPrinterProfile.swift"
           test -f "RedCameraTest/BambuCredentialStore.swift"
           test -f "RedCameraTest/PrinterAlarmPlayer.swift"
@@ -58,6 +59,9 @@ jobs:
           grep -q 'case "FLEET"' "RedCameraTest/H2DBLEManager.swift"
           grep -q "syncFleetProfiles" "RedCameraTest/H2DBLEManager.swift"
           grep -q "requestStopCapture" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "captureScreenBrightnessControl" "RedCameraTest/H2DTimelapseView.swift"
+          ! grep -q "flashAndDisplayCard" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "useEnglish ? english : vietnamese" "RedCameraTest/SELanguage.swift"
           grep -q "beginMqttLossGrace" "RedCameraTest/H2DBLEManager.swift"
           grep -q "stg_cur\|h2dStageCode" "RedCameraTest/H2DBLEManager.swift"
           grep -q "configurationTimeoutWorkItem" "RedCameraTest/H2DBLEManager.swift"
@@ -202,20 +206,21 @@ jobs:
           test -f "$APP_PATH/iphone-screenshot-shutter.mp3"
           test -f "$APP_PATH/cine-projector-loop.mp3"
           test -f "$APP_PATH/en.lproj/Localizable.strings"
+          test -f "$APP_PATH/vi.lproj/Localizable.strings"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.67"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "146"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.68"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "147"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.67-build146-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.68-build147-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.67-build146-unsigned-ipa
-          path: SE-v9.67-build146-unsigned.ipa
+          name: SE-v9.68-build147-unsigned-ipa
+          path: SE-v9.68-build147-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 

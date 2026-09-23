@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "9.67"
-    CURRENT_PROJECT_VERSION: "146"
+    MARKETING_VERSION: "9.68"
+    CURRENT_PROJECT_VERSION: "147"
 targets:
   RedCameraTest:
     type: application
@@ -27,6 +27,7 @@ targets:
       - path: RedCameraTest/iphone-screenshot-shutter.mp3
       - path: RedCameraTest/cine-projector-loop.mp3
       - path: RedCameraTest/en.lproj/Localizable.strings
+      - path: RedCameraTest/vi.lproj/Localizable.strings
     info:
       path: RedCameraTest/Info.plist
       properties:
@@ -45,8 +46,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: vn.rockettracker.RedCameraTest
-        MARKETING_VERSION: "9.67"
-        CURRENT_PROJECT_VERSION: "146"
+        MARKETING_VERSION: "9.68"
+        CURRENT_PROJECT_VERSION: "147"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"

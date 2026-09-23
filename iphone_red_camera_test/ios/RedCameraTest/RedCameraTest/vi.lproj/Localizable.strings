@@ -1,0 +1,19 @@
+/* English source labels that must become fully Vietnamese when TV is selected. */
+"SE CINEMA CONTROL" = "TRUNG TÂM ĐIỀU KHIỂN SE";
+"SMART LAYER CAPTURE • %@" = "CHỤP LỚP THÔNG MINH • %@";
+"OPTICAL VIEWFINDER" = "KHUNG NGẮM QUANG HỌC";
+"CAMERA IPHONE • 1.5×" = "CAMERA IPHONE • 1,5×";
+"SE // OPTICAL UNIT" = "SE // CỤM QUANG HỌC";
+"Access Code" = "Mã truy cập";
+"OK" = "Đồng ý";
+
+/* Remove the remaining mixed English words from Vietnamese copy. */
+"Ẩn viewfinder không tắt chức năng chụp tự động theo lớp." = "Ẩn khung ngắm không tắt chức năng chụp tự động theo lớp.";
+"Smooth Timelapse: camera được giữ sẵn sàng và chụp ngay trong khoảng tháp Smooth, trước khi máy chuyển sang lớp kế tiếp. Khi vào lại giữa bản in, SE bắt đầu từ lớp hiện tại và không chụp bù lớp cũ." = "Timelapse mượt: camera luôn sẵn sàng và chọn khung hình sạch trước khi máy chuyển sang lớp kế tiếp. Khi mở lại giữa bản in, SE bắt đầu từ lớp hiện tại và không chụp bù các lớp cũ.";
+"Nhập mã trong mục LAN Only" = "Nhập mã trong mục Chỉ dùng LAN";
+"Access Code LAN phải có ít nhất 6 ký tự" = "Mã truy cập LAN phải có ít nhất 6 ký tự";
+"Hãy nhập đủ Wi-Fi, IP, serial và Access Code LAN" = "Hãy nhập đủ Wi-Fi, IP, số sê-ri và mã truy cập LAN";
+"Serial máy in" = "Số sê-ri máy in";
+"Chưa nhận được loại máy từ serial" = "Chưa nhận được loại máy từ số sê-ri";
+"Chọn hồ sơ; SE còn tự kiểm tra đầu serial để nhận đúng A1 / H2D / P2S." = "Chọn hồ sơ; SE còn tự kiểm tra đầu số sê-ri để nhận đúng A1 / H2D / P2S.";
+

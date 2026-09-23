@@ -15,10 +15,19 @@ enum SEAppLanguage: String, CaseIterable, Identifiable {
 /// they have already been assembled into a String.
 enum SEStatusCopy {
     static func render(_ source: String, languageCode: String) -> String {
-        guard languageCode == SEAppLanguage.english.rawValue else { return source }
+        let useEnglish = languageCode == SEAppLanguage.english.rawValue
         var result = source
-        for (vietnamese, english) in replacements {
-            result = result.replacingOccurrences(of: vietnamese, with: english)
+        let ordered = replacements.sorted { lhs, rhs in
+            let lhsSource = useEnglish ? lhs.0 : lhs.1
+            let rhsSource = useEnglish ? rhs.0 : rhs.1
+            return lhsSource.count > rhsSource.count
+        }
+        for (vietnamese, english) in ordered where vietnamese != english {
+            result = result.replacingOccurrences(
+                of: useEnglish ? vietnamese : english,
+                with: useEnglish ? english : vietnamese,
+                options: [.caseInsensitive]
+            )
         }
         return result
     }
@@ -134,6 +143,71 @@ enum SEStatusCopy {
         ("Không đọc được ảnh timelapse", "Could not read timelapse frame"),
         ("Không mở được camera sau của iPhone", "Could not open the rear iPhone camera"),
         ("Không tạo được thư mục ảnh timelapse", "Could not create timelapse frame folder"),
+        ("KHỞI ĐỘNG TIMELAPSE", "START TIMELAPSE"),
+        ("Theo dõi", "Monitor"),
+        ("tự chụp từng lớp", "automatically capture every layer"),
+        ("KHUNG NGẮM QUANG HỌC", "OPTICAL VIEWFINDER"),
+        ("CAMERA IPHONE", "IPHONE CAMERA"),
+        ("KẾT NỐI", "LINK"),
+        ("NGẮT KẾT NỐI", "OFFLINE"),
+        ("TRỰC TIẾP", "LIVE"),
+        ("ĐANG KHỞI ĐỘNG", "WARMING"),
+        ("CHỜ", "STANDBY"),
+        ("ĐANG KHỞI TẠO CAMERA", "INITIALIZING OPTICS"),
+        ("FLASH ĐANG BẬT", "FLASH ON"),
+        ("CAMERA ĐÃ TẮT", "CAM OFF"),
+        ("ĐÈN ĐANG HOẠT ĐỘNG", "ILLUMINATION ACTIVE"),
+        ("SẴN SÀNG NHẬN TÍN HIỆU LỚP", "READY FOR LAYER SIGNAL"),
+        ("THÔNG SỐ MÁY IN", "PRINTER TELEMETRY"),
+        ("Lớp", "Layer"),
+        ("KHUNG HÌNH ĐÃ CHỤP", "FRAMES CAPTURED"),
+        ("ĐANG GHÉP VIDEO", "RENDER ENGINE ACTIVE"),
+        ("CẢM BIẾN LỚP ĐÃ SẴN SÀNG", "LAYER SENSOR ARMED"),
+        ("Bàn in", "Build plate"),
+        ("Đầu trái", "Left nozzle"),
+        ("Đầu phải", "Right nozzle"),
+        ("Đầu in", "Nozzle"),
+        ("Quạt chi tiết", "Part fan"),
+        ("Quạt phụ", "Aux fan"),
+        ("Quạt xả", "Exhaust fan"),
+        ("Quạt:", "Fans:"),
+        ("đang được chọn để chụp", "selected for capture"),
+        ("không được chọn để chụp", "not selected for capture"),
+        ("đang trực tuyến", "online"),
+        ("chưa trực tuyến", "offline"),
+        ("phần trăm", "percent"),
+        ("Đang gửi", "Sending"),
+        ("ESP32 chưa xác nhận", "ESP32 has not acknowledged"),
+        ("đang gửi lại lần", "retrying attempt"),
+        ("Đã lưu cấu hình", "Profile saved"),
+        ("đang kết nối lại", "reconnecting"),
+        ("ESP32 đã nhận hồ sơ", "ESP32 received the profile"),
+        ("đang chọn máy", "selecting printer"),
+        ("Đúng serial", "Serial verified for"),
+        ("Đúng máy", "Printer verified"),
+        ("chờ đúng serial", "waiting for the matching serial"),
+        ("Đã chọn", "Selected"),
+        ("chờ gửi cấu hình", "waiting to send configuration"),
+        ("ESP32 chưa sẵn sàng để đổi máy in", "ESP32 is not ready to switch printers"),
+        ("ESP32 không xác nhận dữ liệu", "ESP32 did not acknowledge the data"),
+        ("cần firmware Bambu", "Bambu firmware required"),
+        ("Đã kết nối ESP32 • đang kiểm tra máy in", "ESP32 connected • checking printer"),
+        ("Đã kết nối ESP32 • cầu nối Bambu", "ESP32 connected • Bambu bridge"),
+        ("Mất dữ liệu", "Lost data from"),
+        ("ESP32 đang tự kết nối lại", "ESP32 is reconnecting automatically"),
+        ("ESP32 đang chạy firmware cũ", "ESP32 is running old firmware"),
+        ("hãy nạp bản Bambu", "install Bambu firmware"),
+        ("ESP32 thiếu bộ nhớ nhận gói", "ESP32 lacks packet memory for"),
+        ("hãy khởi động lại", "restart it"),
+        ("Không xác thực được", "Could not authenticate"),
+        ("kiểm tra Access Code LAN", "check the LAN Access Code"),
+        ("Wi-Fi đã kết nối", "Wi-Fi connected"),
+        ("đang tìm máy in", "searching for printer"),
+        ("Trạng thái", "Status of"),
+        ("báo lỗi máy in", "printer error"),
+        ("có lỗi,", "has an error,"),
+        ("hãy kiểm tra màn hình máy in", "check the printer display"),
+        ("Chưa lắp ống bọc silicon đầu phun; có nguy cơ lỗi điều khiển nhiệt độ. Hãy lắp đúng rồi thử lại.", "The nozzle silicone sleeve is not installed; there is a risk of temperature control failure. Please install it correctly and try again."),
         (" ảnh", " photos"),
         (" phút", " min"),
         (" giờ", " hr")

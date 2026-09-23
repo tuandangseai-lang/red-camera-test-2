@@ -588,7 +588,6 @@ struct H2DTimelapseView: View {
                 VStack(spacing: 16) {
                     cinemaSystemHeader
                     cameraCard
-                    flashAndDisplayCard
                     bridgeStatusCard
                     configurationCard
 
@@ -673,7 +672,7 @@ struct H2DTimelapseView: View {
                         .fill(bluetooth.isConnected ? cinemaGreen : .red)
                         .frame(width: 6, height: 6)
                         .shadow(color: bluetooth.isConnected ? cinemaGreen : .red, radius: 4)
-                    Text(bluetooth.isConnected ? "LINK" : "OFFLINE")
+                    Text(localizedStatus(bluetooth.isConnected ? "LINK" : "OFFLINE"))
                 }
                 .font(.system(size: 9, weight: .bold, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.74))
@@ -695,7 +694,7 @@ struct H2DTimelapseView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(appLanguageCode == "vi" ? "Đổi sang tiếng Anh" : "Switch to Vietnamese")
 
-                    Text("V9.67")
+                    Text("V9.68")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.34))
                 }
@@ -722,7 +721,9 @@ struct H2DTimelapseView: View {
                         .fill(cameraStatusColor)
                         .frame(width: 6, height: 6)
                         .shadow(color: cameraStatusColor, radius: 4)
-                    Text(setupCameraEnabled ? (timelapse.isPreviewRunning ? "LIVE" : "WARMING") : "STANDBY")
+                    Text(localizedStatus(
+                        setupCameraEnabled ? (timelapse.isPreviewRunning ? "LIVE" : "WARMING") : "STANDBY"
+                    ))
                 }
                 .font(.system(size: 9, weight: .black, design: .monospaced))
                 .foregroundStyle(cameraStatusColor)
@@ -764,7 +765,7 @@ struct H2DTimelapseView: View {
                                     VStack(spacing: 9) {
                                         ProgressView()
                                             .tint(cinemaAmber)
-                                        Text("INITIALIZING OPTICS")
+                                        Text(localizedStatus("INITIALIZING OPTICS"))
                                             .font(.system(size: 9, weight: .bold, design: .monospaced))
                                             .foregroundStyle(.white.opacity(0.55))
                                     }
@@ -794,44 +795,6 @@ struct H2DTimelapseView: View {
     private var cameraStatusColor: Color {
         guard setupCameraEnabled else { return .white.opacity(0.42) }
         return timelapse.isPreviewRunning ? cinemaGreen : cinemaAmber
-    }
-
-    private var flashAndDisplayCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 9) {
-                Image(systemName: "bolt.fill")
-                    .font(.system(size: 14, weight: .black))
-                    .foregroundStyle(cinemaAmber)
-                    .frame(width: 30, height: 30)
-                    .background(cinemaAmber.opacity(0.12), in: Circle())
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("ĐÈN FLASH & MÀN HÌNH")
-                        .font(.system(size: 11, weight: .black, design: .monospaced))
-                    Text("Điều khiển flash được đặt ngoài màn hình timelapse để tránh chạm nhầm khi đang chụp.")
-                        .font(.system(size: 9, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.46))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 8)
-                captureScreenBrightnessControl
-            }
-
-            Button {
-                timelapse.setTorchEnabled(!timelapse.isFlashModeActive)
-            } label: {
-                Label(
-                    timelapse.isFlashModeActive ? "Tắt đèn flash" : "Bật đèn flash",
-                    systemImage: timelapse.isFlashModeActive ? "bolt.fill" : "bolt.slash.fill"
-                )
-                .font(.system(size: 12, weight: .bold, design: .rounded))
-                .frame(maxWidth: .infinity, minHeight: 34)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(timelapse.isFlashModeActive ? .yellow : .gray.opacity(0.55))
-            .disabled(!timelapse.canUseTorch)
-            .opacity(timelapse.canUseTorch ? 1 : 0.42)
-        }
-        .cardStyle()
     }
 
     private var cinemaProjectorStandby: some View {
@@ -868,13 +831,15 @@ struct H2DTimelapseView: View {
                 HStack {
                     Text("SE // OPTICAL UNIT")
                     Spacer()
-                    Text(isFlashArtworkActive ? "FLASH ON" : "CAM OFF")
+                    Text(localizedStatus(isFlashArtworkActive ? "FLASH ON" : "CAM OFF"))
                         .foregroundStyle(cinemaAmber)
                 }
                 Spacer()
                 HStack {
                     Image(systemName: isFlashArtworkActive ? "bolt.fill" : "viewfinder")
-                    Text(isFlashArtworkActive ? "ILLUMINATION ACTIVE" : "READY FOR LAYER SIGNAL")
+                    Text(localizedStatus(
+                        isFlashArtworkActive ? "ILLUMINATION ACTIVE" : "READY FOR LAYER SIGNAL"
+                    ))
                     Spacer()
                     Text("9:16")
                 }
@@ -902,7 +867,7 @@ struct H2DTimelapseView: View {
                         .shadow(color: bridgeAccentColor.opacity(0.65), radius: 5)
                 }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("PRINTER TELEMETRY")
+                    Text(localizedStatus("PRINTER TELEMETRY"))
                         .font(.system(size: 9, weight: .black, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.38))
                     Text(localizedStatus(bluetooth.h2dBridgeStatus))
@@ -924,7 +889,7 @@ struct H2DTimelapseView: View {
                     HStack(alignment: .lastTextBaseline) {
                         Text(
                             isLayerPrintingOrChangingFilament
-                                ? "LAYER \(bluetooth.h2dCurrentLayer) / \(bluetooth.h2dTotalLayers)"
+                                ? "\(localizedStatus("Lớp").uppercased()) \(bluetooth.h2dCurrentLayer) / \(bluetooth.h2dTotalLayers)"
                                 : localizedStatus(bluetooth.h2dStageText).uppercased()
                         )
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
@@ -959,7 +924,7 @@ struct H2DTimelapseView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     if bluetooth.hasTemperatureTelemetry { temperatureTelemetryRows }
                     if bluetooth.hasFanTelemetry {
-                        Label(fanTelemetryText, systemImage: "fan.fill")
+                        Label(localizedStatus(fanTelemetryText), systemImage: "fan.fill")
                             .font(.custom("Arial", size: 11).monospacedDigit().weight(.semibold))
                             .foregroundStyle(.cyan.opacity(0.85))
                     }
@@ -1324,7 +1289,7 @@ struct H2DTimelapseView: View {
                 VStack(spacing: 4) {
                     if bluetooth.hasTemperatureTelemetry { temperatureTelemetryRows }
                     if bluetooth.hasFanTelemetry {
-                        Label(fanTelemetryText, systemImage: "fan.fill")
+                        Label(localizedStatus(fanTelemetryText), systemImage: "fan.fill")
                             .font(.custom("Arial", size: 10).monospacedDigit().weight(.semibold))
                             .foregroundStyle(.cyan.opacity(0.78))
                     }
@@ -1454,7 +1419,7 @@ struct H2DTimelapseView: View {
                     Text("\(timelapse.capturedFrameCount)")
                         .font(.system(size: 38, weight: .black, design: .rounded))
                         .monospacedDigit()
-                    Text("FRAMES CAPTURED")
+                    Text(localizedStatus("FRAMES CAPTURED"))
                         .font(.system(size: 8, weight: .black, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.42))
                         .tracking(0.7)
@@ -1470,7 +1435,9 @@ struct H2DTimelapseView: View {
                 Circle()
                     .fill(timelapse.isRendering ? cinemaCyan : cinemaGreen)
                     .frame(width: 5, height: 5)
-                Text(timelapse.isRendering ? "RENDER ENGINE ACTIVE" : "LAYER SENSOR ARMED")
+                Text(localizedStatus(
+                    timelapse.isRendering ? "RENDER ENGINE ACTIVE" : "LAYER SENSOR ARMED"
+                ))
             }
             .font(.system(size: 8, weight: .bold, design: .monospaced))
             .foregroundStyle(.white.opacity(0.46))
@@ -1479,19 +1446,13 @@ struct H2DTimelapseView: View {
 
     private var captureScreenBrightnessControl: some View {
         VStack(spacing: showCaptureBrightnessSlider ? 8 : 0) {
-            Button {
-                let willExpand = !showCaptureBrightnessSlider
-                withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
-                    showCaptureBrightnessSlider = willExpand
-                }
-                if willExpand {
+            if !showCaptureBrightnessSlider {
+                Button {
+                    withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
+                        showCaptureBrightnessSlider = true
+                    }
                     scheduleCaptureBrightnessAutoCollapse()
-                } else {
-                    captureBrightnessCollapseWorkItem?.cancel()
-                    captureBrightnessCollapseWorkItem = nil
-                }
-            } label: {
-                HStack(spacing: 7) {
+                } label: {
                     ZStack(alignment: captureScreenBrightness > 0.01 ? .bottom : .top) {
                         Capsule()
                             .fill(
@@ -1517,24 +1478,16 @@ struct H2DTimelapseView: View {
                         Capsule()
                             .stroke(cinemaAmber.opacity(captureScreenBrightness > 0.01 ? 0.54 : 0.20), lineWidth: 1.2)
                     }
-
-                    if showCaptureBrightnessSlider {
-                        Text("\(Int((captureScreenBrightness * 100).rounded()))%")
-                            .font(.system(size: 11, weight: .black, design: .monospaced))
-                            .monospacedDigit()
-                            .foregroundStyle(cinemaAmber)
-                    }
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(
-                showCaptureBrightnessSlider
-                    ? "Thu gọn thanh độ sáng màn hình"
-                    : "Mở thanh độ sáng màn hình"
-            )
+                .buttonStyle(.plain)
+                .accessibilityLabel(localizedStatus("Mở thanh độ sáng màn hình"))
+            } else {
+                Text("\(Int((captureScreenBrightness * 100).rounded()))%")
+                    .font(.system(size: 11, weight: .black, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(cinemaAmber)
 
-            if showCaptureBrightnessSlider {
                 Slider(value: $captureScreenBrightness, in: 0...1, step: 0.01)
                     .tint(cinemaAmber)
                     .frame(width: 164)
@@ -1547,10 +1500,6 @@ struct H2DTimelapseView: View {
                         )
                     )
 
-                Image(systemName: "chevron.up")
-                    .font(.system(size: 8, weight: .black))
-                    .foregroundStyle(.white.opacity(0.45))
-                    .transition(.opacity)
             }
         }
         .padding(.horizontal, showCaptureBrightnessSlider ? 11 : 5)
@@ -1561,8 +1510,8 @@ struct H2DTimelapseView: View {
         .opacity(isFlashArtworkActive ? 0.34 : 1)
         .disabled(isFlashArtworkActive)
         .animation(.spring(response: 0.30, dampingFraction: 0.82), value: showCaptureBrightnessSlider)
-        .accessibilityLabel("Độ sáng màn hình iPhone")
-        .accessibilityValue("\(Int((captureScreenBrightness * 100).rounded())) phần trăm")
+        .accessibilityLabel(localizedStatus("Độ sáng màn hình iPhone"))
+        .accessibilityValue(localizedStatus("\(Int((captureScreenBrightness * 100).rounded())) phần trăm"))
     }
 
     private var capturedFramesCard: some View {
@@ -1589,6 +1538,7 @@ struct H2DTimelapseView: View {
                         .tint(.blue)
                         .padding(.top, 8)
                 }
+                captureScreenBrightnessControl
             }
 
             if timelapse.recentFramePreviews.isEmpty {
@@ -1827,7 +1777,7 @@ struct H2DTimelapseView: View {
     private func telemetryValue(_ label: String, current: Int, target: Int) -> some View {
         let currentText = current >= 0 ? "\(current)" : "–"
         let targetText = target >= 0 ? "\(target)" : "–"
-        return Label("\(label) \(currentText)/\(targetText)°C", systemImage: "thermometer.medium")
+        return Label("\(localizedStatus(label)) \(currentText)/\(targetText)°C", systemImage: "thermometer.medium")
             .font(.custom("Arial", size: 11).monospacedDigit().weight(.semibold))
             .foregroundStyle(.orange.opacity(0.88))
     }
@@ -1873,9 +1823,9 @@ struct H2DTimelapseView: View {
 
     private var fanTelemetryText: String {
         var values: [String] = []
-        if bluetooth.partFanPercent >= 0 { values.append("Part \(bluetooth.partFanPercent)%") }
-        if bluetooth.auxiliaryFanPercent >= 0 { values.append("Aux \(bluetooth.auxiliaryFanPercent)%") }
-        if bluetooth.exhaustFanPercent >= 0 { values.append("Exhaust \(bluetooth.exhaustFanPercent)%") }
+        if bluetooth.partFanPercent >= 0 { values.append("Quạt chi tiết \(bluetooth.partFanPercent)%") }
+        if bluetooth.auxiliaryFanPercent >= 0 { values.append("Quạt phụ \(bluetooth.auxiliaryFanPercent)%") }
+        if bluetooth.exhaustFanPercent >= 0 { values.append("Quạt xả \(bluetooth.exhaustFanPercent)%") }
         return "Quạt: " + values.joined(separator: " • ")
     }
 
