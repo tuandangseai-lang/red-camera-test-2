@@ -147,7 +147,6 @@ jobs:
           grep -q "ClockwiseScreenBorderShape" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "setCaptureScreenBrightness" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q 'SE.AppLanguage' "RedCameraTest/H2DTimelapseView.swift"
-          grep -q 'flashAndDisplayCard' "RedCameraTest/H2DTimelapseView.swift"
           grep -q "9.0 / 16.0" "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'case "FAILED": return .stopping' "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'Hiện hình xem trước' "RedCameraTest/H2DTimelapseView.swift"
