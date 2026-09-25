@@ -46,6 +46,7 @@ struct H2DTimelapseView: View {
     @State private var showCaptureBrightnessSlider = false
     @State private var captureBrightnessCollapseWorkItem: DispatchWorkItem?
     @State private var printerCameraExpanded = false
+    @State private var showPrinterControls = false
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -111,6 +112,12 @@ struct H2DTimelapseView: View {
                 Button("Tiếp tục chụp", role: .cancel) {}
             } message: {
                 Text("Dừng chụp không dừng máy in \(printerName).")
+            }
+            .sheet(isPresented: $showPrinterControls) {
+                PrinterRemoteControlView(
+                    bluetooth: bluetooth,
+                    printerName: printerName
+                )
             }
     }
 
@@ -588,6 +595,7 @@ struct H2DTimelapseView: View {
                         printerAlarmSilenceBanner
                     }
                     printerCameraCard
+                    printerRemoteControlCard
                     bridgeStatusCard
                     configurationCard
 
@@ -694,7 +702,7 @@ struct H2DTimelapseView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(appLanguageCode == "vi" ? "Đổi sang tiếng Anh" : "Switch to Vietnamese")
 
-                    Text("V9.72")
+                    Text("V9.73")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.34))
                 }
@@ -702,6 +710,45 @@ struct H2DTimelapseView: View {
         }
         .padding(.horizontal, 2)
         .padding(.vertical, 5)
+    }
+
+    private var printerRemoteControlCard: some View {
+        Button {
+            showPrinterControls = true
+        } label: {
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(cinemaCyan.opacity(0.13))
+                        .frame(width: 42, height: 42)
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(cinemaCyan)
+                        .shadow(color: cinemaCyan.opacity(0.55), radius: 6)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("ĐIỀU KHIỂN MÁY IN")
+                        .font(.system(size: 13, weight: .black, design: .rounded))
+                    Text("Tạm dừng • bỏ qua vật thể • nạp/rút nhựa")
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.52))
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .black))
+                    .foregroundStyle(cinemaCyan)
+            }
+            .padding(15)
+            .frame(maxWidth: .infinity)
+            .background(.black.opacity(0.46), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(cinemaCyan.opacity(0.20), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(!bluetooth.isConnected || !bluetooth.isH2DBridge)
+        .opacity(bluetooth.isConnected && bluetooth.isH2DBridge ? 1 : 0.45)
     }
 
     private var printerCameraCard: some View {

@@ -70,6 +70,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var hardwareBuzzerVolume = 100
     @Published private(set) var hardwareLEDBrightness = 95
     @Published private(set) var hardwareControlRevision = 0
+    @Published private(set) var isPrinterControlPending = false
+    @Published private(set) var printerControlStatusText = "Sẵn sàng điều khiển máy in"
+    @Published private(set) var printerControlLastSucceeded: Bool?
     @Published private(set) var fleetStatuses: [BambuPrinterKind: BambuFleetStatus] = [:]
     @Published private(set) var profileFleetStatuses: [String: BambuFleetStatus] = [:]
 
@@ -387,6 +390,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private var fleetSyncGeneration: UInt64 = 0
     private var printerSwitchTimeoutWorkItem: DispatchWorkItem?
     private var printerSwitchGeneration: UInt64 = 0
+    private var printerControlTimeoutWorkItem: DispatchWorkItem?
+    private var printerControlGeneration: UInt64 = 0
 
     override init() {
         super.init()
@@ -661,6 +666,117 @@ final class H2DBLEManager: NSObject, ObservableObject {
         // The printer's red state remains visible, and a new error code will
         // re-arm both the iPhone and ESP32 alarms automatically.
         _ = send("H2D_ALARM_ACK")
+    }
+
+    func pauseSelectedPrint() {
+        sendPrinterControl("H2D_PRINT_PAUSE", waitingText: "Đang gửi lệnh tạm dừng…")
+    }
+
+    func resumeSelectedPrint() {
+        sendPrinterControl("H2D_PRINT_RESUME", waitingText: "Đang gửi lệnh tiếp tục…")
+    }
+
+    func stopSelectedPrint() {
+        sendPrinterControl("H2D_PRINT_STOP", waitingText: "Đang gửi lệnh dừng bản in…")
+    }
+
+    func skipSelectedPrintObjects(_ objectIDs: [Int]) {
+        let normalized = Array(Set(objectIDs.filter { (0...9999).contains($0) })).sorted()
+        guard !normalized.isEmpty, normalized.count <= 24 else {
+            failPrinterControlLocally("Danh sách vật thể không hợp lệ")
+            return
+        }
+        let payload = normalized.map(String.init).joined(separator: ",")
+        sendPrinterControl(
+            "H2D_SKIP_OBJECTS,\(payload)",
+            waitingText: "Đang gửi lệnh bỏ qua \(normalized.count) vật thể…"
+        )
+    }
+
+    func loadFilament(amsID: Int, slotID: Int, target: Int, temperature: Int) {
+        guard (0...255).contains(amsID), (0...254).contains(slotID),
+              (0...254).contains(target), (170...320).contains(temperature) else {
+            failPrinterControlLocally("Thông số nạp nhựa không hợp lệ")
+            return
+        }
+        sendPrinterControl(
+            "H2D_FILAMENT_LOAD,\(amsID),\(slotID),\(target),\(temperature)",
+            waitingText: "Đang gửi lệnh nạp nhựa…"
+        )
+    }
+
+    func unloadFilament(amsID: Int) {
+        guard (0...255).contains(amsID) else {
+            failPrinterControlLocally("Nguồn nhựa không hợp lệ")
+            return
+        }
+        sendPrinterControl(
+            "H2D_FILAMENT_UNLOAD,\(amsID)",
+            waitingText: "Đang gửi lệnh rút nhựa…"
+        )
+    }
+
+    func continueFilamentOperation() {
+        sendPrinterControl("H2D_AMS_CONTROL,resume", waitingText: "Đang yêu cầu AMS tiếp tục…")
+    }
+
+    func finishFilamentOperation() {
+        sendPrinterControl("H2D_AMS_CONTROL,done", waitingText: "Đang xác nhận hoàn tất thay nhựa…")
+    }
+
+    func setSelectedPrintSpeed(_ level: Int) {
+        guard (1...4).contains(level) else {
+            failPrinterControlLocally("Mức tốc độ không hợp lệ")
+            return
+        }
+        sendPrinterControl(
+            "H2D_PRINT_SPEED,\(level)",
+            waitingText: "Đang đổi tốc độ in…"
+        )
+    }
+
+    func setChamberLightEnabled(_ enabled: Bool) {
+        sendPrinterControl(
+            "H2D_CHAMBER_LIGHT,\(enabled ? 1 : 0)",
+            waitingText: enabled ? "Đang bật đèn buồng in…" : "Đang tắt đèn buồng in…"
+        )
+    }
+
+    private func sendPrinterControl(_ command: String, waitingText: String) {
+        guard !isPrinterControlPending else { return }
+        guard isConnected, isH2DBridge, isH2DReady, !isSwitchingPrinter else {
+            failPrinterControlLocally("ESP32 hoặc máy in chưa sẵn sàng")
+            return
+        }
+
+        printerControlTimeoutWorkItem?.cancel()
+        printerControlGeneration &+= 1
+        let generation = printerControlGeneration
+        isPrinterControlPending = true
+        printerControlLastSucceeded = nil
+        printerControlStatusText = waitingText
+        guard send(command) else {
+            failPrinterControlLocally("Mất kết nối Bluetooth với ESP32")
+            return
+        }
+
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.isPrinterControlPending,
+                  self.printerControlGeneration == generation else { return }
+            self.isPrinterControlPending = false
+            self.printerControlLastSucceeded = false
+            self.printerControlStatusText = "Máy in chưa xác nhận nhận lệnh • hãy thử lại"
+        }
+        printerControlTimeoutWorkItem = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 22, execute: timeout)
+    }
+
+    private func failPrinterControlLocally(_ message: String) {
+        printerControlTimeoutWorkItem?.cancel()
+        printerControlTimeoutWorkItem = nil
+        isPrinterControlPending = false
+        printerControlLastSucceeded = false
+        printerControlStatusText = message
     }
 
     func requestFleetRefresh() {
@@ -1118,6 +1234,34 @@ final class H2DBLEManager: NSObject, ObservableObject {
             // The view already dismisses its blue completion presentation
             // locally. This packet confirms that ESP32 cleared the same timer.
             break
+        case "REMOTE_ACK":
+            printerControlTimeoutWorkItem?.cancel()
+            printerControlTimeoutWorkItem = nil
+            isPrinterControlPending = false
+            printerControlLastSucceeded = true
+            let action = fields.count >= 3 ? fields[2].uppercased() : "COMMAND"
+            let labels = [
+                "PAUSE": "Đã gửi lệnh tạm dừng",
+                "RESUME": "Đã gửi lệnh tiếp tục in",
+                "STOP": "Đã gửi lệnh dừng bản in",
+                "SKIP_OBJECTS": "Đã gửi danh sách vật thể cần bỏ qua",
+                "LOAD_FILAMENT": "Đã gửi lệnh nạp nhựa",
+                "UNLOAD_FILAMENT": "Đã gửi lệnh rút nhựa",
+                "AMS_RESUME": "Đã yêu cầu AMS tiếp tục",
+                "AMS_DONE": "Đã xác nhận hoàn tất thay nhựa",
+                "PRINT_SPEED": "Đã gửi mức tốc độ mới",
+                "CHAMBER_LIGHT": "Đã gửi trạng thái đèn buồng in"
+            ]
+            printerControlStatusText = (labels[action] ?? "Máy in đã nhận lệnh") + " • đang chờ máy thực hiện"
+        case "REMOTE_ERROR":
+            printerControlTimeoutWorkItem?.cancel()
+            printerControlTimeoutWorkItem = nil
+            isPrinterControlPending = false
+            printerControlLastSucceeded = false
+            let detail = fields.dropFirst(3).joined(separator: " • ")
+            printerControlStatusText = detail.isEmpty
+                ? "Không gửi được lệnh tới máy in"
+                : detail
         case "STATUS":
             guard fields.count >= 3 else { return }
             let status = fields[2].uppercased()

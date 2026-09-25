@@ -8,13 +8,13 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.16.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.17.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
-// The ESP32 never controls motion or temperature. It only reads print status,
-// converts a completed-layer transition to one SNAP event, and reports FINISH.
-// Credentials are entered once in the SE app and stored in ESP32 Preferences.
+// The ESP32 reads printer state, converts completed-layer transitions to SNAP
+// events, and relays explicitly confirmed remote-control requests from iPhone
+// to the selected printer. Credentials stay in ESP32 Preferences.
 
 namespace Config {
 constexpr char DEVICE_NAME[] = "SE-Bambu-Timelapse";
@@ -90,6 +90,11 @@ constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
 constexpr uint32_t CONFIG_NETWORK_QUIET_MS = 8000;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
+constexpr uint8_t REMOTE_CONTROL_QUEUE_SIZE = 7;
+constexpr size_t REMOTE_CONTROL_PAYLOAD_LENGTH = 320;
+constexpr size_t REMOTE_CONTROL_ACTION_LENGTH = 28;
+constexpr uint32_t REMOTE_CONTROL_TIMEOUT_MS = 20000;
+constexpr uint32_t REMOTE_CONTROL_RETRY_MS = 700;
 // Seven WS2812B packages are active: pixels 0...2 hold the steady state colour
 // and pixels 3...6 show the configured animation/progress.
 // DATA -> GPIO5 through 330 ohms; 5V/GND must share GND with the ESP32.
@@ -238,6 +243,19 @@ char eventQueue[Config::EVENT_QUEUE_SIZE][Config::EVENT_LENGTH];
 uint8_t eventHead = 0;
 uint8_t eventTail = 0;
 
+struct RemoteControlRequest {
+  char action[Config::REMOTE_CONTROL_ACTION_LENGTH];
+  char payload[Config::REMOTE_CONTROL_PAYLOAD_LENGTH];
+  uint32_t queuedAt;
+};
+
+portMUX_TYPE remoteControlMux = portMUX_INITIALIZER_UNLOCKED;
+RemoteControlRequest remoteControlQueue[Config::REMOTE_CONTROL_QUEUE_SIZE];
+uint8_t remoteControlHead = 0;
+uint8_t remoteControlTail = 0;
+uint32_t remoteControlSequenceId = 100000;
+uint32_t lastRemoteControlPublishAt = 0;
+
 volatile bool phoneConnected = false;
 volatile bool networkResetPending = false;
 // H2D_SELECT changes only the MQTT target.  H2D_SAVE may change the Wi-Fi
@@ -326,6 +344,7 @@ void setBuzzerOutput(bool enabled);
 void requestBuzzerBeep(uint32_t durationMs = Config::BUZZER_BEEP_MS);
 void pauseSelectedMqttForFleetScan();
 void resumeSelectedMqttAfterFleetScan();
+void clearRemoteControlQueue();
 
 void queuePhoneEvent(const String &event) {
   portENTER_CRITICAL(&eventMux);
@@ -334,6 +353,68 @@ void queuePhoneEvent(const String &event) {
   strlcpy(eventQueue[eventHead], event.c_str(), Config::EVENT_LENGTH);
   eventHead = next;
   portEXIT_CRITICAL(&eventMux);
+}
+
+uint32_t nextRemoteControlSequence() {
+  portENTER_CRITICAL(&remoteControlMux);
+  const uint32_t value = ++remoteControlSequenceId;
+  portEXIT_CRITICAL(&remoteControlMux);
+  return value;
+}
+
+bool enqueueRemoteControl(const String &action, const String &payload) {
+  if (action.isEmpty() || payload.isEmpty() ||
+      action.length() >= Config::REMOTE_CONTROL_ACTION_LENGTH ||
+      payload.length() >= Config::REMOTE_CONTROL_PAYLOAD_LENGTH) {
+    queuePhoneEvent("H2D,REMOTE_ERROR,INVALID,Lệnh điều khiển quá dài");
+    return false;
+  }
+
+  const uint32_t now = millis();
+  bool queued = false;
+  portENTER_CRITICAL(&remoteControlMux);
+  const uint8_t next =
+      (remoteControlHead + 1) % Config::REMOTE_CONTROL_QUEUE_SIZE;
+  if (next != remoteControlTail) {
+    RemoteControlRequest &request = remoteControlQueue[remoteControlHead];
+    strlcpy(request.action, action.c_str(), sizeof(request.action));
+    strlcpy(request.payload, payload.c_str(), sizeof(request.payload));
+    request.queuedAt = now;
+    remoteControlHead = next;
+    queued = true;
+  }
+  portEXIT_CRITICAL(&remoteControlMux);
+
+  if (!queued) {
+    queuePhoneEvent("H2D,REMOTE_ERROR,QUEUE,Hàng chờ điều khiển đang bận");
+  }
+  return queued;
+}
+
+bool peekRemoteControl(RemoteControlRequest &request) {
+  bool available = false;
+  portENTER_CRITICAL(&remoteControlMux);
+  if (remoteControlTail != remoteControlHead) {
+    request = remoteControlQueue[remoteControlTail];
+    available = true;
+  }
+  portEXIT_CRITICAL(&remoteControlMux);
+  return available;
+}
+
+void popRemoteControl() {
+  portENTER_CRITICAL(&remoteControlMux);
+  if (remoteControlTail != remoteControlHead) {
+    remoteControlTail =
+        (remoteControlTail + 1) % Config::REMOTE_CONTROL_QUEUE_SIZE;
+  }
+  portEXIT_CRITICAL(&remoteControlMux);
+}
+
+void clearRemoteControlQueue() {
+  portENTER_CRITICAL(&remoteControlMux);
+  remoteControlHead = remoteControlTail = 0;
+  portEXIT_CRITICAL(&remoteControlMux);
 }
 
 void flushPhoneEvents() {
@@ -602,6 +683,9 @@ void clearPhoneEventQueue() {
 }
 
 void resetPrinterRuntimeForProfileSwitch() {
+  // A command confirmed for one profile must never be delivered after the
+  // selected MQTT target changes to another physical printer.
+  clearRemoteControlQueue();
   statusDataSeen = false;
   finishSent = false;
   printWasRunning = false;
@@ -2102,6 +2186,60 @@ void publishStatusRequest() {
   }
 }
 
+void processRemoteControlQueue() {
+  RemoteControlRequest request;
+  if (!peekRemoteControl(request)) return;
+
+  const uint32_t now = millis();
+  if (now - request.queuedAt >= Config::REMOTE_CONTROL_TIMEOUT_MS) {
+    popRemoteControl();
+    queuePhoneEvent(String("H2D,REMOTE_ERROR,") + request.action +
+                    ",Máy in chưa sẵn sàng nhận lệnh");
+    return;
+  }
+  if (!mqttWasConnected || fleetPrimaryPaused || fleetRefreshInProgress ||
+      activeFleetMonitorSlot >= 0) {
+    return;
+  }
+  if (lastRemoteControlPublishAt != 0 &&
+      now - lastRemoteControlPublishAt < Config::REMOTE_CONTROL_RETRY_MS) {
+    return;
+  }
+  lastRemoteControlPublishAt = now;
+
+  const String topic = "device/" + settings.printerSerial + "/request";
+  // As with pushall, shrink the shared PubSubClient buffer only for the small
+  // outgoing packet, then restore the large H2D receive buffer immediately.
+  mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+  const bool published = mqtt.publish(topic.c_str(), request.payload);
+  const bool receiveBufferReady = expandSelectedMqttReceiveBuffer();
+  if (!receiveBufferReady) {
+    popRemoteControl();
+    queuePhoneEvent(String("H2D,REMOTE_ERROR,") + request.action +
+                    ",ESP32 thiếu bộ nhớ nhận dữ liệu máy in");
+    reportStatus("BUFFER_ERROR");
+    mqtt.disconnect();
+    mqttWasConnected = false;
+    return;
+  }
+
+  if (published) {
+    popRemoteControl();
+    queuePhoneEvent(String("H2D,REMOTE_ACK,") + request.action);
+    statusRequestPending = true;
+    Serial.printf("[REMOTE] published %s to selected printer\n", request.action);
+    return;
+  }
+
+  Serial.printf("[REMOTE] publish %s deferred, MQTT state=%d\n", request.action,
+                mqtt.state());
+  if (mqtt.state() != MQTT_CONNECTED) {
+    mqtt.disconnect();
+    mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+    mqttWasConnected = false;
+  }
+}
+
 void disconnectNetwork(bool keepWifi = false) {
   if (mqttWasConnected || mqtt.connected()) {
     mqtt.disconnect();
@@ -2139,6 +2277,7 @@ void processDeferredNetworkWork() {
     fleetAssignmentsPending = false;
     refreshFleetMonitorAssignments();
   }
+  processRemoteControlQueue();
   if (statusRequestPending && mqttWasConnected && !fleetPrimaryPaused &&
       !fleetRefreshInProgress && activeFleetMonitorSlot < 0) {
     statusRequestPending = false;
@@ -2272,7 +2411,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.16.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.17.0");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2298,6 +2437,20 @@ void sendCurrentStatus() {
       reportPrinterAlert(true);
     }
   }
+}
+
+bool isUnsignedDecimal(const String &value) {
+  if (value.isEmpty()) return false;
+  for (size_t i = 0; i < value.length(); ++i) {
+    if (!isDigit(value[i])) return false;
+  }
+  return true;
+}
+
+String makeSimplePrintCommand(const char *command, const char *param = "") {
+  return String("{\"print\":{\"sequence_id\":\"") +
+         nextRemoteControlSequence() + "\",\"command\":\"" + command +
+         "\",\"param\":\"" + param + "\"}}";
 }
 
 void handlePhoneCommand(String command) {
@@ -2493,6 +2646,133 @@ void handlePhoneCommand(String command) {
       // do not leave the normal 8-second configuration quiet period behind.
       lastConfigurationCommandAt = 0;
     }
+  } else if (head == "H2D_PRINT_PAUSE") {
+    enqueueRemoteControl("PAUSE", makeSimplePrintCommand("pause"));
+  } else if (head == "H2D_PRINT_RESUME") {
+    enqueueRemoteControl("RESUME", makeSimplePrintCommand("resume"));
+  } else if (head == "H2D_PRINT_STOP") {
+    enqueueRemoteControl("STOP", makeSimplePrintCommand("stop"));
+  } else if (head == "H2D_SKIP_OBJECTS") {
+    String normalized;
+    int start = 0;
+    uint8_t count = 0;
+    bool valid = !argument.isEmpty();
+    while (valid && start <= static_cast<int>(argument.length())) {
+      const int separator = argument.indexOf(',', start);
+      String token = separator < 0 ? argument.substring(start)
+                                   : argument.substring(start, separator);
+      token.trim();
+      if (!isUnsignedDecimal(token)) {
+        valid = false;
+        break;
+      }
+      const int objectID = token.toInt();
+      if (objectID < 0 || objectID > 9999 || ++count > 24) {
+        valid = false;
+        break;
+      }
+      if (!normalized.isEmpty()) normalized += ',';
+      normalized += objectID;
+      if (separator < 0) break;
+      start = separator + 1;
+    }
+    if (!valid || count == 0) {
+      queuePhoneEvent(
+          "H2D,REMOTE_ERROR,SKIP_OBJECTS,Danh sách ID vật thể không hợp lệ");
+      return;
+    }
+    const String payload =
+        String("{\"print\":{\"sequence_id\":\"") +
+        nextRemoteControlSequence() +
+        "\",\"command\":\"skip_objects\",\"obj_list\":[" + normalized + "]}}";
+    enqueueRemoteControl("SKIP_OBJECTS", payload);
+  } else if (head == "H2D_FILAMENT_LOAD") {
+    const int first = argument.indexOf(',');
+    const int second = first < 0 ? -1 : argument.indexOf(',', first + 1);
+    const int third = second < 0 ? -1 : argument.indexOf(',', second + 1);
+    const String amsText = first < 0 ? "" : argument.substring(0, first);
+    const String slotText = second < 0 ? "" : argument.substring(first + 1, second);
+    const String targetText = third < 0 ? "" : argument.substring(second + 1, third);
+    const String temperatureText = third < 0 ? "" : argument.substring(third + 1);
+    if (!isUnsignedDecimal(amsText) || !isUnsignedDecimal(slotText) ||
+        !isUnsignedDecimal(targetText) || !isUnsignedDecimal(temperatureText)) {
+      queuePhoneEvent(
+          "H2D,REMOTE_ERROR,LOAD_FILAMENT,Thông số nạp nhựa không hợp lệ");
+      return;
+    }
+    const int amsID = amsText.toInt();
+    const int slotID = slotText.toInt();
+    const int target = targetText.toInt();
+    const int temperature = temperatureText.toInt();
+    const bool externalSpool = amsID == 255 && slotID == 0 && target == 254;
+    const bool amsSlot = amsID >= 0 && amsID <= 3 && slotID >= 0 &&
+                         slotID <= 3 && target == amsID * 4 + slotID;
+    if ((!externalSpool && !amsSlot) || temperature < 170 || temperature > 320) {
+      queuePhoneEvent(
+          "H2D,REMOTE_ERROR,LOAD_FILAMENT,Nguồn nhựa hoặc nhiệt độ không hợp lệ");
+      return;
+    }
+    const String payload =
+        String("{\"print\":{\"sequence_id\":\"") +
+        nextRemoteControlSequence() +
+        "\",\"command\":\"ams_change_filament\",\"ams_id\":" + amsID +
+        ",\"slot_id\":" + slotID + ",\"target\":" + target +
+        ",\"curr_temp\":0,\"tar_temp\":" + temperature + "}}";
+    enqueueRemoteControl("LOAD_FILAMENT", payload);
+  } else if (head == "H2D_FILAMENT_UNLOAD") {
+    if (!isUnsignedDecimal(argument)) {
+      queuePhoneEvent(
+          "H2D,REMOTE_ERROR,UNLOAD_FILAMENT,Nguồn nhựa không hợp lệ");
+      return;
+    }
+    const int amsID = argument.toInt();
+    if (!((amsID >= 0 && amsID <= 3) || amsID == 255)) {
+      queuePhoneEvent(
+          "H2D,REMOTE_ERROR,UNLOAD_FILAMENT,Nguồn nhựa không hợp lệ");
+      return;
+    }
+    const String payload =
+        String("{\"print\":{\"sequence_id\":\"") +
+        nextRemoteControlSequence() +
+        "\",\"command\":\"ams_change_filament\",\"ams_id\":" + amsID +
+        ",\"slot_id\":255,\"target\":255}}";
+    enqueueRemoteControl("UNLOAD_FILAMENT", payload);
+  } else if (head == "H2D_AMS_CONTROL") {
+    String action = argument;
+    action.toLowerCase();
+    if (action != "resume" && action != "done") {
+      queuePhoneEvent(
+          "H2D,REMOTE_ERROR,AMS_CONTROL,Thao tác AMS không hợp lệ");
+      return;
+    }
+    enqueueRemoteControl(
+        action == "resume" ? "AMS_RESUME" : "AMS_DONE",
+        makeSimplePrintCommand("ams_control", action.c_str()));
+  } else if (head == "H2D_PRINT_SPEED") {
+    if (!isUnsignedDecimal(argument) || argument.toInt() < 1 ||
+        argument.toInt() > 4) {
+      queuePhoneEvent(
+          "H2D,REMOTE_ERROR,PRINT_SPEED,Mức tốc độ không hợp lệ");
+      return;
+    }
+    enqueueRemoteControl(
+        "PRINT_SPEED",
+        makeSimplePrintCommand("print_speed", argument.c_str()));
+  } else if (head == "H2D_CHAMBER_LIGHT") {
+    if (argument != "0" && argument != "1") {
+      queuePhoneEvent(
+          "H2D,REMOTE_ERROR,CHAMBER_LIGHT,Trạng thái đèn không hợp lệ");
+      return;
+    }
+    const String mode = argument == "1" ? "on" : "off";
+    const String payload =
+        String("{\"system\":{\"sequence_id\":\"") +
+        nextRemoteControlSequence() +
+        "\",\"command\":\"ledctrl\",\"led_node\":\"chamber_light\","
+        "\"led_mode\":\"" + mode +
+        "\",\"led_on_time\":500,\"led_off_time\":500,\"loop_times\":0,"
+        "\"interval_time\":0}}";
+    enqueueRemoteControl("CHAMBER_LIGHT", payload);
   } else if (head == "H2D_ARM") {
     const bool requestedArmed = argument == "1";
     if (requestedArmed) {
@@ -3031,7 +3311,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.16.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.17.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

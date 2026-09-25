@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.72 build151 - camera may in phong cho va tat canh bao
+name: Tao IPA SE v9.73 build152 - dieu khien may in tu xa
 
 on:
   workflow_dispatch:
@@ -44,6 +44,7 @@ jobs:
           test -f "RedCameraTest/H2DBLEManager.swift"
           test -f "RedCameraTest/H2DTimelapseManager.swift"
           test -f "RedCameraTest/H2DTimelapseView.swift"
+          test -f "RedCameraTest/PrinterRemoteControlView.swift"
           test -f "RedCameraTest/SELanguage.swift"
           test -f "RedCameraTest/en.lproj/Localizable.strings"
           test -f "RedCameraTest/vi.lproj/Localizable.strings"
@@ -175,6 +176,10 @@ jobs:
           grep -q "CMVideoFormatDescriptionCreateFromH264ParameterSets" "RedCameraTest/BambuPrinterCamera.swift"
           grep -q "0x3000" "RedCameraTest/BambuPrinterCamera.swift"
           grep -q "printerCameraCard" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "printerRemoteControlCard" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "skipSelectedPrintObjects" "RedCameraTest/H2DBLEManager.swift"
+          grep -q "loadFilament" "RedCameraTest/H2DBLEManager.swift"
+          grep -q "Dừng bản in" "RedCameraTest/PrinterRemoteControlView.swift"
           ! grep -q "ESP32-C3" "RedCameraTest/H2DTimelapseView.swift"
           /usr/libexec/PlistBuddy -c "Print :NSLocalNetworkUsageDescription" "$PLIST"
           ! grep -q "NSMicrophoneUsageDescription" "$PLIST"
@@ -219,19 +224,19 @@ jobs:
           test -f "$APP_PATH/en.lproj/Localizable.strings"
           test -f "$APP_PATH/vi.lproj/Localizable.strings"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.72"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "151"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.73"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "152"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.72-build151-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.73-build152-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.72-build151-unsigned-ipa
-          path: SE-v9.72-build151-unsigned.ipa
+          name: SE-v9.73-build152-unsigned-ipa
+          path: SE-v9.73-build152-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -323,6 +328,10 @@ jobs:
           grep -q 'H2D_PROFILE_SLOT' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'H2D_BUZZER_VOLUME' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'H2D_ALARM_ACK' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'H2D_PRINT_STOP' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'skip_objects' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'ams_change_filament' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'processRemoteControlQueue' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'A fault is a fleet-level safety event' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DBLEManager.swift
           ! grep -q 'return criticalKind == printerKind' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DBLEManager.swift
           grep -q 'settingsPreviewUntil' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
@@ -349,7 +358,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.16.0
+          name: SE-Bambu-ESP32-v1.17.0
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7
