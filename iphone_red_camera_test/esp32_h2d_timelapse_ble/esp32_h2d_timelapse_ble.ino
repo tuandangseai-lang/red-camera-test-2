@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.18.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.19.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -2526,7 +2526,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.18.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.19.0");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2820,11 +2820,9 @@ void handlePhoneCommand(String command) {
     const int target = targetText.toInt();
     const int temperature = temperatureText.toInt();
     const bool externalSpool = amsID == 255 && slotID == 0 && target == 254;
-    const bool amsSlot = amsID >= 0 && amsID <= 3 && slotID >= 0 &&
-                         slotID <= 3 && target == amsID * 4 + slotID;
-    if ((!externalSpool && !amsSlot) || temperature < 170 || temperature > 320) {
+    if (!externalSpool || temperature < 170 || temperature > 320) {
       queuePhoneEvent(
-          "H2D,REMOTE_ERROR,LOAD_FILAMENT,Nguồn nhựa hoặc nhiệt độ không hợp lệ");
+          "H2D,REMOTE_ERROR,LOAD_FILAMENT,Chỉ hỗ trợ cuộn nhựa ngoài");
       return;
     }
     const String payload =
@@ -2841,9 +2839,9 @@ void handlePhoneCommand(String command) {
       return;
     }
     const int amsID = argument.toInt();
-    if (!((amsID >= 0 && amsID <= 3) || amsID == 255)) {
+    if (amsID != 255) {
       queuePhoneEvent(
-          "H2D,REMOTE_ERROR,UNLOAD_FILAMENT,Nguồn nhựa không hợp lệ");
+          "H2D,REMOTE_ERROR,UNLOAD_FILAMENT,Chỉ hỗ trợ cuộn nhựa ngoài");
       return;
     }
     const String payload =
@@ -3426,7 +3424,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.18.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.19.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

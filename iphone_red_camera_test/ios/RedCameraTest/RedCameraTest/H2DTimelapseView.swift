@@ -69,6 +69,16 @@ struct H2DTimelapseView: View {
             }
     }
 
+    private var activeControlProfile: BambuPrinterProfile {
+        selectedProfile ?? BambuPrinterProfile(
+            profileID: selectedProfileID.isEmpty ? "active-printer" : selectedProfileID,
+            kind: detectedPrinterKind,
+            ip: printerIP,
+            serial: printerSerial,
+            customName: profileDisplayName
+        )
+    }
+
     private var selectedFleetStatus: BambuFleetStatus {
         if let selectedProfile { return bluetooth.fleetStatus(for: selectedProfile) }
         return bluetooth.fleetStatus(for: selectedPrinterKind)
@@ -118,7 +128,9 @@ struct H2DTimelapseView: View {
                     bluetooth: bluetooth,
                     printerCamera: printerCamera,
                     cameraEnabled: $printerCameraEnabled,
-                    printerName: printerName
+                    printerName: printerName,
+                    profile: activeControlProfile,
+                    accessCode: accessCode
                 )
             }
     }

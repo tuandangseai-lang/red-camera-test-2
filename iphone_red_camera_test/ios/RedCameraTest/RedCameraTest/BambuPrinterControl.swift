@@ -1,0 +1,1100 @@
+import Combine
+import Foundation
+import Network
+import Security
+import ZIPFoundation
+
+struct BambuPrintableObject: Identifiable, Equatable {
+    let id: Int
+    let name: String
+    var centerX: Double?
+    var centerY: Double?
+    var isSkipped: Bool
+}
+
+/// Direct LAN MQTT control for the selected printer. Control no longer depends
+/// on the ESP32's MQTT session, so a BLE reconnect or fleet scan cannot swallow
+/// a user command. The ESP32 remains responsible for telemetry and timelapse.
+final class BambuPrinterControlManager: ObservableObject {
+    @Published private(set) var isReady = false
+    @Published private(set) var isPending = false
+    @Published private(set) var lastSucceeded: Bool?
+    @Published private(set) var statusText = "Đang chuẩn bị điều khiển trực tiếp…"
+    @Published private(set) var printableObjects: [BambuPrintableObject] = []
+    @Published private(set) var isLoadingObjects = false
+    @Published private(set) var objectStatusText = "Đang chờ thông tin bản in…"
+
+    private struct Configuration: Equatable {
+        let profileID: String
+        let host: String
+        let serial: String
+        let accessCode: String
+    }
+
+    private struct PendingCommand {
+        let sequence: String
+        let mqttCommand: String
+        let actionName: String
+        let expectedObjectIDs: Set<Int>
+    }
+
+    private let queue = DispatchQueue(label: "vn.se.bambu-printer-control", qos: .userInitiated)
+    private var configuration: Configuration?
+    private var connection: NWConnection?
+    private var receiveBuffer = Data()
+    private var generation = 0
+    private var packetID: UInt16 = 10
+    private var sequenceNumber: UInt64 = 200_000
+    private var pending: PendingCommand?
+    private var pingTimer: DispatchSourceTimer?
+    private var objectDownload: BambuFTPSDownload?
+    private var currentJobFile = ""
+    private var currentSubtaskName = ""
+    private var skippedObjectIDs = Set<Int>()
+    private var loadedObjectKey = ""
+
+    func start(profile: BambuPrinterProfile, accessCode: String) {
+        let next = Configuration(
+            profileID: profile.id,
+            host: profile.ip.trimmingCharacters(in: .whitespacesAndNewlines),
+            serial: profile.serial.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+            accessCode: accessCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        guard !next.host.isEmpty, !next.serial.isEmpty, !next.accessCode.isEmpty else {
+            publishFailure("Thiếu IP, serial hoặc Access Code của máy in")
+            return
+        }
+        queue.async { [weak self] in
+            guard let self else { return }
+            if self.configuration == next, self.connection != nil { return }
+            self.configuration = next
+            self.connect()
+        }
+    }
+
+    func stop() {
+        queue.async { [weak self] in
+            self?.close(clearConfiguration: true)
+        }
+    }
+
+    func retry() {
+        queue.async { [weak self] in
+            guard let self, self.configuration != nil else { return }
+            self.connect()
+        }
+    }
+
+    func refreshObjects() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.loadedObjectKey = ""
+            self.requestPushAll()
+            self.loadObjectsIfPossible(force: true)
+        }
+    }
+
+    func pausePrint() {
+        send(section: "print", command: "pause", fields: [:], actionName: "Tạm dừng bản in")
+    }
+
+    func resumePrint() {
+        send(section: "print", command: "resume", fields: [:], actionName: "Tiếp tục bản in")
+    }
+
+    func stopPrint() {
+        send(section: "print", command: "stop", fields: [:], actionName: "Dừng bản in")
+    }
+
+    func skipObjects(_ objectIDs: [Int]) {
+        let normalized = Array(Set(objectIDs.filter { $0 >= 0 })).sorted()
+        guard !normalized.isEmpty else {
+            publishFailure("Hãy chạm chọn ít nhất một vật thể trên bàn in")
+            return
+        }
+        send(
+            section: "print",
+            command: "skip_objects",
+            fields: ["obj_list": normalized, "timestamp": Int(Date().timeIntervalSince1970)],
+            actionName: "Bỏ qua \(normalized.count) vật thể",
+            expectedObjectIDs: Set(normalized)
+        )
+    }
+
+    /// The requested workflow is intentionally external-spool only. Bambu uses
+    /// virtual tray 254 for the first external spool and AMS id 255.
+    func loadExternalFilament(temperature: Int) {
+        guard (170...320).contains(temperature) else {
+            publishFailure("Nhiệt độ nạp nhựa không hợp lệ")
+            return
+        }
+        send(
+            section: "print",
+            command: "ams_change_filament",
+            fields: [
+                "ams_id": 255,
+                "slot_id": 0,
+                "target": 254,
+                "curr_temp": 0,
+                "tar_temp": temperature
+            ],
+            actionName: "Nạp nhựa từ cuộn ngoài"
+        )
+    }
+
+    func unloadExternalFilament() {
+        // Current Bambu firmware represents the manual external-spool unload
+        // flow with virtual AMS/tray 255. It does not select a physical AMS.
+        send(
+            section: "print",
+            command: "ams_change_filament",
+            fields: [
+                "ams_id": 255,
+                "slot_id": 255,
+                "target": 255
+            ],
+            actionName: "Rút nhựa cuộn ngoài"
+        )
+    }
+
+    func setPrintSpeed(_ level: Int) {
+        guard (1...4).contains(level) else { return }
+        send(
+            section: "print",
+            command: "print_speed",
+            fields: ["param": String(level)],
+            actionName: "Đổi tốc độ in"
+        )
+    }
+
+    func setChamberLight(enabled: Bool) {
+        send(
+            section: "system",
+            command: "ledctrl",
+            fields: [
+                "led_node": "chamber_light",
+                "led_mode": enabled ? "on" : "off",
+                "led_on_time": 500,
+                "led_off_time": 500,
+                "loop_times": 0,
+                "interval_time": 0
+            ],
+            actionName: enabled ? "Bật đèn buồng in" : "Tắt đèn buồng in"
+        )
+    }
+
+    private func connect() {
+        guard let configuration else { return }
+        close(clearConfiguration: false)
+        generation &+= 1
+        let activeGeneration = generation
+        publishReady(false, text: "Đang kết nối MQTT trực tiếp tới máy in…")
+
+        let tls = NWProtocolTLS.Options()
+        sec_protocol_options_set_verify_block(
+            tls.securityProtocolOptions,
+            { _, _, complete in complete(true) },
+            queue
+        )
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        let parameters = NWParameters(tls: tls, tcp: tcp)
+        parameters.serviceClass = .responsiveData
+        guard let port = NWEndpoint.Port(rawValue: 8883) else {
+            publishFailure("Cổng MQTT của máy in không hợp lệ")
+            return
+        }
+        let connection = NWConnection(
+            host: NWEndpoint.Host(configuration.host),
+            port: port,
+            using: parameters
+        )
+        self.connection = connection
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self, self.generation == activeGeneration else { return }
+            switch state {
+            case .ready:
+                self.beginReceive(generation: activeGeneration)
+                self.sendPacket(self.connectPacket(configuration: configuration))
+            case .failed(let error):
+                self.failConnection("Không mở được MQTT LAN (\(error.localizedDescription))")
+            case .cancelled:
+                break
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
+
+        queue.asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self, self.generation == activeGeneration, !self.isReady else { return }
+            self.failConnection("MQTT LAN không phản hồi • kiểm tra Developer Mode")
+        }
+    }
+
+    private func close(clearConfiguration: Bool) {
+        generation &+= 1
+        pingTimer?.cancel()
+        pingTimer = nil
+        objectDownload?.cancel()
+        objectDownload = nil
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        connection = nil
+        receiveBuffer.removeAll(keepingCapacity: false)
+        pending = nil
+        if clearConfiguration { configuration = nil }
+        publishReady(false, text: clearConfiguration ? "Điều khiển máy in đã đóng" : "Đang kết nối lại…")
+    }
+
+    private func beginReceive(generation activeGeneration: Int) {
+        connection?.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, complete, error in
+            guard let self, self.generation == activeGeneration else { return }
+            if let data, !data.isEmpty {
+                self.receiveBuffer.append(data)
+                self.consumePackets()
+            }
+            if let error {
+                self.failConnection("Mất kết nối MQTT (\(error.localizedDescription))")
+                return
+            }
+            if complete {
+                self.failConnection("Máy in đã đóng kết nối MQTT")
+                return
+            }
+            self.beginReceive(generation: activeGeneration)
+        }
+    }
+
+    private func consumePackets() {
+        while receiveBuffer.count >= 2 {
+            let bytes = [UInt8](receiveBuffer.prefix(6))
+            var multiplier = 1
+            var remainingLength = 0
+            var index = 1
+            var completedLength = false
+            while index < bytes.count, index <= 4 {
+                let digit = Int(bytes[index])
+                remainingLength += (digit & 0x7F) * multiplier
+                index += 1
+                if digit & 0x80 == 0 {
+                    completedLength = true
+                    break
+                }
+                multiplier *= 128
+            }
+            guard completedLength else { return }
+            let packetLength = index + remainingLength
+            guard receiveBuffer.count >= packetLength else { return }
+            let header = receiveBuffer[receiveBuffer.startIndex]
+            let bodyStart = receiveBuffer.index(receiveBuffer.startIndex, offsetBy: index)
+            let bodyEnd = receiveBuffer.index(bodyStart, offsetBy: remainingLength)
+            let body = Data(receiveBuffer[bodyStart..<bodyEnd])
+            receiveBuffer.removeFirst(packetLength)
+            handlePacket(header: header, body: body)
+        }
+    }
+
+    private func handlePacket(header: UInt8, body: Data) {
+        switch header >> 4 {
+        case 2: // CONNACK
+            guard body.count >= 2, body[body.index(body.startIndex, offsetBy: 1)] == 0,
+                  let configuration else {
+                failConnection("Máy in từ chối Access Code MQTT")
+                return
+            }
+            sendPacket(subscribePacket(topic: "device/\(configuration.serial)/report"))
+        case 3: // PUBLISH
+            handlePublish(header: header, body: body)
+        case 4: // PUBACK
+            publishWaitingForPrinter()
+        case 9: // SUBACK
+            publishReady(true, text: "Đã kết nối trực tiếp • sẵn sàng gửi lệnh")
+            startPingTimer()
+            requestPushAll()
+        default:
+            break
+        }
+    }
+
+    private func handlePublish(header: UInt8, body: Data) {
+        guard body.count >= 2 else { return }
+        let topicLength = Int(body.uint16BE(at: 0))
+        var payloadOffset = 2 + topicLength
+        guard payloadOffset <= body.count else { return }
+        let qos = (header >> 1) & 0x03
+        if qos > 0 {
+            guard payloadOffset + 2 <= body.count else { return }
+            let incomingPacketID = body.uint16BE(at: payloadOffset)
+            payloadOffset += 2
+            sendPacket(Data([0x40, 0x02, UInt8(incomingPacketID >> 8), UInt8(incomingPacketID & 0xFF)]))
+        }
+        let payload = body.suffix(from: body.index(body.startIndex, offsetBy: payloadOffset))
+        guard let root = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else { return }
+        handleReport(root)
+    }
+
+    private func handleReport(_ root: [String: Any]) {
+        if let print = root["print"] as? [String: Any] {
+            if let file = print["gcode_file"] as? String, !file.isEmpty {
+                currentJobFile = file
+            }
+            if let name = print["subtask_name"] as? String, !name.isEmpty {
+                currentSubtaskName = name
+            }
+            if let skipped = print["s_obj"] as? [Int] {
+                skippedObjectIDs = Set(skipped)
+                applySkippedObjects()
+            } else if let skippedNumbers = print["s_obj"] as? [NSNumber] {
+                skippedObjectIDs = Set(skippedNumbers.map(\.intValue))
+                applySkippedObjects()
+            }
+            confirmPendingIfMatched(section: print)
+        }
+        if let system = root["system"] as? [String: Any] {
+            confirmPendingIfMatched(section: system)
+        }
+        loadObjectsIfPossible(force: false)
+    }
+
+    private func confirmPendingIfMatched(section: [String: Any]) {
+        guard let pending else { return }
+        let sequence = String(describing: section["sequence_id"] ?? "")
+        let command = (section["command"] as? String) ?? ""
+        if pending.mqttCommand == "skip_objects",
+           !pending.expectedObjectIDs.isEmpty,
+           pending.expectedObjectIDs.isSubset(of: skippedObjectIDs) {
+            completePending(success: true, detail: "Máy in đã bỏ qua vật thể được chọn")
+            return
+        }
+        guard sequence == pending.sequence, command == pending.mqttCommand else { return }
+        if let result = section["result"] as? String {
+            let normalized = result.lowercased()
+            if normalized == "success" || normalized == "ok" {
+                completePending(success: true, detail: "Máy in đã xác nhận: \(pending.actionName)")
+            } else {
+                let reason = (section["reason"] as? String) ?? result
+                completePending(success: false, detail: humanReadablePrinterError(reason))
+            }
+        } else if let result = section["result"] as? NSNumber {
+            completePending(
+                success: result.intValue == 0,
+                detail: result.intValue == 0
+                    ? "Máy in đã xác nhận: \(pending.actionName)"
+                    : "Máy in từ chối lệnh (mã \(result.intValue))"
+            )
+        }
+    }
+
+    private func send(
+        section: String,
+        command: String,
+        fields: [String: Any],
+        actionName: String,
+        expectedObjectIDs: Set<Int> = []
+    ) {
+        queue.async { [weak self] in
+            guard let self, let configuration = self.configuration, self.connection != nil else {
+                self?.publishFailure("Chưa kết nối được kênh điều khiển trực tiếp")
+                return
+            }
+            guard self.pending == nil else {
+                self.publishFailure("Hãy chờ lệnh trước được máy in xác nhận")
+                return
+            }
+            self.sequenceNumber &+= 1
+            let sequence = String(self.sequenceNumber)
+            var commandBody = fields
+            commandBody["sequence_id"] = sequence
+            commandBody["command"] = command
+            let root: [String: Any] = [section: commandBody]
+            guard let data = try? JSONSerialization.data(withJSONObject: root),
+                  let json = String(data: data, encoding: .utf8) else {
+                self.publishFailure("Không tạo được gói lệnh MQTT")
+                return
+            }
+            self.pending = PendingCommand(
+                sequence: sequence,
+                mqttCommand: command,
+                actionName: actionName,
+                expectedObjectIDs: expectedObjectIDs
+            )
+            self.publishPending("Đang gửi trực tiếp: \(actionName)…")
+            self.sendPacket(self.publishPacket(
+                topic: "device/\(configuration.serial)/request",
+                payload: json,
+                qos1: true
+            ))
+            let activeGeneration = self.generation
+            self.queue.asyncAfter(deadline: .now() + 12) { [weak self] in
+                guard let self, self.generation == activeGeneration,
+                      self.pending?.sequence == sequence else { return }
+                self.pending = nil
+                self.publishFailure(
+                    "Máy in không xác nhận lệnh • bật LAN Mode và Developer Mode"
+                )
+            }
+        }
+    }
+
+    private func requestPushAll() {
+        guard let configuration, connection != nil else { return }
+        sequenceNumber &+= 1
+        let root: [String: Any] = [
+            "pushing": [
+                "sequence_id": String(sequenceNumber),
+                "command": "pushall",
+                "version": 1,
+                "push_target": 1
+            ]
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: root),
+              let json = String(data: data, encoding: .utf8) else { return }
+        sendPacket(publishPacket(
+            topic: "device/\(configuration.serial)/request",
+            payload: json,
+            qos1: false
+        ))
+    }
+
+    private func loadObjectsIfPossible(force: Bool) {
+        guard let configuration, !currentJobFile.isEmpty, objectDownload == nil else { return }
+        let key = "\(configuration.profileID)|\(currentJobFile)"
+        guard force || loadedObjectKey != key else { return }
+        loadedObjectKey = key
+        publishObjectLoading(true, text: "Đang đọc danh sách vật thể từ file 3MF…")
+        let candidates = BambuFTPSDownload.candidatePaths(
+            gcodeFile: currentJobFile,
+            subtaskName: currentSubtaskName
+        )
+        let download = BambuFTPSDownload(
+            host: configuration.host,
+            accessCode: configuration.accessCode,
+            candidatePaths: candidates,
+            queue: queue
+        ) { [weak self] result in
+            guard let self else { return }
+            self.objectDownload = nil
+            switch result {
+            case .success(let archiveData):
+                do {
+                    let plate = try Bambu3MFObjectParser.parse(
+                        archiveData,
+                        gcodeFile: self.currentJobFile,
+                        skippedObjectIDs: self.skippedObjectIDs
+                    )
+                    self.publishObjects(plate)
+                } catch {
+                    self.publishObjectLoading(
+                        false,
+                        text: "Không đọc được vật thể trong 3MF • \(error.localizedDescription)"
+                    )
+                }
+            case .failure(let error):
+                self.publishObjectLoading(
+                    false,
+                    text: "Chưa tải được file 3MF từ máy in • \(error.localizedDescription)"
+                )
+            }
+        }
+        objectDownload = download
+        download.start()
+    }
+
+    private func applySkippedObjects() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.printableObjects = self.printableObjects.map { object in
+                var updated = object
+                updated.isSkipped = updated.isSkipped || self.skippedObjectIDs.contains(updated.id)
+                return updated
+            }
+        }
+    }
+
+    private func startPingTimer() {
+        pingTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 12, repeating: 12)
+        timer.setEventHandler { [weak self] in self?.sendPacket(Data([0xC0, 0x00])) }
+        pingTimer = timer
+        timer.resume()
+    }
+
+    private func sendPacket(_ data: Data) {
+        connection?.send(content: data, completion: .contentProcessed { [weak self] error in
+            if let error {
+                self?.failConnection("Không gửi được MQTT (\(error.localizedDescription))")
+            }
+        })
+    }
+
+    private func nextPacketID() -> UInt16 {
+        packetID &+= 1
+        if packetID == 0 { packetID = 1 }
+        return packetID
+    }
+
+    private func connectPacket(configuration: Configuration) -> Data {
+        var body = Data()
+        body.appendMQTTString("MQTT")
+        body.append(0x04)
+        body.append(0xC2) // username, password, clean session
+        body.append(contentsOf: [0x00, 0x1E])
+        body.appendMQTTString("SE-iPhone-\(UUID().uuidString.prefix(12))")
+        body.appendMQTTString("bblp")
+        body.appendMQTTString(configuration.accessCode)
+        return mqttPacket(header: 0x10, body: body)
+    }
+
+    private func subscribePacket(topic: String) -> Data {
+        let id = nextPacketID()
+        var body = Data([UInt8(id >> 8), UInt8(id & 0xFF)])
+        body.appendMQTTString(topic)
+        body.append(0x00)
+        return mqttPacket(header: 0x82, body: body)
+    }
+
+    private func publishPacket(topic: String, payload: String, qos1: Bool) -> Data {
+        var body = Data()
+        body.appendMQTTString(topic)
+        if qos1 {
+            let id = nextPacketID()
+            body.append(contentsOf: [UInt8(id >> 8), UInt8(id & 0xFF)])
+        }
+        body.append(Data(payload.utf8))
+        return mqttPacket(header: qos1 ? 0x32 : 0x30, body: body)
+    }
+
+    private func mqttPacket(header: UInt8, body: Data) -> Data {
+        var packet = Data([header])
+        var remaining = body.count
+        repeat {
+            var digit = remaining % 128
+            remaining /= 128
+            if remaining > 0 { digit |= 0x80 }
+            packet.append(UInt8(digit))
+        } while remaining > 0
+        packet.append(body)
+        return packet
+    }
+
+    private func completePending(success: Bool, detail: String) {
+        pending = nil
+        DispatchQueue.main.async { [weak self] in
+            self?.isPending = false
+            self?.lastSucceeded = success
+            self?.statusText = detail
+        }
+        requestPushAll()
+    }
+
+    private func failConnection(_ text: String) {
+        connection?.cancel()
+        connection = nil
+        pending = nil
+        publishFailure(text)
+    }
+
+    private func humanReadablePrinterError(_ reason: String) -> String {
+        let lowered = reason.lowercased()
+        if lowered.contains("84033543") || lowered.contains("auth") || lowered.contains("sign") {
+            return "Máy in chặn lệnh • bật LAN Mode > Developer Mode"
+        }
+        return "Máy in từ chối lệnh • \(reason)"
+    }
+
+    private func publishReady(_ ready: Bool, text: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.isReady = ready
+            self?.isPending = false
+            self?.statusText = text
+        }
+    }
+
+    private func publishPending(_ text: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.isPending = true
+            self?.lastSucceeded = nil
+            self?.statusText = text
+        }
+    }
+
+    private func publishWaitingForPrinter() {
+        DispatchQueue.main.async { [weak self] in
+            guard self?.isPending == true else { return }
+            self?.statusText = "MQTT đã nhận gói lệnh • chờ máy in xác nhận…"
+        }
+    }
+
+    private func publishFailure(_ text: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isReady = self.connection != nil
+            self.isPending = false
+            self.lastSucceeded = false
+            self.statusText = text
+        }
+    }
+
+    private func publishObjectLoading(_ loading: Bool, text: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.isLoadingObjects = loading
+            self?.objectStatusText = text
+        }
+    }
+
+    private func publishObjects(_ objects: [BambuPrintableObject]) {
+        DispatchQueue.main.async { [weak self] in
+            self?.printableObjects = objects
+            self?.isLoadingObjects = false
+            self?.objectStatusText = objects.isEmpty
+                ? "File in không có vật thể có thể bỏ qua"
+                : "Chạm trực tiếp vào vật thể cần bỏ qua"
+        }
+    }
+}
+
+private extension Data {
+    mutating func appendMQTTString(_ value: String) {
+        let bytes = Data(value.utf8)
+        append(UInt8((bytes.count >> 8) & 0xFF))
+        append(UInt8(bytes.count & 0xFF))
+        append(bytes)
+    }
+
+    func uint16BE(at offset: Int) -> UInt16 {
+        guard offset >= 0, offset + 1 < count else { return 0 }
+        let first = self[index(startIndex, offsetBy: offset)]
+        let second = self[index(startIndex, offsetBy: offset + 1)]
+        return (UInt16(first) << 8) | UInt16(second)
+    }
+}
+
+private enum BambuObjectError: LocalizedError {
+    case invalidArchive
+    case missingSliceInfo
+    case noObjects
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidArchive: return "file ZIP/3MF không hợp lệ"
+        case .missingSliceInfo: return "3MF thiếu Metadata/slice_info.config"
+        case .noObjects: return "không tìm thấy danh sách vật thể"
+        }
+    }
+}
+
+private enum Bambu3MFObjectParser {
+    static func parse(
+        _ data: Data,
+        gcodeFile: String,
+        skippedObjectIDs: Set<Int>
+    ) throws -> [BambuPrintableObject] {
+        let archive = try Archive(data: data, accessMode: .read)
+        guard let sliceEntry = archive["Metadata/slice_info.config"] else {
+            throw BambuObjectError.missingSliceInfo
+        }
+        var sliceData = Data()
+        _ = try archive.extract(sliceEntry) { sliceData.append($0) }
+        let parser = BambuSliceInfoParser(targetPlate: plateNumber(in: gcodeFile))
+        let xml = XMLParser(data: sliceData)
+        xml.delegate = parser
+        guard xml.parse() else { throw BambuObjectError.invalidArchive }
+        var objects = parser.selectedObjects
+        guard !objects.isEmpty else { throw BambuObjectError.noObjects }
+
+        let plateNumber = parser.selectedPlateNumber
+        if let jsonEntry = archive["Metadata/plate_\(plateNumber).json"] {
+            var jsonData = Data()
+            _ = try archive.extract(jsonEntry) { jsonData.append($0) }
+            applyPositions(from: jsonData, to: &objects)
+        }
+        for index in objects.indices {
+            objects[index].isSkipped = objects[index].isSkipped || skippedObjectIDs.contains(objects[index].id)
+        }
+        return objects
+    }
+
+    private static func plateNumber(in gcodeFile: String) -> Int? {
+        guard let expression = try? NSRegularExpression(pattern: "plate[_-](\\d+)", options: .caseInsensitive),
+              let match = expression.firstMatch(
+                in: gcodeFile,
+                range: NSRange(gcodeFile.startIndex..., in: gcodeFile)
+              ),
+              let range = Range(match.range(at: 1), in: gcodeFile) else { return nil }
+        return Int(gcodeFile[range])
+    }
+
+    private static func applyPositions(from data: Data, to objects: inout [BambuPrintableObject]) {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let boxes = root["bbox_objects"] as? [[String: Any]] else { return }
+        var positions: [String: [(Double, Double)]] = [:]
+        for item in boxes {
+            guard let name = item["name"] as? String,
+                  let values = item["bbox"] as? [NSNumber], values.count >= 4 else { continue }
+            let center = (
+                (values[0].doubleValue + values[2].doubleValue) / 2,
+                (values[1].doubleValue + values[3].doubleValue) / 2
+            )
+            positions[name, default: []].append(center)
+        }
+        for index in objects.indices {
+            guard var available = positions[objects[index].name], !available.isEmpty else { continue }
+            let center = available.removeFirst()
+            positions[objects[index].name] = available
+            objects[index].centerX = center.0
+            objects[index].centerY = center.1
+        }
+    }
+}
+
+private final class BambuSliceInfoParser: NSObject, XMLParserDelegate {
+    private let targetPlate: Int?
+    private var currentPlateNumber = 1
+    private var currentObjects: [BambuPrintableObject] = []
+    private var plates: [(number: Int, objects: [BambuPrintableObject])] = []
+
+    init(targetPlate: Int?) {
+        self.targetPlate = targetPlate
+    }
+
+    var selectedPlateNumber: Int {
+        if let targetPlate, plates.contains(where: { $0.number == targetPlate }) { return targetPlate }
+        return plates.first?.number ?? 1
+    }
+
+    var selectedObjects: [BambuPrintableObject] {
+        let target = selectedPlateNumber
+        return plates.first(where: { $0.number == target })?.objects ?? plates.first?.objects ?? []
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String: String] = [:]
+    ) {
+        switch elementName.lowercased() {
+        case "plate":
+            currentPlateNumber = plates.count + 1
+            currentObjects = []
+        case "metadata":
+            if attributeDict["key"] == "index", let value = attributeDict["value"], let number = Int(value) {
+                currentPlateNumber = number
+            }
+        case "object":
+            guard let rawID = attributeDict["identify_id"], let id = Int(rawID) else { return }
+            let name = attributeDict["name"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            currentObjects.append(BambuPrintableObject(
+                id: id,
+                name: (name?.isEmpty == false ? name! : "Vật thể \(currentObjects.count + 1)"),
+                centerX: nil,
+                centerY: nil,
+                isSkipped: attributeDict["skipped"]?.lowercased() == "true"
+            ))
+        default:
+            break
+        }
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didEndElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?
+    ) {
+        guard elementName.lowercased() == "plate" else { return }
+        plates.append((currentPlateNumber, currentObjects))
+        currentObjects = []
+    }
+}
+
+private enum BambuFTPError: LocalizedError {
+    case noCandidate
+    case rejected(String)
+    case connection(String)
+    case tooLarge
+
+    var errorDescription: String? {
+        switch self {
+        case .noCandidate: return "không tìm thấy file bản in trên bộ nhớ máy"
+        case .rejected(let reply): return reply
+        case .connection(let detail): return detail
+        case .tooLarge: return "file 3MF lớn hơn giới hạn 96 MB"
+        }
+    }
+}
+
+/// Minimal implicit-FTPS reader for Bambu's port 990. Only binary RETR is
+/// implemented; no printer file is changed, uploaded, renamed or deleted.
+private final class BambuFTPSDownload {
+    private enum Stage {
+        case welcome, user, password, pbsz, protection, binary, passive, dataConnecting, retrieving, transfer
+    }
+
+    private let host: String
+    private let accessCode: String
+    private let candidatePaths: [String]
+    private let queue: DispatchQueue
+    private let completion: (Result<Data, Error>) -> Void
+    private var control: NWConnection?
+    private var dataConnection: NWConnection?
+    private var controlBuffer = ""
+    private var downloaded = Data()
+    private var stage: Stage = .welcome
+    private var candidateIndex = 0
+    private var controlFinished = false
+    private var dataFinished = false
+    private var completed = false
+
+    init(
+        host: String,
+        accessCode: String,
+        candidatePaths: [String],
+        queue: DispatchQueue,
+        completion: @escaping (Result<Data, Error>) -> Void
+    ) {
+        self.host = host
+        self.accessCode = accessCode
+        self.candidatePaths = candidatePaths
+        self.queue = queue
+        self.completion = completion
+    }
+
+    static func candidatePaths(gcodeFile: String, subtaskName: String) -> [String] {
+        let trimmed = gcodeFile.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let filename = (trimmed as NSString).lastPathComponent
+        var names = [trimmed, filename]
+        if !filename.lowercased().hasSuffix(".3mf") {
+            names.append(filename + ".3mf")
+            if filename.lowercased().hasSuffix(".gcode") {
+                names.append(String(filename.dropLast(6)) + ".gcode.3mf")
+            }
+        }
+        let task = subtaskName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !task.isEmpty {
+            names.append(task)
+            if !task.lowercased().hasSuffix(".3mf") { names.append(task + ".gcode.3mf") }
+        }
+        var paths: [String] = []
+        for name in names where !name.isEmpty {
+            for prefix in ["/", "/cache/"] {
+                let path = prefix + name.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                if !paths.contains(path) { paths.append(path) }
+            }
+        }
+        return paths
+    }
+
+    func start() {
+        guard !candidatePaths.isEmpty else {
+            finish(.failure(BambuFTPError.noCandidate))
+            return
+        }
+        guard let port = NWEndpoint.Port(rawValue: 990) else {
+            finish(.failure(BambuFTPError.connection("cổng FTPS không hợp lệ")))
+            return
+        }
+        let connection = makeTLSConnection(port: port)
+        control = connection
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                self.receiveControl()
+            case .failed(let error):
+                self.finish(.failure(BambuFTPError.connection(error.localizedDescription)))
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + 35) { [weak self] in
+            guard let self, !self.completed else { return }
+            self.finish(.failure(BambuFTPError.connection("FTPS hết thời gian chờ")))
+        }
+    }
+
+    func cancel() {
+        completed = true
+        control?.cancel()
+        dataConnection?.cancel()
+    }
+
+    private func makeTLSConnection(port: NWEndpoint.Port) -> NWConnection {
+        let tls = NWProtocolTLS.Options()
+        sec_protocol_options_set_verify_block(
+            tls.securityProtocolOptions,
+            { _, _, complete in complete(true) },
+            queue
+        )
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        return NWConnection(
+            host: NWEndpoint.Host(host),
+            port: port,
+            using: NWParameters(tls: tls, tcp: tcp)
+        )
+    }
+
+    private func receiveControl() {
+        control?.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, complete, error in
+            guard let self, !self.completed else { return }
+            if let data, let text = String(data: data, encoding: .utf8) {
+                self.controlBuffer += text
+                self.consumeControlLines()
+            }
+            if let error {
+                self.finish(.failure(BambuFTPError.connection(error.localizedDescription)))
+                return
+            }
+            if complete, !self.completed {
+                self.finish(.failure(BambuFTPError.connection("máy in đóng FTPS quá sớm")))
+                return
+            }
+            self.receiveControl()
+        }
+    }
+
+    private func consumeControlLines() {
+        while let range = controlBuffer.range(of: "\r\n") {
+            let line = String(controlBuffer[..<range.lowerBound])
+            controlBuffer.removeSubrange(controlBuffer.startIndex..<range.upperBound)
+            guard line.count >= 3, let code = Int(line.prefix(3)) else { continue }
+            // Ignore intermediate lines in a multiline FTP response.
+            if line.count > 3, line[line.index(line.startIndex, offsetBy: 3)] == "-" { continue }
+            handleReply(code: code, line: line)
+        }
+    }
+
+    private func handleReply(code: Int, line: String) {
+        switch stage {
+        case .welcome where code == 220:
+            send("USER bblp", next: .user)
+        case .user where code == 331:
+            send("PASS \(accessCode)", next: .password)
+        case .user where code == 230:
+            send("PBSZ 0", next: .pbsz)
+        case .password where code == 230:
+            send("PBSZ 0", next: .pbsz)
+        case .pbsz where code == 200:
+            send("PROT P", next: .protection)
+        case .protection where code == 200:
+            send("TYPE I", next: .binary)
+        case .binary where code == 200:
+            requestPassivePort()
+        case .passive where code == 229:
+            guard let port = parseEPSVPort(line), let endpointPort = NWEndpoint.Port(rawValue: port) else {
+                finish(.failure(BambuFTPError.rejected("Máy in trả cổng dữ liệu FTPS không hợp lệ")))
+                return
+            }
+            openDataConnection(port: endpointPort)
+        case .retrieving where code == 125 || code == 150:
+            stage = .transfer
+        case .retrieving where code == 550:
+            tryNextCandidate()
+        case .transfer where code == 226:
+            controlFinished = true
+            finishTransferIfReady()
+        default:
+            if code >= 400 {
+                finish(.failure(BambuFTPError.rejected(line)))
+            }
+        }
+    }
+
+    private func requestPassivePort() {
+        downloaded.removeAll(keepingCapacity: true)
+        controlFinished = false
+        dataFinished = false
+        send("EPSV", next: .passive)
+    }
+
+    private func openDataConnection(port: NWEndpoint.Port) {
+        stage = .dataConnecting
+        let connection = makeTLSConnection(port: port)
+        dataConnection = connection
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self, !self.completed else { return }
+            switch state {
+            case .ready:
+                self.receiveData()
+                self.stage = .retrieving
+                self.sendRaw("RETR \(self.candidatePaths[self.candidateIndex])")
+            case .failed(let error):
+                self.finish(.failure(BambuFTPError.connection(error.localizedDescription)))
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
+    }
+
+    private func receiveData() {
+        dataConnection?.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, complete, error in
+            guard let self, !self.completed else { return }
+            if let data, !data.isEmpty {
+                self.downloaded.append(data)
+                if self.downloaded.count > 96 * 1_024 * 1_024 {
+                    self.finish(.failure(BambuFTPError.tooLarge))
+                    return
+                }
+            }
+            if let error {
+                self.finish(.failure(BambuFTPError.connection(error.localizedDescription)))
+                return
+            }
+            if complete {
+                self.dataFinished = true
+                self.finishTransferIfReady()
+                return
+            }
+            self.receiveData()
+        }
+    }
+
+    private func tryNextCandidate() {
+        dataConnection?.cancel()
+        dataConnection = nil
+        candidateIndex += 1
+        guard candidateIndex < candidatePaths.count else {
+            finish(.failure(BambuFTPError.noCandidate))
+            return
+        }
+        requestPassivePort()
+    }
+
+    private func finishTransferIfReady() {
+        guard controlFinished, dataFinished else { return }
+        finish(.success(downloaded))
+    }
+
+    private func parseEPSVPort(_ line: String) -> UInt16? {
+        guard let start = line.range(of: "(|||"),
+              let end = line.range(of: "|)", range: start.upperBound..<line.endIndex) else { return nil }
+        return UInt16(line[start.upperBound..<end.lowerBound])
+    }
+
+    private func send(_ command: String, next: Stage) {
+        stage = next
+        sendRaw(command)
+    }
+
+    private func sendRaw(_ command: String) {
+        control?.send(content: Data("\(command)\r\n".utf8), completion: .contentProcessed { [weak self] error in
+            if let error {
+                self?.finish(.failure(BambuFTPError.connection(error.localizedDescription)))
+            }
+        })
+    }
+
+    private func finish(_ result: Result<Data, Error>) {
+        guard !completed else { return }
+        completed = true
+        control?.cancel()
+        dataConnection?.cancel()
+        completion(result)
+    }
+}

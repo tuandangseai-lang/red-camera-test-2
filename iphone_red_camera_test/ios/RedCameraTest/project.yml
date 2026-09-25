@@ -1,4 +1,8 @@
 name: RedCameraTest
+packages:
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation.git
+    from: 0.9.0
 options:
   bundleIdPrefix: vn.rockettracker
   deploymentTarget:
@@ -6,8 +10,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "9.74"
-    CURRENT_PROJECT_VERSION: "153"
+    MARKETING_VERSION: "9.75"
+    CURRENT_PROJECT_VERSION: "154"
 targets:
   RedCameraTest:
     type: application
@@ -19,6 +23,7 @@ targets:
       - path: RedCameraTest/H2DTimelapseManager.swift
       - path: RedCameraTest/H2DTimelapseView.swift
       - path: RedCameraTest/PrinterRemoteControlView.swift
+      - path: RedCameraTest/BambuPrinterControl.swift
       - path: RedCameraTest/SELanguage.swift
       - path: RedCameraTest/PrinterAlarmPlayer.swift
       - path: RedCameraTest/BambuPrinterProfile.swift
@@ -49,8 +54,10 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: vn.rockettracker.RedCameraTest
-        MARKETING_VERSION: "9.74"
-        CURRENT_PROJECT_VERSION: "153"
+        MARKETING_VERSION: "9.75"
+        CURRENT_PROJECT_VERSION: "154"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"
+    dependencies:
+      - package: ZIPFoundation
