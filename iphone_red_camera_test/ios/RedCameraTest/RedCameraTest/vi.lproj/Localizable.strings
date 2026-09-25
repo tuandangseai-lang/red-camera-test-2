@@ -22,3 +22,9 @@
 "Serial máy in" = "Số sê-ri máy in";
 "Chưa nhận được loại máy từ serial" = "Chưa nhận được loại máy từ số sê-ri";
 "Chọn hồ sơ; SE còn tự kiểm tra đầu serial để nhận đúng A1 / H2D / P2S." = "Chọn hồ sơ; SE còn tự kiểm tra đầu số sê-ri để nhận đúng A1 / H2D / P2S.";
+"Tắt cảnh báo" = "Tắt cảnh báo";
+"Đã tắt" = "Đã tắt";
+"Đã tắt âm cảnh báo • lỗi vẫn đang được theo dõi" = "Đã tắt âm cảnh báo • lỗi vẫn đang được theo dõi";
+"Tắt còi iPhone và cảnh báo đỏ trên ESP32" = "Tắt còi iPhone và cảnh báo đỏ trên ESP32";
+"Bật camera máy in" = "Bật camera máy in";
+"Kết nối lại camera máy in" = "Kết nối lại camera máy in";

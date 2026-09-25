@@ -46,7 +46,6 @@ struct H2DTimelapseView: View {
     @State private var ledBrightnessSendWorkItem: DispatchWorkItem?
     @State private var showCaptureBrightnessSlider = false
     @State private var captureBrightnessCollapseWorkItem: DispatchWorkItem?
-    @State private var printerCameraExpanded = false
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -88,10 +87,8 @@ struct H2DTimelapseView: View {
                 if !rendering { applyHardwareControls(force: true) }
             }
             .alert(localizedStatus("\(bluetooth.activeCriticalPrinterDisplayName) đang có lỗi"), isPresented: $showCriticalPrinterAlarm) {
-                Button("OK") {
-                    acknowledgedAlarmID = currentAlarmID
-                    printerAlarm.stop()
-                    bluetooth.acknowledgeCriticalPrinterAlarm()
+                Button("Tắt cảnh báo") {
+                    silenceCurrentPrinterAlarm()
                 }
             } message: {
                 Text(localizedStatus(bluetooth.activeCriticalPrinterAlertText.isEmpty
@@ -252,7 +249,22 @@ struct H2DTimelapseView: View {
             }
             .onChange(of: timelapse.isArmed) { _, armed in
                 bluetooth.setH2DTimelapseArmed(armed)
-                if armed { hardwareArmRequested = false }
+                if armed {
+                    hardwareArmRequested = false
+                    // Mức 2 uses the printer live view as its visible monitor.
+                    // AVCapture remains warm in the background so layer photos
+                    // and the finished timelapse keep working exactly as before.
+                    let hasPrinterCameraCredentials = selectedProfile != nil &&
+                        !accessCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    if hasPrinterCameraCredentials {
+                        if printerCameraEnabled {
+                            refreshPrinterCamera()
+                        } else {
+                            printerCameraEnabled = true
+                        }
+                    }
+                    timelapse.setLiveMonitorVisible(false)
+                }
                 if !armed {
                     // Let the capture screen disappear before starting the fairly
                     // expensive AVCapture session again. This removes the visible
@@ -602,6 +614,9 @@ struct H2DTimelapseView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     cinemaSystemHeader
+                    if bluetooth.hasActiveCriticalPrinterAlert {
+                        printerAlarmSilenceBanner
+                    }
                     printerCameraCard
                     cameraCard
                     bridgeStatusCard
@@ -710,7 +725,7 @@ struct H2DTimelapseView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(appLanguageCode == "vi" ? "Đổi sang tiếng Anh" : "Switch to Vietnamese")
 
-                    Text("V9.70")
+                    Text("V9.71")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.34))
                 }
@@ -1369,84 +1384,12 @@ struct H2DTimelapseView: View {
     private var activeCaptureView: some View {
         VStack(spacing: 14) {
             Spacer(minLength: 8)
-            ZStack {
-                if printerCameraExpanded && printerCameraEnabled {
-                    HStack {
-                        Spacer(minLength: 0)
-                        printerCameraViewport
-                            .frame(maxWidth: 350)
-                            .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        .overlay(alignment: .topTrailing) {
-                            Button {
-                                printerCameraExpanded = false
-                            } label: {
-                                Image(systemName: "arrow.down.right.and.arrow.up.left")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.black.opacity(0.72))
-                            .padding(10)
-                        }
-                        Spacer(minLength: 0)
-                    }
+            if bluetooth.hasActiveCriticalPrinterAlert {
+                printerAlarmSilenceBanner
                     .padding(.horizontal, 18)
-                } else {
-                    Group {
-                        if timelapse.isLiveMonitorVisible && !timelapse.isRendering {
-                            HStack {
-                                Spacer(minLength: 0)
-                                H2DCameraPreview(
-                                    session: timelapse.previewSession,
-                                    rotationAngle: timelapse.cameraRotationAngle
-                                )
-                                .frame(width: 180, height: 320)
-                                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                                .overlay(alignment: .topTrailing) {
-                                    HStack(spacing: 8) {
-                                        Button {
-                                            timelapse.rotateCamera180()
-                                        } label: {
-                                            Image(systemName: "rotate.right")
-                                        }
-                                        Button {
-                                            timelapse.setLiveMonitorVisible(false)
-                                        } label: {
-                                            Image(systemName: "xmark")
-                                        }
-                                    }
-                                    .buttonStyle(.borderedProminent)
-                                    .tint(.black.opacity(0.72))
-                                    .padding(10)
-                                }
-                                Spacer(minLength: 0)
-                            }
-                            .padding(.horizontal, 18)
-                        } else {
-                            activeCinemaStandbyHUD
-                        }
-                    }
-                    .overlay(alignment: .bottomTrailing) {
-                        if printerCameraEnabled {
-                            Button {
-                                printerCameraExpanded = true
-                            } label: {
-                                printerCameraViewport
-                                    .frame(width: 142, height: 80)
-                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                    .overlay {
-                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                            .stroke(cinemaCyan.opacity(0.55), lineWidth: 1)
-                                    }
-                            }
-                            .buttonStyle(.plain)
-                            .padding(12)
-                            .accessibilityLabel("Mở lớn camera máy in")
-                        }
-                    }
-                }
-
             }
-            .frame(maxWidth: .infinity)
+
+            activePrinterCameraMonitor
 
             Text(localizedStatus(timelapse.statusText))
                 .font(.custom("Arial", size: 15).weight(.semibold))
@@ -1491,25 +1434,28 @@ struct H2DTimelapseView: View {
             if !timelapse.isRendering {
                 HStack(spacing: 12) {
                     Button {
-                        timelapse.setLiveMonitorVisible(!timelapse.isLiveMonitorVisible)
+                        if printerCameraEnabled {
+                            printerCamera.retryNow()
+                        } else {
+                            printerCameraEnabled = true
+                        }
                     } label: {
                         Label(
-                            timelapse.isLiveMonitorVisible
-                                ? "Ẩn hình xem trước"
-                                : "Hiện hình xem trước",
-                            systemImage: timelapse.isLiveMonitorVisible
-                                ? "video.slash.fill"
-                                : "video.fill"
+                            printerCameraEnabled
+                                ? "Kết nối lại camera máy in"
+                                : "Bật camera máy in",
+                            systemImage: "video.fill"
                         )
                             .labelStyle(.iconOnly)
                             .frame(width: 44, height: 32)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(timelapse.isLiveMonitorVisible ? .gray : .blue)
+                    .tint(printerCamera.isStreaming ? .gray : .blue)
+                    .disabled(selectedProfile == nil || accessCode.isEmpty)
                     .accessibilityLabel(
-                        timelapse.isLiveMonitorVisible
-                            ? "Ẩn hình xem trước"
-                            : "Hiện hình xem trước"
+                        printerCameraEnabled
+                            ? "Kết nối lại camera máy in"
+                            : "Bật camera máy in"
                     )
 
                     Button(role: .destructive) {
@@ -1532,6 +1478,92 @@ struct H2DTimelapseView: View {
                 .padding(.horizontal, 24)
         }
         .background(Color.clear)
+    }
+
+    private var activePrinterCameraMonitor: some View {
+        HStack {
+            Spacer(minLength: 0)
+            printerCameraViewport
+                .frame(maxWidth: 350)
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(cinemaCyan.opacity(printerCamera.isStreaming ? 0.48 : 0.20), lineWidth: 1)
+                }
+                .overlay(alignment: .topTrailing) {
+                    Button {
+                        if printerCameraEnabled {
+                            printerCamera.retryNow()
+                        } else {
+                            printerCameraEnabled = true
+                        }
+                    } label: {
+                        Image(systemName: printerCamera.isStreaming
+                            ? "arrow.clockwise"
+                            : "video.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.black.opacity(0.72))
+                    .disabled(selectedProfile == nil || accessCode.isEmpty)
+                    .padding(10)
+                    .accessibilityLabel(printerCameraEnabled
+                        ? "Kết nối lại camera máy in"
+                        : "Bật camera máy in")
+                }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 18)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var printerAlarmSilenceBanner: some View {
+        HStack(spacing: 11) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 22, weight: .black))
+                .foregroundStyle(.red)
+                .shadow(color: .red.opacity(0.55), radius: 6)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(bluetooth.activeCriticalPrinterDisplayName) đang có lỗi")
+                    .font(.system(size: 12, weight: .black, design: .rounded))
+                    .foregroundStyle(.white)
+                Text(LocalizedStringKey(acknowledgedAlarmID == currentAlarmID
+                    ? "Đã tắt âm cảnh báo • lỗi vẫn đang được theo dõi"
+                    : "Tắt còi iPhone và cảnh báo đỏ trên ESP32"))
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 6)
+
+            Button {
+                silenceCurrentPrinterAlarm()
+            } label: {
+                Label {
+                    Text(LocalizedStringKey(
+                        acknowledgedAlarmID == currentAlarmID ? "Đã tắt" : "Tắt cảnh báo"
+                    ))
+                } icon: {
+                    Image(systemName: acknowledgedAlarmID == currentAlarmID
+                        ? "speaker.slash.fill"
+                        : "bell.slash.fill")
+                }
+                .font(.system(size: 10, weight: .black, design: .rounded))
+                .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(acknowledgedAlarmID == currentAlarmID ? .gray : .red)
+            .disabled(acknowledgedAlarmID == currentAlarmID)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 11)
+        .background(.red.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(.red.opacity(0.45), lineWidth: 1)
+        }
     }
 
     private var capturePrintProgressRail: some View {
@@ -2123,6 +2155,21 @@ struct H2DTimelapseView: View {
         guard acknowledgedAlarmID != currentAlarmID else { return }
         showCriticalPrinterAlarm = true
         printerAlarm.startLooping()
+    }
+
+    private func silenceCurrentPrinterAlarm() {
+        guard bluetooth.hasActiveCriticalPrinterAlert else {
+            printerAlarm.stop()
+            showCriticalPrinterAlarm = false
+            return
+        }
+        acknowledgedAlarmID = currentAlarmID
+        printerAlarm.stop()
+        showCriticalPrinterAlarm = false
+        // ESP32 keeps the fault visible, but stops the repeating buzzer and the
+        // flashing red strip for this exact incident. A new error automatically
+        // clears the acknowledgement and raises both alarms again.
+        bluetooth.acknowledgeCriticalPrinterAlarm()
     }
 
     private func persistActiveProfile() {

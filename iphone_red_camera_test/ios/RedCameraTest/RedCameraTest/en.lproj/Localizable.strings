@@ -148,3 +148,9 @@
 "Ví dụ: Máy 1" = "Example: Printer 1";
 "Nhập mật khẩu Wi-Fi" = "Enter Wi-Fi password";
 "Wi-Fi đã kết nối • đang tìm máy in" = "Wi-Fi connected • searching for printer";
+"Tắt cảnh báo" = "Silence alarm";
+"Đã tắt" = "Silenced";
+"Đã tắt âm cảnh báo • lỗi vẫn đang được theo dõi" = "Alarm silenced • the fault is still being monitored";
+"Tắt còi iPhone và cảnh báo đỏ trên ESP32" = "Silence the iPhone siren and the red ESP32 alarm";
+"Bật camera máy in" = "Turn on printer camera";
+"Kết nối lại camera máy in" = "Reconnect printer camera";
