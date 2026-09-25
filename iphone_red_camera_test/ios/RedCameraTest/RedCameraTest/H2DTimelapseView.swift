@@ -116,6 +116,8 @@ struct H2DTimelapseView: View {
             .sheet(isPresented: $showPrinterControls) {
                 PrinterRemoteControlView(
                     bluetooth: bluetooth,
+                    printerCamera: printerCamera,
+                    cameraEnabled: $printerCameraEnabled,
                     printerName: printerName
                 )
             }
@@ -475,7 +477,8 @@ struct H2DTimelapseView: View {
 
     /// Keep the screen edge quiet during normal use. It is reserved for the
     /// two states that require immediate attention: a printer fault or an
-    /// active stop request. Capture and print progress use the horizontal rail.
+    /// active stop request. Keep the red edge steady: rapid opacity animation
+    /// looked like the whole iPhone screen was juddering during an alarm.
     private var screenEdgeLEDStrip: some View {
         let isError = printerIslandState == .error
         let shouldShowEdge = isError || printerIslandState == .stopping
@@ -484,7 +487,7 @@ struct H2DTimelapseView: View {
             color: .red,
             progress: nil,
             remainingSeconds: nil,
-            blinks: isError,
+            blinks: false,
             breathingPeriod: nil,
             minimumOpacity: 1.0,
             maximumOpacity: 1.0,
@@ -702,7 +705,7 @@ struct H2DTimelapseView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(appLanguageCode == "vi" ? "Đổi sang tiếng Anh" : "Switch to Vietnamese")
 
-                    Text("V9.73")
+                    Text("V9.74")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.34))
                 }

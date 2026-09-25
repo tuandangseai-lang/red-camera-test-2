@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.17.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.18.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -95,6 +95,8 @@ constexpr size_t REMOTE_CONTROL_PAYLOAD_LENGTH = 320;
 constexpr size_t REMOTE_CONTROL_ACTION_LENGTH = 28;
 constexpr uint32_t REMOTE_CONTROL_TIMEOUT_MS = 20000;
 constexpr uint32_t REMOTE_CONTROL_RETRY_MS = 700;
+constexpr uint32_t REMOTE_CONTROL_RESPONSE_TIMEOUT_MS = 12000;
+constexpr size_t REMOTE_CONTROL_MQTT_PACKET_LENGTH = 512;
 // Seven WS2812B packages are active: pixels 0...2 hold the steady state colour
 // and pixels 3...6 show the configured animation/progress.
 // DATA -> GPIO5 through 330 ohms; 5V/GND must share GND with the ESP32.
@@ -255,6 +257,11 @@ uint8_t remoteControlHead = 0;
 uint8_t remoteControlTail = 0;
 uint32_t remoteControlSequenceId = 100000;
 uint32_t lastRemoteControlPublishAt = 0;
+uint16_t remoteControlPacketID = 1;
+bool remoteControlAwaitingReport = false;
+char remoteControlAwaitingAction[Config::REMOTE_CONTROL_ACTION_LENGTH] = {};
+char remoteControlAwaitingSequence[16] = {};
+uint32_t remoteControlAwaitingSince = 0;
 
 volatile bool phoneConnected = false;
 volatile bool networkResetPending = false;
@@ -415,6 +422,10 @@ void clearRemoteControlQueue() {
   portENTER_CRITICAL(&remoteControlMux);
   remoteControlHead = remoteControlTail = 0;
   portEXIT_CRITICAL(&remoteControlMux);
+  remoteControlAwaitingReport = false;
+  remoteControlAwaitingAction[0] = '\0';
+  remoteControlAwaitingSequence[0] = '\0';
+  remoteControlAwaitingSince = 0;
 }
 
 void flushPhoneEvents() {
@@ -1584,7 +1595,50 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
   reportPrintStatus(true);
 }
 
+void handleRemoteControlReport(const uint8_t *payload, size_t length) {
+  if (!remoteControlAwaitingReport) return;
+
+  String sequence;
+  if (!extractJsonString(payload, length, "sequence_id", sequence) ||
+      sequence != remoteControlAwaitingSequence) {
+    return;
+  }
+
+  String action = remoteControlAwaitingAction;
+  String result;
+  String reason;
+  const bool hasStringResult = extractJsonString(payload, length, "result", result);
+  extractJsonString(payload, length, "reason", reason);
+  int numericResult = 0;
+  const bool hasNumericResult =
+      !hasStringResult && extractLastJsonInt(payload, length, "result", numericResult);
+  result.toLowerCase();
+  const bool succeeded = hasStringResult
+      ? (result == "success" || result == "ok")
+      : (!hasNumericResult || numericResult == 0);
+
+  remoteControlAwaitingReport = false;
+  remoteControlAwaitingAction[0] = '\0';
+  remoteControlAwaitingSequence[0] = '\0';
+  remoteControlAwaitingSince = 0;
+  if (succeeded) {
+    queuePhoneEvent(String("H2D,REMOTE_ACK,") + action);
+    statusRequestPending = true;
+    Serial.printf("[REMOTE] printer confirmed %s sequence %s\n", action.c_str(),
+                  sequence.c_str());
+  } else {
+    reason = safeEventField(reason);
+    if (reason.isEmpty()) {
+      reason = hasStringResult ? result : String(numericResult);
+    }
+    queuePhoneEvent(String("H2D,REMOTE_ERROR,") + action + "," + reason);
+    Serial.printf("[REMOTE] printer rejected %s sequence %s: %s\n",
+                  action.c_str(), sequence.c_str(), reason.c_str());
+  }
+}
+
 void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
+  handleRemoteControlReport(payload, length);
   const bool firstStatusPacket = !statusDataSeen;
   lastMqttMessageAt = millis();
   const String previousStateForAlarm = printState;
@@ -2186,11 +2240,60 @@ void publishStatusRequest() {
   }
 }
 
+bool publishSelectedPrinterQos1(const String &topic, const char *payload) {
+  const size_t topicLength = topic.length();
+  const size_t payloadLength = strlen(payload);
+  const size_t remainingLength = 2 + topicLength + 2 + payloadLength;
+  if (topicLength == 0 || topicLength > 0xFFFF ||
+      remainingLength + 5 > Config::REMOTE_CONTROL_MQTT_PACKET_LENGTH) {
+    return false;
+  }
+
+  uint8_t packet[Config::REMOTE_CONTROL_MQTT_PACKET_LENGTH];
+  size_t cursor = 0;
+  // MQTT PUBLISH with QoS 1. Bambu marks stop/pause/resume as high-priority
+  // QoS-1 commands; PubSubClient's public publish() API only emits QoS 0.
+  packet[cursor++] = 0x32;
+  size_t encodedLength = remainingLength;
+  do {
+    uint8_t digit = encodedLength % 128;
+    encodedLength /= 128;
+    if (encodedLength > 0) digit |= 0x80;
+    packet[cursor++] = digit;
+  } while (encodedLength > 0);
+
+  packet[cursor++] = static_cast<uint8_t>((topicLength >> 8) & 0xFF);
+  packet[cursor++] = static_cast<uint8_t>(topicLength & 0xFF);
+  memcpy(packet + cursor, topic.c_str(), topicLength);
+  cursor += topicLength;
+  if (++remoteControlPacketID == 0) remoteControlPacketID = 1;
+  packet[cursor++] = static_cast<uint8_t>((remoteControlPacketID >> 8) & 0xFF);
+  packet[cursor++] = static_cast<uint8_t>(remoteControlPacketID & 0xFF);
+  memcpy(packet + cursor, payload, payloadLength);
+  cursor += payloadLength;
+
+  return tlsClient.write(packet, cursor) == cursor;
+}
+
 void processRemoteControlQueue() {
+  const uint32_t now = millis();
+  if (remoteControlAwaitingReport) {
+    if (now - remoteControlAwaitingSince >=
+        Config::REMOTE_CONTROL_RESPONSE_TIMEOUT_MS) {
+      const String action = remoteControlAwaitingAction;
+      remoteControlAwaitingReport = false;
+      remoteControlAwaitingAction[0] = '\0';
+      remoteControlAwaitingSequence[0] = '\0';
+      remoteControlAwaitingSince = 0;
+      queuePhoneEvent(String("H2D,REMOTE_ERROR,") + action +
+                      ",Máy in không xác nhận lệnh • hãy bật LAN Developer Mode");
+    }
+    return;
+  }
+
   RemoteControlRequest request;
   if (!peekRemoteControl(request)) return;
 
-  const uint32_t now = millis();
   if (now - request.queuedAt >= Config::REMOTE_CONTROL_TIMEOUT_MS) {
     popRemoteControl();
     queuePhoneEvent(String("H2D,REMOTE_ERROR,") + request.action +
@@ -2208,10 +2311,10 @@ void processRemoteControlQueue() {
   lastRemoteControlPublishAt = now;
 
   const String topic = "device/" + settings.printerSerial + "/request";
-  // As with pushall, shrink the shared PubSubClient buffer only for the small
-  // outgoing packet, then restore the large H2D receive buffer immediately.
+  // Free the oversized RX allocation while mbedTLS encrypts the small QoS-1
+  // packet, then restore it before mqtt.loop() reads the printer response.
   mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
-  const bool published = mqtt.publish(topic.c_str(), request.payload);
+  const bool published = publishSelectedPrinterQos1(topic, request.payload);
   const bool receiveBufferReady = expandSelectedMqttReceiveBuffer();
   if (!receiveBufferReady) {
     popRemoteControl();
@@ -2225,9 +2328,21 @@ void processRemoteControlQueue() {
 
   if (published) {
     popRemoteControl();
-    queuePhoneEvent(String("H2D,REMOTE_ACK,") + request.action);
-    statusRequestPending = true;
-    Serial.printf("[REMOTE] published %s to selected printer\n", request.action);
+    String sequence;
+    if (!extractJsonString(reinterpret_cast<const uint8_t *>(request.payload),
+                           strlen(request.payload), "sequence_id", sequence)) {
+      queuePhoneEvent(String("H2D,REMOTE_ERROR,") + request.action +
+                      ",Không đọc được mã xác nhận lệnh");
+      return;
+    }
+    remoteControlAwaitingReport = true;
+    strlcpy(remoteControlAwaitingAction, request.action,
+            sizeof(remoteControlAwaitingAction));
+    strlcpy(remoteControlAwaitingSequence, sequence.c_str(),
+            sizeof(remoteControlAwaitingSequence));
+    remoteControlAwaitingSince = now;
+    Serial.printf("[REMOTE] QoS1 sent %s sequence %s; awaiting printer report\n",
+                  request.action, sequence.c_str());
     return;
   }
 
@@ -2411,7 +2526,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.17.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.18.0");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -3311,7 +3426,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.17.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.18.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

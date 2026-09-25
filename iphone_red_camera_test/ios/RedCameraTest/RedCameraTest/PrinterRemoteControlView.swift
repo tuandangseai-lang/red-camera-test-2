@@ -2,6 +2,8 @@ import SwiftUI
 
 struct PrinterRemoteControlView: View {
     @ObservedObject var bluetooth: H2DBLEManager
+    @ObservedObject var printerCamera: BambuPrinterCameraManager
+    @Binding var cameraEnabled: Bool
     let printerName: String
 
     @Environment(\.dismiss) private var dismiss
@@ -44,6 +46,7 @@ struct PrinterRemoteControlView: View {
                 ScrollView {
                     VStack(spacing: 16) {
                         statusCard
+                        printerCameraCard
                         printJobCard
                         skipObjectsCard
                         filamentCard
@@ -132,6 +135,70 @@ struct PrinterRemoteControlView: View {
                 Text(bluetooth.printerControlStatusText)
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.78))
+            }
+        }
+        .remoteControlCard()
+    }
+
+    private var printerCameraCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 9) {
+                controlTitle("CAMERA MÁY IN", icon: "video.fill")
+                Spacer()
+                Text(printerCamera.isStreaming ? "LIVE" : printerCamera.transportText)
+                    .font(.system(size: 9, weight: .black, design: .monospaced))
+                    .foregroundStyle(printerCamera.isStreaming ? green : amber)
+                Button {
+                    cameraEnabled.toggle()
+                } label: {
+                    Image(systemName: cameraEnabled ? "video.slash.fill" : "video.fill")
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.bordered)
+                .tint(cameraEnabled ? .white.opacity(0.70) : cyan)
+            }
+
+            ZStack {
+                LinearGradient(
+                    colors: [.black, Color(red: 0.018, green: 0.055, blue: 0.07)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+
+                if cameraEnabled, let frame = printerCamera.frame {
+                    Image(decorative: frame, scale: 1, orientation: .up)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    VStack(spacing: 9) {
+                        if cameraEnabled && printerCamera.isConnecting {
+                            ProgressView().tint(amber)
+                        } else {
+                            Image(systemName: cameraEnabled ? "video.fill" : "video.slash")
+                                .font(.system(size: 24, weight: .semibold))
+                                .foregroundStyle(cameraEnabled ? amber : .white.opacity(0.30))
+                        }
+                        Text(cameraEnabled
+                            ? printerCamera.statusText
+                            : "Bật camera để theo dõi thao tác điều khiển")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.60))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 18)
+                        if cameraEnabled && !printerCamera.isConnecting && !printerCamera.isStreaming {
+                            Button("Thử lại") { printerCamera.retryNow() }
+                                .buttonStyle(.bordered)
+                                .tint(cyan)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke((printerCamera.isStreaming ? green : cyan).opacity(0.28), lineWidth: 1)
             }
         }
         .remoteControlCard()
@@ -296,10 +363,16 @@ struct PrinterRemoteControlView: View {
     }
 
     private var safetyNote: some View {
-        Label(
-            "Giữ máy trong tầm quan sát khi dùng điều khiển từ xa. Xác nhận nhận lệnh không có nghĩa thao tác cơ khí đã hoàn tất.",
-            systemImage: "exclamationmark.shield.fill"
-        )
+        VStack(alignment: .leading, spacing: 8) {
+            Label(
+                "Firmware Bambu mới cần bật LAN Mode > Developer Mode để nhận lệnh từ SE.",
+                systemImage: "network.badge.shield.half.filled"
+            )
+            Label(
+                "Giữ máy trong tầm quan sát. Xác nhận nhận lệnh không có nghĩa thao tác cơ khí đã hoàn tất.",
+                systemImage: "exclamationmark.shield.fill"
+            )
+        }
         .font(.system(size: 11, weight: .semibold, design: .rounded))
         .foregroundStyle(amber.opacity(0.86))
         .padding(.horizontal, 4)

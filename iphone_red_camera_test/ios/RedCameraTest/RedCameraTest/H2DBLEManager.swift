@@ -1241,27 +1241,34 @@ final class H2DBLEManager: NSObject, ObservableObject {
             printerControlLastSucceeded = true
             let action = fields.count >= 3 ? fields[2].uppercased() : "COMMAND"
             let labels = [
-                "PAUSE": "Đã gửi lệnh tạm dừng",
-                "RESUME": "Đã gửi lệnh tiếp tục in",
-                "STOP": "Đã gửi lệnh dừng bản in",
-                "SKIP_OBJECTS": "Đã gửi danh sách vật thể cần bỏ qua",
-                "LOAD_FILAMENT": "Đã gửi lệnh nạp nhựa",
-                "UNLOAD_FILAMENT": "Đã gửi lệnh rút nhựa",
-                "AMS_RESUME": "Đã yêu cầu AMS tiếp tục",
-                "AMS_DONE": "Đã xác nhận hoàn tất thay nhựa",
-                "PRINT_SPEED": "Đã gửi mức tốc độ mới",
-                "CHAMBER_LIGHT": "Đã gửi trạng thái đèn buồng in"
+                "PAUSE": "Máy in đã xác nhận tạm dừng",
+                "RESUME": "Máy in đã xác nhận tiếp tục",
+                "STOP": "Máy in đã xác nhận dừng bản in",
+                "SKIP_OBJECTS": "Máy in đã nhận danh sách vật thể bỏ qua",
+                "LOAD_FILAMENT": "Máy in đã xác nhận nạp nhựa",
+                "UNLOAD_FILAMENT": "Máy in đã xác nhận rút nhựa",
+                "AMS_RESUME": "AMS đã xác nhận tiếp tục",
+                "AMS_DONE": "AMS đã xác nhận hoàn tất thay nhựa",
+                "PRINT_SPEED": "Máy in đã nhận mức tốc độ mới",
+                "CHAMBER_LIGHT": "Máy in đã nhận trạng thái đèn buồng in"
             ]
-            printerControlStatusText = (labels[action] ?? "Máy in đã nhận lệnh") + " • đang chờ máy thực hiện"
+            printerControlStatusText = (labels[action] ?? "Máy in đã xác nhận lệnh") + " • đang thực hiện"
         case "REMOTE_ERROR":
             printerControlTimeoutWorkItem?.cancel()
             printerControlTimeoutWorkItem = nil
             isPrinterControlPending = false
             printerControlLastSucceeded = false
             let detail = fields.dropFirst(3).joined(separator: " • ")
-            printerControlStatusText = detail.isEmpty
-                ? "Không gửi được lệnh tới máy in"
-                : detail
+            let normalizedDetail = detail.lowercased()
+            if normalizedDetail.contains("84033543") ||
+                normalizedDetail.contains("developer mode") ||
+                normalizedDetail.contains("authorization") {
+                printerControlStatusText = "Máy in chặn lệnh bên thứ ba • bật LAN Mode > Developer Mode trên máy in"
+            } else {
+                printerControlStatusText = detail.isEmpty
+                    ? "Máy in không xác nhận lệnh • kiểm tra LAN Developer Mode"
+                    : detail
+            }
         case "STATUS":
             guard fields.count >= 3 else { return }
             let status = fields[2].uppercased()
