@@ -4,6 +4,12 @@ Kiến trúc mới không dùng MaixCAM:
 
 `A1 + H2D + P2S -> Wi-Fi LAN/MQTT TLS -> ESP32 -> Bluetooth LE -> iPhone SE`
 
+Camera máy in đi theo đường riêng, trực tiếp tới iPhone để không làm nghẽn BLE:
+
+`H2D/P2S -> RTSPS/H.264 LAN -> iPhone SE`
+
+`A1 -> MJPEG/TLS LAN -> iPhone SE`
+
 ESP32 chỉ đọc trạng thái máy in. Firmware không gửi lệnh di chuyển, gia nhiệt,
 tạm dừng hay dừng máy in.
 
@@ -11,8 +17,9 @@ tạm dừng hay dừng máy in.
 
 1. Trên màn hình H2D, mở **Cài đặt > Mạng**.
 2. Bật **LAN Only** và **Developer Mode**.
-3. Ghi lại IP, Serial và Access Code của máy in.
-4. H2D và ESP32 phải dùng cùng mạng Wi-Fi.
+3. Bật **LAN Only Liveview** (một số firmware ghi **Local RTSP Stream**).
+4. Ghi lại IP, Serial và Access Code của máy in.
+5. H2D, ESP32 và iPhone phải dùng cùng mạng Wi-Fi.
 
 ## Nạp ESP32
 
@@ -67,10 +74,13 @@ một gói, app tự gửi lại tối đa hai lần và báo rõ bước lỗi 
 1. Mở SE; ứng dụng đi thẳng vào màn hình **Timelapse Bambu**.
 2. Căn khung hình iPhone khi màn hình xem trước còn sáng.
 3. Lưu riêng hồ sơ A1, H2D và P2S. ESP32 theo dõi đồng thời mọi hồ sơ đã lưu.
-4. Chạm tab máy cần chụp; viền xanh lá cho biết máy đang được chọn làm
+4. Trong thẻ **Camera máy in trực tiếp**, chạm nút camera để xem quá trình in.
+   H2D/P2S cần bật LAN Only Liveview; A1 dùng camera MJPEG LAN. App tự thử nối
+   lại khi camera mất mạng và tự dừng luồng khi SE chạy nền.
+5. Chạm tab máy cần chụp; viền xanh lá cho biết máy đang được chọn làm
    timelapse. Khi báo sẵn sàng, bấm **Bật chờ**.
-5. Không khóa iPhone và giữ SE ở màn hình trước.
-6. Sau khi H2D báo hoàn tất, SE tự ghép ảnh theo số lớp và lưu video vào Ảnh.
+6. Không khóa iPhone và giữ SE ở màn hình trước.
+7. Sau khi H2D báo hoàn tất, SE tự ghép ảnh theo số lớp và lưu video vào Ảnh.
 
 Camera iPhone được giữ sẵn trong phiên timelapse để không trễ khung hình. Nếu
 cần đầu in đứng cùng một chỗ trong từng ảnh, bật chế độ timelapse **Smooth**

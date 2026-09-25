@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "9.68"
-    CURRENT_PROJECT_VERSION: "147"
+    MARKETING_VERSION: "9.69"
+    CURRENT_PROJECT_VERSION: "148"
 targets:
   RedCameraTest:
     type: application
@@ -22,6 +22,7 @@ targets:
       - path: RedCameraTest/PrinterAlarmPlayer.swift
       - path: RedCameraTest/BambuPrinterProfile.swift
       - path: RedCameraTest/BambuCredentialStore.swift
+      - path: RedCameraTest/BambuPrinterCamera.swift
       - path: RedCameraTest/Assets.xcassets
       - path: RedCameraTest/fire-alarm-sound.mp3
       - path: RedCameraTest/iphone-screenshot-shutter.mp3
@@ -37,6 +38,7 @@ targets:
         LSRequiresIPhoneOS: true
         NSBluetoothAlwaysUsageDescription: Kết nối ESP32 để nhận tín hiệu từng lớp từ máy in Bambu.
         NSCameraUsageDescription: Chụp từng lớp để tạo timelapse máy in Bambu.
+        NSLocalNetworkUsageDescription: Kết nối trực tiếp camera của máy in Bambu trong mạng LAN để xem quá trình in.
         NSPhotoLibraryAddUsageDescription: Lưu video timelapse máy in Bambu vào ứng dụng Ảnh.
         UILaunchScreen: {}
         UIRequiredDeviceCapabilities:
@@ -46,8 +48,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: vn.rockettracker.RedCameraTest
-        MARKETING_VERSION: "9.68"
-        CURRENT_PROJECT_VERSION: "147"
+        MARKETING_VERSION: "9.69"
+        CURRENT_PROJECT_VERSION: "148"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"

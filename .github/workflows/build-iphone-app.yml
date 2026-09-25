@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.68 build147 - do sang che do 3 va song ngu day du
+name: Tao IPA SE v9.69 build148 - camera may in truc tiep
 
 on:
   workflow_dispatch:
@@ -49,6 +49,7 @@ jobs:
           test -f "RedCameraTest/vi.lproj/Localizable.strings"
           test -f "RedCameraTest/BambuPrinterProfile.swift"
           test -f "RedCameraTest/BambuCredentialStore.swift"
+          test -f "RedCameraTest/BambuPrinterCamera.swift"
           test -f "RedCameraTest/PrinterAlarmPlayer.swift"
           test -f "RedCameraTest/fire-alarm-sound.mp3"
           test -f "RedCameraTest/iphone-screenshot-shutter.mp3"
@@ -163,10 +164,15 @@ jobs:
           ! grep -q "CameraController.swift" project.yml
           ! grep -q "path: RedCameraTest/BLEManager.swift" project.yml
           ! grep -q "VoiceNotifier.swift" project.yml
-          ! grep -q "VLCKit\|H2DPrinterCameraView\|H2DNativeRTSPPlayer" project.yml
-          ! grep -q "Xem camera" "RedCameraTest/H2DTimelapseView.swift"
+          ! grep -q "VLCKit" project.yml
+          grep -q "BambuPrinterCamera.swift" project.yml
+          grep -q "BambuPrinterCameraManager" "RedCameraTest/BambuPrinterCamera.swift"
+          grep -q "RTP/AVP/TCP;unicast;interleaved=0-1" "RedCameraTest/BambuPrinterCamera.swift"
+          grep -q "CMVideoFormatDescriptionCreateFromH264ParameterSets" "RedCameraTest/BambuPrinterCamera.swift"
+          grep -q "0x3000" "RedCameraTest/BambuPrinterCamera.swift"
+          grep -q "printerCameraCard" "RedCameraTest/H2DTimelapseView.swift"
           ! grep -q "ESP32-C3" "RedCameraTest/H2DTimelapseView.swift"
-          ! /usr/libexec/PlistBuddy -c "Print :NSLocalNetworkUsageDescription" "$PLIST" >/dev/null 2>&1
+          /usr/libexec/PlistBuddy -c "Print :NSLocalNetworkUsageDescription" "$PLIST"
           ! grep -q "NSMicrophoneUsageDescription" "$PLIST"
 
       - name: Bien dich app iPhone chua ky
@@ -209,19 +215,19 @@ jobs:
           test -f "$APP_PATH/en.lproj/Localizable.strings"
           test -f "$APP_PATH/vi.lproj/Localizable.strings"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.68"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "147"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.69"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "148"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.68-build147-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.69-build148-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.68-build147-unsigned-ipa
-          path: SE-v9.68-build147-unsigned.ipa
+          name: SE-v9.69-build148-unsigned-ipa
+          path: SE-v9.69-build148-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 

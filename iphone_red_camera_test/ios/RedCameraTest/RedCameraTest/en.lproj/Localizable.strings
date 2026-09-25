@@ -29,6 +29,12 @@
 "Tiếng Anh" = "English";
 
 /* Camera and flash */
+"PRINTER LIVEVIEW" = "PRINTER LIVEVIEW";
+"CAMERA %@ • %@" = "%@ CAMERA • %@";
+"A1 phát camera trực tiếp trong mạng LAN qua MJPEG/TLS." = "A1 streams its camera directly over LAN using MJPEG/TLS.";
+"Trên máy in, hãy bật LAN Only Liveview (Local RTSP Stream) để SE nhận hình." = "On the printer, enable LAN Only Liveview (Local RTSP Stream) so SE can receive video.";
+"Thử lại" = "Retry";
+"Mở lớn camera máy in" = "Expand printer camera";
 "Ẩn viewfinder không tắt chức năng chụp tự động theo lớp." = "Hiding the viewfinder does not disable automatic layer capture.";
 "CAMERA IPHONE • 1.5×" = "IPHONE CAMERA • 1.5×";
 "ĐÈN FLASH & MÀN HÌNH" = "FLASH & DISPLAY";

@@ -1,4 +1,10 @@
 /* English source labels that must become fully Vietnamese when TV is selected. */
+"PRINTER LIVEVIEW" = "CAMERA MÁY IN TRỰC TIẾP";
+"CAMERA %@ • %@" = "CAMERA %@ • %@";
+"A1 phát camera trực tiếp trong mạng LAN qua MJPEG/TLS." = "A1 phát camera trực tiếp trong mạng LAN qua MJPEG/TLS.";
+"Trên máy in, hãy bật LAN Only Liveview (Local RTSP Stream) để SE nhận hình." = "Trên máy in, hãy bật Xem trực tiếp chỉ qua LAN (Luồng RTSP cục bộ) để SE nhận hình.";
+"Thử lại" = "Thử lại";
+"Mở lớn camera máy in" = "Mở lớn camera máy in";
 "SE CINEMA CONTROL" = "TRUNG TÂM ĐIỀU KHIỂN SE";
 "SMART LAYER CAPTURE • %@" = "CHỤP LỚP THÔNG MINH • %@";
 "OPTICAL VIEWFINDER" = "KHUNG NGẮM QUANG HỌC";
@@ -16,4 +22,3 @@
 "Serial máy in" = "Số sê-ri máy in";
 "Chưa nhận được loại máy từ serial" = "Chưa nhận được loại máy từ số sê-ri";
 "Chọn hồ sơ; SE còn tự kiểm tra đầu serial để nhận đúng A1 / H2D / P2S." = "Chọn hồ sơ; SE còn tự kiểm tra đầu số sê-ri để nhận đúng A1 / H2D / P2S.";
-
