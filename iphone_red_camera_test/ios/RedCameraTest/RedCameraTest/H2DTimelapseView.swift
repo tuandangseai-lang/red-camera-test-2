@@ -12,7 +12,6 @@ struct H2DTimelapseView: View {
     @AppStorage("SE.H2D.printerIP") private var printerIP = ""
     @AppStorage("SE.H2D.printerSerial") private var printerSerial = ""
     @AppStorage("SE.H2D.configurationSaved") private var configurationSaved = false
-    @AppStorage("SE.H2D.setupCameraEnabled") private var setupCameraEnabled = false
     @AppStorage("SE.Bambu.printerCameraEnabled") private var printerCameraEnabled = false
     @AppStorage("SE.H2D.hardwareBuzzerEnabled") private var hardwareBuzzerEnabled = true
     @AppStorage("SE.H2D.hardwareBuzzerVolume") private var hardwareBuzzerVolume = 1.0
@@ -46,6 +45,7 @@ struct H2DTimelapseView: View {
     @State private var ledBrightnessSendWorkItem: DispatchWorkItem?
     @State private var showCaptureBrightnessSlider = false
     @State private var captureBrightnessCollapseWorkItem: DispatchWorkItem?
+    @State private var printerCameraExpanded = false
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -244,48 +244,22 @@ struct H2DTimelapseView: View {
     private var printerObservedContent: some View {
         lifecycleObservedContent
             .onChange(of: scenePhase) { _, phase in
-                timelapse.handleScenePhase(phase, allowSetupPreview: setupCameraEnabled)
+                // Phòng chờ chỉ hiển thị camera máy in. Camera iPhone chỉ được
+                // khởi động khi timelapse đang chụp để tiết kiệm pin.
+                timelapse.handleScenePhase(phase, allowSetupPreview: false)
                 refreshPrinterCamera(for: phase)
             }
             .onChange(of: timelapse.isArmed) { _, armed in
                 bluetooth.setH2DTimelapseArmed(armed)
-                if armed {
-                    hardwareArmRequested = false
-                    // Mức 2 uses the printer live view as its visible monitor.
-                    // AVCapture remains warm in the background so layer photos
-                    // and the finished timelapse keep working exactly as before.
-                    let hasPrinterCameraCredentials = selectedProfile != nil &&
-                        !accessCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    if hasPrinterCameraCredentials {
-                        if printerCameraEnabled {
-                            refreshPrinterCamera()
-                        } else {
-                            printerCameraEnabled = true
-                        }
-                    }
-                    timelapse.setLiveMonitorVisible(false)
-                }
+                if armed { hardwareArmRequested = false }
                 if !armed {
-                    // Let the capture screen disappear before starting the fairly
-                    // expensive AVCapture session again. This removes the visible
-                    // hitch when leaving capture mode.
+                    // Let the capture screen disappear, then stop AVCapture.
+                    // Phòng chờ không dùng camera iPhone để tiết kiệm pin.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                         guard !timelapse.isArmed else { return }
-                        if setupCameraEnabled {
-                            timelapse.preparePreview()
-                        } else {
-                            timelapse.stopPreview()
-                        }
+                        timelapse.stopPreview()
                         applyHardwareControls(force: true)
                     }
-                }
-            }
-            .onChange(of: setupCameraEnabled) { _, enabled in
-                guard !timelapse.isArmed else { return }
-                if enabled {
-                    timelapse.preparePreview()
-                } else {
-                    timelapse.stopPreview()
                 }
             }
     }
@@ -344,11 +318,7 @@ struct H2DTimelapseView: View {
                 bluetooth.acknowledgeH2DFrame(layer: layer, success: success)
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                if setupCameraEnabled {
-                    timelapse.preparePreview()
-                } else {
-                    timelapse.stopPreview()
-                }
+                timelapse.stopPreview()
                 refreshPrinterCamera()
             }
             bluetooth.requestH2DStatus()
@@ -618,7 +588,6 @@ struct H2DTimelapseView: View {
                         printerAlarmSilenceBanner
                     }
                     printerCameraCard
-                    cameraCard
                     bridgeStatusCard
                     configurationCard
 
@@ -725,7 +694,7 @@ struct H2DTimelapseView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(appLanguageCode == "vi" ? "Đổi sang tiếng Anh" : "Switch to Vietnamese")
 
-                    Text("V9.71")
+                    Text("V9.72")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.34))
                 }
@@ -864,152 +833,6 @@ struct H2DTimelapseView: View {
         detectedPrinterKind == .a1
             ? "A1 phát camera trực tiếp trong mạng LAN qua MJPEG/TLS."
             : "Trên máy in, hãy bật LAN Only Liveview (Local RTSP Stream) để SE nhận hình."
-    }
-
-    private var cameraCard: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("OPTICAL VIEWFINDER")
-                        .font(.system(size: 13, weight: .black, design: .monospaced))
-                        .tracking(0.8)
-                    Text("CAMERA IPHONE • 1.5×")
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.36))
-                }
-                Spacer()
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(cameraStatusColor)
-                        .frame(width: 6, height: 6)
-                        .shadow(color: cameraStatusColor, radius: 4)
-                    Text(localizedStatus(
-                        setupCameraEnabled ? (timelapse.isPreviewRunning ? "LIVE" : "WARMING") : "STANDBY"
-                    ))
-                }
-                .font(.system(size: 9, weight: .black, design: .monospaced))
-                .foregroundStyle(cameraStatusColor)
-                .padding(.horizontal, 9)
-                .frame(height: 28)
-                .background(cameraStatusColor.opacity(0.10), in: Capsule())
-                .overlay { Capsule().stroke(cameraStatusColor.opacity(0.30), lineWidth: 1) }
-
-                if setupCameraEnabled {
-                    Button {
-                        timelapse.rotateCamera180()
-                    } label: {
-                        Image(systemName: "rotate.right")
-                            .frame(width: 28, height: 28)
-                    }
-                    .buttonStyle(CinemaIconButtonStyle(tint: cinemaCyan))
-                }
-                Button {
-                    setupCameraEnabled.toggle()
-                } label: {
-                    Image(systemName: setupCameraEnabled ? "video.slash.fill" : "video.fill")
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(CinemaIconButtonStyle(tint: setupCameraEnabled ? .white.opacity(0.65) : cinemaCyan))
-            }
-            HStack {
-                Spacer(minLength: 0)
-                Group {
-                    if setupCameraEnabled {
-                        H2DCameraPreview(
-                            session: timelapse.previewSession,
-                            rotationAngle: timelapse.cameraRotationAngle
-                        )
-                        .overlay {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                    .stroke(cinemaCyan.opacity(0.36), lineWidth: 1)
-                                if !timelapse.isPreviewRunning {
-                                    VStack(spacing: 9) {
-                                        ProgressView()
-                                            .tint(cinemaAmber)
-                                        Text(localizedStatus("INITIALIZING OPTICS"))
-                                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                            .foregroundStyle(.white.opacity(0.55))
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        cinemaProjectorStandby
-                    }
-                }
-                // Give the portrait viewport an explicit 9.0 / 16.0 size.
-                .frame(width: 180, height: 320)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                Spacer(minLength: 0)
-            }
-            HStack(spacing: 7) {
-                Image(systemName: "info.circle.fill")
-                    .foregroundStyle(cinemaCyan.opacity(0.72))
-                Text("Ẩn viewfinder không tắt chức năng chụp tự động theo lớp.")
-            }
-            .font(.system(size: 10, weight: .medium, design: .rounded))
-            .foregroundStyle(.white.opacity(0.45))
-        }
-        .cardStyle()
-    }
-
-    private var cameraStatusColor: Color {
-        guard setupCameraEnabled else { return .white.opacity(0.42) }
-        return timelapse.isPreviewRunning ? cinemaGreen : cinemaAmber
-    }
-
-    private var cinemaProjectorStandby: some View {
-        ZStack {
-            LinearGradient(
-                colors: [.black.opacity(0.95), Color(red: 0.025, green: 0.075, blue: 0.09)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-
-            ZStack {
-                Image("CinemaProjectorOutline")
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .foregroundStyle(.white.opacity(0.76))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 21)
-                    .shadow(color: cinemaCyan.opacity(0.42), radius: 8)
-                    .opacity(isFlashArtworkActive ? 0 : 1)
-                    .scaleEffect(isFlashArtworkActive ? 0.97 : 1)
-
-                CinemaLightningArtwork(
-                    tint: cinemaAmber
-                )
-                .padding(.horizontal, 30)
-                .padding(.vertical, 54)
-                .opacity(isFlashArtworkActive ? 1 : 0)
-                .scaleEffect(isFlashArtworkActive ? 1 : 0.97)
-            }
-            .animation(.easeInOut(duration: 0.24), value: isFlashArtworkActive)
-
-            VStack {
-                HStack {
-                    Text("SE // OPTICAL UNIT")
-                    Spacer()
-                    Text(localizedStatus(isFlashArtworkActive ? "FLASH ON" : "CAM OFF"))
-                        .foregroundStyle(cinemaAmber)
-                }
-                Spacer()
-                HStack {
-                    Image(systemName: isFlashArtworkActive ? "bolt.fill" : "viewfinder")
-                    Text(localizedStatus(
-                        isFlashArtworkActive ? "ILLUMINATION ACTIVE" : "READY FOR LAYER SIGNAL"
-                    ))
-                    Spacer()
-                    Text("9:16")
-                }
-            }
-            .font(.system(size: 7, weight: .bold, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.45))
-            .padding(12)
-        }
     }
 
     private var isFlashArtworkActive: Bool {
@@ -1389,7 +1212,83 @@ struct H2DTimelapseView: View {
                     .padding(.horizontal, 18)
             }
 
-            activePrinterCameraMonitor
+            ZStack {
+                if printerCameraExpanded && printerCameraEnabled {
+                    HStack {
+                        Spacer(minLength: 0)
+                        printerCameraViewport
+                            .frame(maxWidth: 350)
+                            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .overlay(alignment: .topTrailing) {
+                                Button {
+                                    printerCameraExpanded = false
+                                } label: {
+                                    Image(systemName: "arrow.down.right.and.arrow.up.left")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.black.opacity(0.72))
+                                .padding(10)
+                            }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 18)
+                } else {
+                    Group {
+                        if timelapse.isLiveMonitorVisible && !timelapse.isRendering {
+                            HStack {
+                                Spacer(minLength: 0)
+                                H2DCameraPreview(
+                                    session: timelapse.previewSession,
+                                    rotationAngle: timelapse.cameraRotationAngle
+                                )
+                                .frame(width: 180, height: 320)
+                                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                                .overlay(alignment: .topTrailing) {
+                                    HStack(spacing: 8) {
+                                        Button {
+                                            timelapse.rotateCamera180()
+                                        } label: {
+                                            Image(systemName: "rotate.right")
+                                        }
+                                        Button {
+                                            timelapse.setLiveMonitorVisible(false)
+                                        } label: {
+                                            Image(systemName: "xmark")
+                                        }
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(.black.opacity(0.72))
+                                    .padding(10)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 18)
+                        } else {
+                            activeCinemaStandbyHUD
+                        }
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        if printerCameraEnabled {
+                            Button {
+                                printerCameraExpanded = true
+                            } label: {
+                                printerCameraViewport
+                                    .frame(width: 142, height: 80)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .stroke(cinemaCyan.opacity(0.55), lineWidth: 1)
+                                    }
+                            }
+                            .buttonStyle(.plain)
+                            .padding(12)
+                            .accessibilityLabel("Mở lớn camera máy in")
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity)
 
             Text(localizedStatus(timelapse.statusText))
                 .font(.custom("Arial", size: 15).weight(.semibold))
@@ -1434,28 +1333,25 @@ struct H2DTimelapseView: View {
             if !timelapse.isRendering {
                 HStack(spacing: 12) {
                     Button {
-                        if printerCameraEnabled {
-                            printerCamera.retryNow()
-                        } else {
-                            printerCameraEnabled = true
-                        }
+                        timelapse.setLiveMonitorVisible(!timelapse.isLiveMonitorVisible)
                     } label: {
                         Label(
-                            printerCameraEnabled
-                                ? "Kết nối lại camera máy in"
-                                : "Bật camera máy in",
-                            systemImage: "video.fill"
+                            timelapse.isLiveMonitorVisible
+                                ? "Ẩn hình xem trước"
+                                : "Hiện hình xem trước",
+                            systemImage: timelapse.isLiveMonitorVisible
+                                ? "video.slash.fill"
+                                : "video.fill"
                         )
                             .labelStyle(.iconOnly)
                             .frame(width: 44, height: 32)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(printerCamera.isStreaming ? .gray : .blue)
-                    .disabled(selectedProfile == nil || accessCode.isEmpty)
+                    .tint(timelapse.isLiveMonitorVisible ? .gray : .blue)
                     .accessibilityLabel(
-                        printerCameraEnabled
-                            ? "Kết nối lại camera máy in"
-                            : "Bật camera máy in"
+                        timelapse.isLiveMonitorVisible
+                            ? "Ẩn hình xem trước"
+                            : "Hiện hình xem trước"
                     )
 
                     Button(role: .destructive) {
@@ -1478,43 +1374,6 @@ struct H2DTimelapseView: View {
                 .padding(.horizontal, 24)
         }
         .background(Color.clear)
-    }
-
-    private var activePrinterCameraMonitor: some View {
-        HStack {
-            Spacer(minLength: 0)
-            printerCameraViewport
-                .frame(maxWidth: 350)
-                .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(cinemaCyan.opacity(printerCamera.isStreaming ? 0.48 : 0.20), lineWidth: 1)
-                }
-                .overlay(alignment: .topTrailing) {
-                    Button {
-                        if printerCameraEnabled {
-                            printerCamera.retryNow()
-                        } else {
-                            printerCameraEnabled = true
-                        }
-                    } label: {
-                        Image(systemName: printerCamera.isStreaming
-                            ? "arrow.clockwise"
-                            : "video.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.black.opacity(0.72))
-                    .disabled(selectedProfile == nil || accessCode.isEmpty)
-                    .padding(10)
-                    .accessibilityLabel(printerCameraEnabled
-                        ? "Kết nối lại camera máy in"
-                        : "Bật camera máy in")
-                }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 18)
-        .accessibilityElement(children: .contain)
     }
 
     private var printerAlarmSilenceBanner: some View {
@@ -2084,7 +1943,7 @@ struct H2DTimelapseView: View {
         guard force || controlsChanged else { return }
         lastAppliedHardwareMode = mode
         lastAppliedHardwareHold = buttonHeld
-        let keepCameraWarm = setupCameraEnabled || timelapse.isArmed || mode == 1
+        let keepCameraWarm = timelapse.isArmed || mode == 1
         timelapse.setHardwareTorch(
             steady: mode == -1,
             blinking: buttonHeld,

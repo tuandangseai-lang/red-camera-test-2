@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.71 build150 - camera may in muc 2 va tat canh bao
+name: Tao IPA SE v9.72 build151 - camera may in phong cho va tat canh bao
 
 on:
   workflow_dispatch:
@@ -150,10 +150,12 @@ jobs:
           grep -q "ClockwiseScreenBorderShape" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "setCaptureScreenBrightness" "RedCameraTest/H2DTimelapseManager.swift"
           grep -q 'SE.AppLanguage' "RedCameraTest/H2DTimelapseView.swift"
-          grep -q "9.0 / 16.0" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q 'frame(width: 180, height: 320)' "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'case "FAILED": return .stopping' "RedCameraTest/H2DTimelapseView.swift"
-          ! grep -q 'Hiện hình xem trước' "RedCameraTest/H2DTimelapseView.swift"
-          grep -q "activePrinterCameraMonitor" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q 'Hiện hình xem trước' "RedCameraTest/H2DTimelapseView.swift"
+          ! grep -q "activePrinterCameraMonitor" "RedCameraTest/H2DTimelapseView.swift"
+          ! grep -q "OPTICAL VIEWFINDER" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "allowSetupPreview: false" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "silenceCurrentPrinterAlarm" "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'Tắt cảnh báo' "RedCameraTest/H2DTimelapseView.swift"
           grep -q "desiredTimelapseArmed" "RedCameraTest/H2DBLEManager.swift"
@@ -218,19 +220,19 @@ jobs:
           test -f "$APP_PATH/en.lproj/Localizable.strings"
           test -f "$APP_PATH/vi.lproj/Localizable.strings"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.71"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "150"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.72"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "151"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.71-build150-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.72-build151-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.71-build150-unsigned-ipa
-          path: SE-v9.71-build150-unsigned.ipa
+          name: SE-v9.72-build151-unsigned-ipa
+          path: SE-v9.72-build151-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
