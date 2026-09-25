@@ -878,7 +878,7 @@ private final class H264FrameDecoder {
                 }
             }
         }
-        guard status == noErr, let videoDescription = description as? CMVideoFormatDescription else { return }
+        guard status == noErr, let videoDescription = description else { return }
         formatDescription = videoDescription
 
         var callback = VTDecompressionOutputCallbackRecord(
@@ -962,7 +962,7 @@ private final class H264FrameDecoder {
         VTDecompressionSessionDecodeFrame(
             session,
             sampleBuffer: sampleBuffer,
-            flags: [.enableAsynchronousDecompression, .oneTimeRealTimePlayback],
+            flags: [._EnableAsynchronousDecompression, ._1xRealTimePlayback],
             frameRefcon: nil,
             infoFlagsOut: &flagsOut
         )
