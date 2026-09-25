@@ -710,7 +710,7 @@ struct H2DTimelapseView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(appLanguageCode == "vi" ? "Đổi sang tiếng Anh" : "Switch to Vietnamese")
 
-                    Text("V9.69")
+                    Text("V9.70")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.34))
                 }

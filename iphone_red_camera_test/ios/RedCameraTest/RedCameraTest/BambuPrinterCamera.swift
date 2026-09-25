@@ -667,9 +667,14 @@ private final class BambuRTSPCameraTransport: BambuCameraTransport {
                 "realm=\"\(realm)\"",
                 "nonce=\"\(nonce)\"",
                 "uri=\"\(uri)\"",
-                "response=\"\(response)\"",
-                "algorithm=MD5"
+                "response=\"\(response)\""
             ]
+            // LIVE555 treats MD5 as the default when the challenge omits an
+            // algorithm. P2S rejects the otherwise redundant algorithm=MD5
+            // response parameter, so only echo it when the printer sent it.
+            if let algorithm = values["algorithm"], !algorithm.isEmpty {
+                fields.append("algorithm=\(algorithm)")
+            }
             if let opaque = values["opaque"] { fields.append("opaque=\"\(opaque)\"") }
             fields.append(contentsOf: additions)
             return "Digest " + fields.joined(separator: ", ")
