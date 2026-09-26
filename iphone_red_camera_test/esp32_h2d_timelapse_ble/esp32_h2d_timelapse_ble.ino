@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.19.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.20.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -1117,7 +1117,10 @@ void updatePrinterTelemetry(const uint8_t *payload, size_t length) {
   changed |= updateIntIfPresent(payload, length, "big_fan1_speed",
                                 auxiliaryFanPercent, true);
   changed |= updateIntIfPresent(payload, length, "big_fan2_speed",
-                                exhaustFanPercent, true);
+                                 exhaustFanPercent, true);
+  if (!isH2D && nozzleTemperature >= 0 && bedTemperature >= 0) {
+    nozzleSyncRequests = Config::NOZZLE_SYNC_RETRY_LIMIT;
+  }
   if (changed) telemetryDirty = true;
 }
 
@@ -2439,9 +2442,12 @@ void maintainMqtt() {
     const bool materialMissing =
         activeFilamentType.isEmpty() &&
         materialSyncRequests < Config::MATERIAL_SYNC_RETRY_LIMIT;
+    const bool selectedIsH2D =
+        printerModelFromSerial(settings.printerSerial) == "H2D";
     const bool nozzleTelemetryMissing =
-        printerModelFromSerial(settings.printerSerial) == "H2D" &&
-        (nozzleTemperature < 0 || leftNozzleTemperature < 0) &&
+        (selectedIsH2D
+             ? (nozzleTemperature < 0 || leftNozzleTemperature < 0)
+             : (nozzleTemperature < 0 || bedTemperature < 0)) &&
         nozzleSyncRequests < Config::NOZZLE_SYNC_RETRY_LIMIT;
     if ((printDataStale || materialMissing || nozzleTelemetryMissing) &&
         now - lastStatusRequestAt >= Config::STATUS_REQUEST_RETRY_MS) {
@@ -2516,8 +2522,11 @@ void maintainMqtt() {
   mqttWasConnected = true;
   reportStatus("READY");
   if (activeFilamentType.isEmpty()) ++materialSyncRequests;
-  if (printerModelFromSerial(settings.printerSerial) == "H2D" &&
-      (nozzleTemperature < 0 || leftNozzleTemperature < 0)) {
+  const bool selectedIsH2D =
+      printerModelFromSerial(settings.printerSerial) == "H2D";
+  if (selectedIsH2D
+          ? (nozzleTemperature < 0 || leftNozzleTemperature < 0)
+          : (nozzleTemperature < 0 || bedTemperature < 0)) {
     ++nozzleSyncRequests;
   }
   Serial.println("[MQTT] connected and subscribed to Bambu report topic");
@@ -2526,7 +2535,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.19.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.20.0");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -3424,7 +3433,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.19.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.20.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

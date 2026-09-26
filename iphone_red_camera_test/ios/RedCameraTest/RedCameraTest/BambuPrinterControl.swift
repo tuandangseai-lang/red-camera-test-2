@@ -51,6 +51,7 @@ final class BambuPrinterControlManager: ObservableObject {
     private var currentJobFile = ""
     private var currentSubtaskName = ""
     private var currentArchiveFile = ""
+    private var currentPrintState = ""
     private var skippedObjectIDs = Set<Int>()
     private var loadedObjectKey = ""
 
@@ -344,6 +345,9 @@ final class BambuPrinterControlManager: ObservableObject {
 
     private func handleReport(_ root: [String: Any]) {
         if let print = root["print"] as? [String: Any] {
+            if let state = print["gcode_state"] as? String, !state.isEmpty {
+                currentPrintState = state.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            }
             if let file = print["gcode_file"] as? String, !file.isEmpty {
                 currentJobFile = file
             }
@@ -476,6 +480,13 @@ final class BambuPrinterControlManager: ObservableObject {
         guard let configuration,
               !currentJobFile.isEmpty || !currentSubtaskName.isEmpty || !currentArchiveFile.isEmpty,
               objectDownload == nil else { return }
+        let activeStates: Set<String> = ["RUNNING", "PREPARE", "PAUSE", "PAUSED"]
+        // An IDLE report can retain the previous job's filename. Do not pull
+        // that archive into memory merely because the control sheet opened.
+        guard force || activeStates.contains(currentPrintState) else {
+            publishObjectLoading(false, text: "Vật thể sẽ được đọc khi máy bắt đầu in")
+            return
+        }
         let key = "\(configuration.profileID)|\(currentArchiveFile)|\(currentJobFile)|\(currentSubtaskName)"
         guard force || loadedObjectKey != key else { return }
         loadedObjectKey = key
@@ -854,6 +865,10 @@ private enum BambuArchiveError: LocalizedError {
     }
 }
 
+private enum BambuArchiveLimits {
+    static let maximumBytes = 48 * 1_024 * 1_024
+}
+
 /// P2S and newer Bambu firmware expose the current model cache through the
 /// TLS file channel on port 6000. Older firmware uses implicit FTPS on 990.
 /// Try the native channel first and retain FTPS as a read-only fallback.
@@ -1137,6 +1152,10 @@ private final class BambuPort6000Download {
             finish(.failure(BambuArchiveError.tunnel("không thấy file 3MF của bản in hiện tại")))
             return
         }
+        guard file.size <= 0 || file.size <= BambuArchiveLimits.maximumBytes else {
+            finish(.failure(BambuFTPError.tooLarge))
+            return
+        }
         stage = .downloading
         downloaded.removeAll(keepingCapacity: true)
         expectedSize = file.size
@@ -1182,14 +1201,17 @@ private final class BambuPort6000Download {
     private func consumeFrames() {
         while receiveBuffer.count >= 16 {
             let payloadLength = Int(receiveBuffer.uint32LE(at: 0))
-            guard payloadLength >= 0, payloadLength <= 96 * 1_024 * 1_024 else {
+            guard payloadLength >= 0,
+                  payloadLength <= BambuArchiveLimits.maximumBytes + 1_024 * 1_024 else {
                 finish(.failure(BambuArchiveError.tunnel("khung dữ liệu file không hợp lệ")))
                 return
             }
             let frameLength = 16 + payloadLength
             guard receiveBuffer.count >= frameLength else { return }
             let magic = receiveBuffer.uint32LE(at: 4)
-            let payload = Data(receiveBuffer[16..<frameLength])
+            let payloadStart = receiveBuffer.index(receiveBuffer.startIndex, offsetBy: 16)
+            let payloadEnd = receiveBuffer.index(payloadStart, offsetBy: payloadLength)
+            let payload = Data(receiveBuffer[payloadStart..<payloadEnd])
             receiveBuffer.removeFirst(frameLength)
             handleFrame(magic: magic, payload: payload)
             if completed { return }
@@ -1267,7 +1289,7 @@ private final class BambuPort6000Download {
     }
 
     private func validateDownloadLimit() {
-        if downloaded.count > 96 * 1_024 * 1_024 {
+        if downloaded.count > BambuArchiveLimits.maximumBytes {
             finish(.failure(BambuFTPError.tooLarge))
         }
     }
@@ -1321,14 +1343,14 @@ private final class BambuPort6000Download {
     }
 
     private func splitJSONAndBinary(_ payload: Data) -> (Data, Data)? {
-        let bytes = [UInt8](payload)
-        guard bytes.first == 0x7B else { return nil }
-        let start = 0
+        guard payload.first == 0x7B else { return nil }
+        let start = payload.startIndex
         var depth = 0
         var inString = false
         var escaped = false
-        for index in start..<bytes.count {
-            let byte = bytes[index]
+        for offset in 0..<payload.count {
+            let index = payload.index(start, offsetBy: offset)
+            let byte = payload[index]
             if inString {
                 if escaped {
                     escaped = false
@@ -1346,18 +1368,21 @@ private final class BambuPort6000Download {
             } else if byte == 0x7D {
                 depth -= 1
                 if depth == 0 {
-                    let json = Data(bytes[start...index])
-                    var binaryStart = index + 1
-                    if binaryStart + 1 < bytes.count,
-                       bytes[binaryStart] == 0x0A,
-                       bytes[binaryStart + 1] == 0x0A {
-                        binaryStart += 2
-                    } else if binaryStart + 3 < bytes.count,
-                              Array(bytes[binaryStart..<(binaryStart + 4)]) == [0x0D, 0x0A, 0x0D, 0x0A] {
-                        binaryStart += 4
+                    let jsonEnd = payload.index(after: index)
+                    let json = Data(payload[start..<jsonEnd])
+                    var binaryStart = jsonEnd
+                    if payload.distance(from: binaryStart, to: payload.endIndex) >= 2,
+                       payload[binaryStart] == 0x0A,
+                       payload[payload.index(after: binaryStart)] == 0x0A {
+                        binaryStart = payload.index(binaryStart, offsetBy: 2)
+                    } else if payload.distance(from: binaryStart, to: payload.endIndex) >= 4 {
+                        let separatorEnd = payload.index(binaryStart, offsetBy: 4)
+                        if Array(payload[binaryStart..<separatorEnd]) == [0x0D, 0x0A, 0x0D, 0x0A] {
+                            binaryStart = separatorEnd
+                        }
                     }
-                    let binary = binaryStart < bytes.count
-                        ? Data(bytes[binaryStart..<bytes.count])
+                    let binary = binaryStart < payload.endIndex
+                        ? Data(payload[binaryStart..<payload.endIndex])
                         : Data()
                     return (json, binary)
                 }
@@ -1408,7 +1433,7 @@ private enum BambuFTPError: LocalizedError {
         case .noCandidate: return "không tìm thấy file bản in trên bộ nhớ máy"
         case .rejected(let reply): return reply
         case .connection(let detail): return detail
-        case .tooLarge: return "file 3MF lớn hơn giới hạn 96 MB"
+        case .tooLarge: return "file 3MF lớn hơn giới hạn an toàn 48 MB"
         }
     }
 }
@@ -1632,7 +1657,7 @@ private final class BambuFTPSDownload {
             guard let self, !self.completed else { return }
             if let data, !data.isEmpty {
                 self.downloaded.append(data)
-                if self.downloaded.count > 96 * 1_024 * 1_024 {
+                if self.downloaded.count > BambuArchiveLimits.maximumBytes {
                     self.finish(.failure(BambuFTPError.tooLarge))
                     return
                 }

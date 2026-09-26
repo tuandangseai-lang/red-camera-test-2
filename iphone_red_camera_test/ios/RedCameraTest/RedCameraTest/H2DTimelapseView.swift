@@ -185,11 +185,17 @@ struct H2DTimelapseView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                         syncFleetWhenPossible()
                         bluetooth.setHardwareBuzzerEnabled(hardwareBuzzerEnabled)
-                        bluetooth.requestFleetRefresh()
+                        bluetooth.requestH2DStatus()
                     }
                 }
             }
             .task {
+                // Give the selected printer first use of the ESP32 TLS session.
+                // A fleet scan pauses that session, so starting the scan at the
+                // same moment as initial telemetry made IDLE values intermittent.
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                guard !Task.isCancelled else { return }
+                bluetooth.requestFleetRefresh()
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 120_000_000_000)
                     guard !Task.isCancelled else { return }
@@ -351,7 +357,6 @@ struct H2DTimelapseView: View {
                 bluetooth.setHardwareBuzzerEnabled(hardwareBuzzerEnabled)
                 bluetooth.setHardwareBuzzerVolume(Int((hardwareBuzzerVolume * 100).rounded()))
                 bluetooth.setHardwareLEDBrightness(Int((hardwareLEDBrightness * 100).rounded()))
-                bluetooth.requestFleetRefresh()
                 synchronizePrinterAlarm()
             }
         }
@@ -717,7 +722,7 @@ struct H2DTimelapseView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(appLanguageCode == "vi" ? "Đổi sang tiếng Anh" : "Switch to Vietnamese")
 
-                    Text("V9.74")
+                    Text("V9.77")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.34))
                 }
