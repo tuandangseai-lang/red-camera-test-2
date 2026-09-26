@@ -1021,7 +1021,8 @@ private final class BambuPort6000Download {
     private var remoteFiles: [RemoteFile] = []
     private let storages = ["emmc", "internal", "udisk", ""]
     private var storageIndex = 0
-    private var sequence: UInt32 = 0
+    private var frameSequence = UInt32.random(in: 1...0x7FFF_FFFF)
+    private var commandSequence: UInt32 = 1
     private var stage: Stage = .login
     private var expectedSize = 0
     private var completed = false
@@ -1074,7 +1075,7 @@ private final class BambuPort6000Download {
         }
         connection.start(queue: queue)
         queue.asyncAfter(deadline: .now() + 16) { [weak self] in
-            guard let self, !self.completed else { return }
+            guard let self, !self.completed, self.stage != .downloading else { return }
             self.finish(.failure(BambuArchiveError.tunnel("kênh 6000 hết thời gian chờ")))
         }
     }
@@ -1095,15 +1096,14 @@ private final class BambuPort6000Download {
 
     private func sendSetup() {
         stage = .setup
-        sequence &+= 1
         sendJSON([
-            "sequence": Int(sequence),
+            "sequence": 0,
             "mtype": 12_291,
             "req": [
                 "t_av": 1,
                 "mtype": 12_289,
                 "peer_t": 3,
-                "pid": "SE-iPhone-\(UUID().uuidString.prefix(8))",
+                "pid": String(format: "%08x", frameSequence),
                 "ver": "02.03.00.00"
             ]
         ])
@@ -1115,7 +1115,8 @@ private final class BambuPort6000Download {
             return
         }
         stage = .listing
-        sequence &+= 1
+        let sequence = commandSequence
+        commandSequence &+= 1
         var request: [String: Any] = [
             "type": "model",
             "api_version": 2,
@@ -1139,9 +1140,10 @@ private final class BambuPort6000Download {
         stage = .downloading
         downloaded.removeAll(keepingCapacity: true)
         expectedSize = file.size
-        sequence &+= 1
+        let sequence = commandSequence
+        commandSequence &+= 1
         var request: [String: Any] = ["offset": 0]
-        if file.path.hasPrefix("/") {
+        if file.path.hasPrefix("/") || file.path.hasPrefix("mem:") {
             request["path"] = file.path
         } else {
             request["file"] = file.name
@@ -1152,6 +1154,10 @@ private final class BambuPort6000Download {
             "sequence": Int(sequence),
             "req": request
         ])
+        queue.asyncAfter(deadline: .now() + 120) { [weak self] in
+            guard let self, !self.completed, self.stage == .downloading else { return }
+            self.finish(.failure(BambuArchiveError.tunnel("tải file 3MF hết thời gian chờ")))
+        }
     }
 
     private func receive() {
@@ -1220,11 +1226,14 @@ private final class BambuPort6000Download {
             validateDownloadLimit()
             return
         }
-        if !binary.isEmpty {
+        let reply = root["reply"] as? [String: Any]
+        let memoryParameterSize = (reply?["mem_dl_param_size"] as? NSNumber)?.intValue
+            ?? Int((reply?["mem_dl_param_size"] as? String) ?? "")
+            ?? 0
+        if !binary.isEmpty, memoryParameterSize == 0 {
             downloaded.append(binary)
             validateDownloadLimit()
         }
-        let reply = root["reply"] as? [String: Any]
         let rawResult = root["result"] ?? reply?["result"]
         let result = (rawResult as? NSNumber)?.intValue
             ?? Int((rawResult as? String) ?? "")
@@ -1235,7 +1244,18 @@ private final class BambuPort6000Download {
             finish(.failure(BambuArchiveError.tunnel(reason)))
             return
         }
+        if let result, result != 0, result != 1 {
+            finish(.failure(BambuArchiveError.tunnel("máy in trả mã tải file \(result)")))
+            return
+        }
         if result == 0 || (expectedSize > 0 && downloaded.count >= expectedSize) {
+            if let total = (reply?["total"] as? NSNumber)?.intValue,
+               total > 0, downloaded.count != total {
+                finish(.failure(BambuArchiveError.tunnel(
+                    "file 3MF nhận thiếu dữ liệu (\(downloaded.count)/\(total) byte)"
+                )))
+                return
+            }
             guard downloaded.count >= 4,
                   downloaded[downloaded.startIndex] == 0x50,
                   downloaded[downloaded.index(after: downloaded.startIndex)] == 0x4B else {
@@ -1302,7 +1322,8 @@ private final class BambuPort6000Download {
 
     private func splitJSONAndBinary(_ payload: Data) -> (Data, Data)? {
         let bytes = [UInt8](payload)
-        guard let start = bytes.firstIndex(of: 0x7B) else { return nil }
+        guard bytes.first == 0x7B else { return nil }
+        let start = 0
         var depth = 0
         var inString = false
         var escaped = false
@@ -1327,9 +1348,13 @@ private final class BambuPort6000Download {
                 if depth == 0 {
                     let json = Data(bytes[start...index])
                     var binaryStart = index + 1
-                    while binaryStart < bytes.count,
-                          bytes[binaryStart] == 0x0A || bytes[binaryStart] == 0x0D {
-                        binaryStart += 1
+                    if binaryStart + 1 < bytes.count,
+                       bytes[binaryStart] == 0x0A,
+                       bytes[binaryStart + 1] == 0x0A {
+                        binaryStart += 2
+                    } else if binaryStart + 3 < bytes.count,
+                              Array(bytes[binaryStart..<(binaryStart + 4)]) == [0x0D, 0x0A, 0x0D, 0x0A] {
+                        binaryStart += 4
                     }
                     let binary = binaryStart < bytes.count
                         ? Data(bytes[binaryStart..<bytes.count])
@@ -1353,9 +1378,10 @@ private final class BambuPort6000Download {
         var frame = Data()
         frame.appendUInt32LE(UInt32(payload.count))
         frame.appendUInt32LE(magic)
-        frame.appendUInt32LE(sequence)
+        frame.appendUInt32LE(frameSequence)
         frame.appendUInt32LE(0)
         frame.append(payload)
+        frameSequence &+= 1
         connection?.send(content: frame, completion: .contentProcessed { [weak self] error in
             if let error {
                 self?.finish(.failure(BambuArchiveError.tunnel(error.localizedDescription)))
