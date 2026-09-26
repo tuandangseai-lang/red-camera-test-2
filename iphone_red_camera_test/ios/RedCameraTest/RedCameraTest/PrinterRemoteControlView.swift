@@ -13,6 +13,7 @@ struct PrinterRemoteControlView: View {
     @StateObject private var directControl = BambuPrinterControlManager()
     @State private var selectedObjectIDs = Set<Int>()
     @State private var filamentTemperature = 220
+    @State private var automaticTemperatureSignature = ""
     @State private var printSpeed = 2
     @State private var confirmation: RemoteConfirmation?
 
@@ -65,6 +66,9 @@ struct PrinterRemoteControlView: View {
         .onDisappear { directControl.stop() }
         .onChange(of: profile.id) { _, _ in startDirectControl() }
         .onChange(of: accessCode) { _, _ in startDirectControl() }
+        .onChange(of: bluetooth.filamentType) { _, _ in applyAutomaticFilamentTemperature() }
+        .onChange(of: bluetooth.nozzleTargetTemperature) { _, _ in applyAutomaticFilamentTemperature() }
+        .onChange(of: bluetooth.leftNozzleTargetTemperature) { _, _ in applyAutomaticFilamentTemperature() }
         .onChange(of: directControl.printableObjects) { _, objects in
             let selectable = Set(objects.filter { !$0.isSkipped }.map(\.id))
             selectedObjectIDs.formIntersection(selectable)
@@ -79,7 +83,7 @@ struct PrinterRemoteControlView: View {
         ) { action in
             switch action {
             case .stop:
-                Button("Dừng bản in", role: .destructive) {
+                Button("Dừng", role: .destructive) {
                     directControl.stopPrint()
                 }
             case let .skip(ids, _):
@@ -91,9 +95,9 @@ struct PrinterRemoteControlView: View {
                 Button("Nạp cuộn ngoài") {
                     directControl.loadExternalFilament(temperature: temperature)
                 }
-            case .unload:
+            case let .unload(temperature, _):
                 Button("Rút cuộn ngoài", role: .destructive) {
-                    directControl.unloadExternalFilament()
+                    directControl.unloadExternalFilament(temperature: temperature)
                 }
             }
             Button("Hủy", role: .cancel) {}
@@ -232,7 +236,7 @@ struct PrinterRemoteControlView: View {
                 Button {
                     confirmation = .stop
                 } label: {
-                    Label("Dừng in", systemImage: "stop.fill")
+                    Label("Dừng", systemImage: "stop.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(RemoteActionButtonStyle(tint: .red))
@@ -365,6 +369,21 @@ struct PrinterRemoteControlView: View {
                 }
             }
 
+            HStack(spacing: 8) {
+                Image(systemName: "thermometer.medium")
+                    .foregroundStyle(amber)
+                Text(filamentTemperatureDescription)
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.54))
+                Spacer(minLength: 4)
+                Button("Theo máy") {
+                    applyAutomaticFilamentTemperature(force: true)
+                }
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .buttonStyle(.bordered)
+                .tint(cyan)
+            }
+
             HStack(spacing: 10) {
                 Button {
                     confirmation = .load(temperature: filamentTemperature)
@@ -376,7 +395,10 @@ struct PrinterRemoteControlView: View {
                 .disabled(!controlsReady)
 
                 Button {
-                    confirmation = .unload
+                    confirmation = .unload(
+                        temperature: filamentTemperature,
+                        material: currentFilamentName
+                    )
                 } label: {
                     Label("Rút cuộn ngoài", systemImage: "arrow.up.from.line.compact")
                         .frame(maxWidth: .infinity)
@@ -450,6 +472,53 @@ struct PrinterRemoteControlView: View {
 
     private func startDirectControl() {
         directControl.start(profile: profile, accessCode: accessCode)
+        applyAutomaticFilamentTemperature(force: true)
+    }
+
+    private var currentFilamentName: String {
+        let value = bluetooth.filamentType.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? "nhựa cuộn ngoài" : value.uppercased()
+    }
+
+    private var filamentTemperatureDescription: String {
+        if bluetooth.filamentType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Máy chưa báo loại nhựa • dùng mặc định \(recommendedFilamentTemperature())°C"
+        }
+        return "Theo \(currentFilamentName) trên máy • đề xuất \(recommendedFilamentTemperature())°C"
+    }
+
+    private func applyAutomaticFilamentTemperature(force: Bool = false) {
+        let signature = [
+            bluetooth.filamentType,
+            String(bluetooth.nozzleTargetTemperature),
+            String(bluetooth.leftNozzleTargetTemperature)
+        ].joined(separator: "|")
+        guard force || signature != automaticTemperatureSignature else { return }
+        automaticTemperatureSignature = signature
+        filamentTemperature = recommendedFilamentTemperature()
+    }
+
+    private func recommendedFilamentTemperature() -> Int {
+        let liveTargets = [
+            bluetooth.nozzleTargetTemperature,
+            bluetooth.leftNozzleTargetTemperature
+        ].filter { (170...320).contains($0) }
+        if let live = liveTargets.max() {
+            return min(320, max(170, Int((Double(live) / 5.0).rounded()) * 5))
+        }
+
+        let material = bluetooth.filamentType
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+        if material.contains("PPA") || material.contains("PPS") { return 300 }
+        if material.contains("PETG") || material.contains("PCTG") || material == "PET" { return 250 }
+        if material.contains("PA") || material.contains("NYLON") { return 280 }
+        if material.contains("PC") { return 275 }
+        if material.contains("ABS") || material.contains("ASA") { return 260 }
+        if material.contains("HIPS") { return 245 }
+        if material.contains("TPU") || material.contains("TPE") { return 230 }
+        if material.contains("PVA") { return 215 }
+        return 220
     }
 
     private func toggleObject(_ object: BambuPrintableObject) {
@@ -535,14 +604,14 @@ private enum RemoteConfirmation: Identifiable {
     case stop
     case skip([Int], [String])
     case load(temperature: Int)
-    case unload
+    case unload(temperature: Int, material: String)
 
     var id: String {
         switch self {
         case .stop: return "stop"
         case let .skip(ids, _): return "skip-\(ids.map(String.init).joined(separator: "-"))"
         case let .load(temperature): return "load-external-\(temperature)"
-        case .unload: return "unload-external"
+        case let .unload(temperature, material): return "unload-external-\(temperature)-\(material)"
         }
     }
 
@@ -563,8 +632,8 @@ private enum RemoteConfirmation: Identifiable {
             return "Máy sẽ ngừng in: \(names.joined(separator: ", "))."
         case let .load(temperature):
             return "Chỉ dùng cuộn ngoài. Đầu phun có thể nóng tới \(temperature)°C; AMS sẽ không được chọn."
-        case .unload:
-            return "Chỉ rút đường nhựa cuộn ngoài. Hãy giữ tay khỏi đầu phun và bộ đùn."
+        case let .unload(temperature, material):
+            return "Chỉ rút \(material) từ cuộn ngoài ở \(temperature)°C. AMS không được chọn; hãy giữ tay khỏi đầu phun và bộ đùn."
         }
     }
 }

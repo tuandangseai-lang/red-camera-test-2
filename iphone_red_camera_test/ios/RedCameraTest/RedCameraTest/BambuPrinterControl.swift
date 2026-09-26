@@ -47,9 +47,10 @@ final class BambuPrinterControlManager: ObservableObject {
     private var sequenceNumber: UInt64 = 200_000
     private var pending: PendingCommand?
     private var pingTimer: DispatchSourceTimer?
-    private var objectDownload: BambuFTPSDownload?
+    private var objectDownload: BambuArchiveDownload?
     private var currentJobFile = ""
     private var currentSubtaskName = ""
+    private var currentArchiveFile = ""
     private var skippedObjectIDs = Set<Int>()
     private var loadedObjectKey = ""
 
@@ -103,7 +104,7 @@ final class BambuPrinterControlManager: ObservableObject {
     }
 
     func stopPrint() {
-        send(section: "print", command: "stop", fields: [:], actionName: "Dừng bản in")
+        send(section: "print", command: "stop", fields: [:], actionName: "Dừng")
     }
 
     func skipObjects(_ objectIDs: [Int]) {
@@ -142,7 +143,11 @@ final class BambuPrinterControlManager: ObservableObject {
         )
     }
 
-    func unloadExternalFilament() {
+    func unloadExternalFilament(temperature: Int) {
+        guard (170...320).contains(temperature) else {
+            publishFailure("Nhiệt độ rút nhựa không hợp lệ")
+            return
+        }
         // Current Bambu firmware represents the manual external-spool unload
         // flow with virtual AMS/tray 255. It does not select a physical AMS.
         send(
@@ -151,7 +156,9 @@ final class BambuPrinterControlManager: ObservableObject {
             fields: [
                 "ams_id": 255,
                 "slot_id": 255,
-                "target": 255
+                "target": 255,
+                "curr_temp": 0,
+                "tar_temp": temperature
             ],
             actionName: "Rút nhựa cuộn ngoài"
         )
@@ -196,6 +203,7 @@ final class BambuPrinterControlManager: ObservableObject {
             { _, _, complete in complete(true) },
             queue
         )
+        sec_protocol_options_set_tls_resumption_enabled(tls.securityProtocolOptions, true)
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
         let parameters = NWParameters(tls: tls, tcp: tcp)
@@ -342,6 +350,13 @@ final class BambuPrinterControlManager: ObservableObject {
             if let name = print["subtask_name"] as? String, !name.isEmpty {
                 currentSubtaskName = name
             }
+            for key in ["file", "project_file", "project_name"] {
+                if let archive = print[key] as? String,
+                   archive.lowercased().contains(".3mf") {
+                    currentArchiveFile = archive
+                    break
+                }
+            }
             if let skipped = print["s_obj"] as? [Int] {
                 skippedObjectIDs = Set(skipped)
                 applySkippedObjects()
@@ -458,16 +473,19 @@ final class BambuPrinterControlManager: ObservableObject {
     }
 
     private func loadObjectsIfPossible(force: Bool) {
-        guard let configuration, !currentJobFile.isEmpty, objectDownload == nil else { return }
-        let key = "\(configuration.profileID)|\(currentJobFile)"
+        guard let configuration,
+              !currentJobFile.isEmpty || !currentSubtaskName.isEmpty || !currentArchiveFile.isEmpty,
+              objectDownload == nil else { return }
+        let key = "\(configuration.profileID)|\(currentArchiveFile)|\(currentJobFile)|\(currentSubtaskName)"
         guard force || loadedObjectKey != key else { return }
         loadedObjectKey = key
         publishObjectLoading(true, text: "Đang đọc danh sách vật thể từ file 3MF…")
-        let candidates = BambuFTPSDownload.candidatePaths(
+        let candidates = BambuArchiveDownload.candidatePaths(
             gcodeFile: currentJobFile,
-            subtaskName: currentSubtaskName
+            subtaskName: currentSubtaskName,
+            archiveFile: currentArchiveFile
         )
-        let download = BambuFTPSDownload(
+        let download = BambuArchiveDownload(
             host: configuration.host,
             accessCode: configuration.accessCode,
             candidatePaths: candidates,
@@ -669,6 +687,21 @@ private extension Data {
         let second = self[index(startIndex, offsetBy: offset + 1)]
         return (UInt16(first) << 8) | UInt16(second)
     }
+
+    func uint32LE(at offset: Int) -> UInt32 {
+        guard offset >= 0, offset + 3 < count else { return 0 }
+        return (0..<4).reduce(UInt32(0)) { value, byteOffset in
+            let byte = self[index(startIndex, offsetBy: offset + byteOffset)]
+            return value | (UInt32(byte) << UInt32(byteOffset * 8))
+        }
+    }
+
+    mutating func appendUInt32LE(_ value: UInt32) {
+        append(UInt8(value & 0xFF))
+        append(UInt8((value >> 8) & 0xFF))
+        append(UInt8((value >> 16) & 0xFF))
+        append(UInt8((value >> 24) & 0xFF))
+    }
 }
 
 private enum BambuObjectError: LocalizedError {
@@ -811,6 +844,533 @@ private final class BambuSliceInfoParser: NSObject, XMLParserDelegate {
     }
 }
 
+private enum BambuArchiveError: LocalizedError {
+    case tunnel(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .tunnel(let detail): return detail
+        }
+    }
+}
+
+/// P2S and newer Bambu firmware expose the current model cache through the
+/// TLS file channel on port 6000. Older firmware uses implicit FTPS on 990.
+/// Try the native channel first and retain FTPS as a read-only fallback.
+private final class BambuArchiveDownload {
+    private let host: String
+    private let accessCode: String
+    private let candidatePaths: [String]
+    private let queue: DispatchQueue
+    private let completion: (Result<Data, Error>) -> Void
+    private var tunnel: BambuPort6000Download?
+    private var ftps: BambuFTPSDownload?
+    private var tunnelFailure = ""
+    private var completed = false
+
+    init(
+        host: String,
+        accessCode: String,
+        candidatePaths: [String],
+        queue: DispatchQueue,
+        completion: @escaping (Result<Data, Error>) -> Void
+    ) {
+        self.host = host
+        self.accessCode = accessCode
+        self.candidatePaths = candidatePaths
+        self.queue = queue
+        self.completion = completion
+    }
+
+    static func candidatePaths(
+        gcodeFile: String,
+        subtaskName: String,
+        archiveFile: String
+    ) -> [String] {
+        var rawNames = [archiveFile, gcodeFile, subtaskName]
+        let task = subtaskName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !task.isEmpty {
+            rawNames += [task + ".gcode.3mf", task + ".3mf"]
+            let underscore = task.replacingOccurrences(of: " ", with: "_")
+            rawNames += [underscore + ".gcode.3mf", underscore + ".3mf"]
+        }
+
+        var names: [String] = []
+        for raw in rawNames {
+            let decoded = raw.removingPercentEncoding ?? raw
+            let trimmed = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let filename = (trimmed as NSString).lastPathComponent
+            for value in [trimmed, filename] where !value.isEmpty {
+                if !names.contains(where: { $0.caseInsensitiveCompare(value) == .orderedSame }) {
+                    names.append(value)
+                }
+            }
+            if !filename.lowercased().hasSuffix(".3mf"),
+               !filename.lowercased().hasSuffix(".gcode") {
+                for suffix in [".gcode.3mf", ".3mf"] {
+                    let value = filename + suffix
+                    if !names.contains(where: { $0.caseInsensitiveCompare(value) == .orderedSame }) {
+                        names.append(value)
+                    }
+                }
+            }
+        }
+
+        var paths: [String] = []
+        for name in names {
+            let clean = name.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard !clean.isEmpty else { continue }
+            for prefix in ["/", "/cache/", "/model/", "/data/"] {
+                let path = prefix + clean
+                if !paths.contains(where: { $0.caseInsensitiveCompare(path) == .orderedSame }) {
+                    paths.append(path)
+                }
+            }
+        }
+        return paths
+    }
+
+    func start() {
+        guard !candidatePaths.isEmpty else {
+            finish(.failure(BambuFTPError.noCandidate))
+            return
+        }
+        let tunnel = BambuPort6000Download(
+            host: host,
+            accessCode: accessCode,
+            candidatePaths: candidatePaths,
+            queue: queue
+        ) { [weak self] result in
+            guard let self, !self.completed else { return }
+            switch result {
+            case .success:
+                self.finish(result)
+            case .failure(let error):
+                self.tunnelFailure = error.localizedDescription
+                self.startFTPSFallback()
+            }
+        }
+        self.tunnel = tunnel
+        tunnel.start()
+    }
+
+    func cancel() {
+        completed = true
+        tunnel?.cancel()
+        ftps?.cancel()
+    }
+
+    private func startFTPSFallback() {
+        tunnel?.cancel()
+        tunnel = nil
+        let ftps = BambuFTPSDownload(
+            host: host,
+            accessCode: accessCode,
+            candidatePaths: candidatePaths,
+            queue: queue
+        ) { [weak self] result in
+            guard let self, !self.completed else { return }
+            switch result {
+            case .success:
+                self.finish(result)
+            case .failure(let error):
+                let detail = self.tunnelFailure.isEmpty
+                    ? error.localizedDescription
+                    : "kênh file P2S: \(self.tunnelFailure); FTPS: \(error.localizedDescription)"
+                self.finish(.failure(BambuArchiveError.tunnel(detail)))
+            }
+        }
+        self.ftps = ftps
+        ftps.start()
+    }
+
+    private func finish(_ result: Result<Data, Error>) {
+        guard !completed else { return }
+        completed = true
+        tunnel?.cancel()
+        ftps?.cancel()
+        completion(result)
+    }
+}
+
+private final class BambuPort6000Download {
+    private struct RemoteFile {
+        let name: String
+        let path: String
+        let size: Int
+    }
+
+    private enum Stage {
+        case login, setup, listing, downloading
+    }
+
+    private static let clientLoginMagic: UInt32 = 0x0101013F
+    private static let serverLoginMagic: UInt32 = 0x0001013F
+    private static let clientRPCMagic: UInt32 = 0x0102013F
+    private static let serverRPCMagic: UInt32 = 0x0002013F
+
+    private let host: String
+    private let accessCode: String
+    private let candidatePaths: [String]
+    private let queue: DispatchQueue
+    private let completion: (Result<Data, Error>) -> Void
+    private var connection: NWConnection?
+    private var receiveBuffer = Data()
+    private var downloaded = Data()
+    private var remoteFiles: [RemoteFile] = []
+    private let storages = ["emmc", "internal", "udisk", ""]
+    private var storageIndex = 0
+    private var sequence: UInt32 = 0
+    private var stage: Stage = .login
+    private var expectedSize = 0
+    private var completed = false
+
+    init(
+        host: String,
+        accessCode: String,
+        candidatePaths: [String],
+        queue: DispatchQueue,
+        completion: @escaping (Result<Data, Error>) -> Void
+    ) {
+        self.host = host
+        self.accessCode = accessCode
+        self.candidatePaths = candidatePaths
+        self.queue = queue
+        self.completion = completion
+    }
+
+    func start() {
+        guard let port = NWEndpoint.Port(rawValue: 6000) else {
+            finish(.failure(BambuArchiveError.tunnel("cổng 6000 không hợp lệ")))
+            return
+        }
+        let tls = NWProtocolTLS.Options()
+        sec_protocol_options_set_verify_block(
+            tls.securityProtocolOptions,
+            { _, _, complete in complete(true) },
+            queue
+        )
+        sec_protocol_options_set_tls_resumption_enabled(tls.securityProtocolOptions, true)
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        let connection = NWConnection(
+            host: NWEndpoint.Host(host),
+            port: port,
+            using: NWParameters(tls: tls, tcp: tcp)
+        )
+        self.connection = connection
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self, !self.completed else { return }
+            switch state {
+            case .ready:
+                self.receive()
+                self.sendLogin()
+            case .failed(let error):
+                self.finish(.failure(BambuArchiveError.tunnel(error.localizedDescription)))
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + 16) { [weak self] in
+            guard let self, !self.completed else { return }
+            self.finish(.failure(BambuArchiveError.tunnel("kênh 6000 hết thời gian chờ")))
+        }
+    }
+
+    func cancel() {
+        completed = true
+        connection?.cancel()
+    }
+
+    private func sendLogin() {
+        var payload = Data(repeating: 0, count: 16)
+        let username = Data("bblp".utf8.prefix(8))
+        let password = Data(accessCode.utf8.prefix(8))
+        payload.replaceSubrange(0..<username.count, with: username)
+        payload.replaceSubrange(8..<(8 + password.count), with: password)
+        sendFrame(magic: Self.clientLoginMagic, payload: payload)
+    }
+
+    private func sendSetup() {
+        stage = .setup
+        sequence &+= 1
+        sendJSON([
+            "sequence": Int(sequence),
+            "mtype": 12_291,
+            "req": [
+                "t_av": 1,
+                "mtype": 12_289,
+                "peer_t": 3,
+                "pid": "SE-iPhone-\(UUID().uuidString.prefix(8))",
+                "ver": "02.03.00.00"
+            ]
+        ])
+    }
+
+    private func requestNextStorage() {
+        guard storageIndex < storages.count else {
+            startBestDownload()
+            return
+        }
+        stage = .listing
+        sequence &+= 1
+        var request: [String: Any] = [
+            "type": "model",
+            "api_version": 2,
+            "notify": "DETAIL"
+        ]
+        let storage = storages[storageIndex]
+        if !storage.isEmpty { request["storage"] = storage }
+        sendJSON([
+            "mtype": 12_289,
+            "cmdtype": 1,
+            "sequence": Int(sequence),
+            "req": request
+        ])
+    }
+
+    private func startBestDownload() {
+        guard let file = bestRemoteFile() else {
+            finish(.failure(BambuArchiveError.tunnel("không thấy file 3MF của bản in hiện tại")))
+            return
+        }
+        stage = .downloading
+        downloaded.removeAll(keepingCapacity: true)
+        expectedSize = file.size
+        sequence &+= 1
+        var request: [String: Any] = ["offset": 0]
+        if file.path.hasPrefix("/") {
+            request["path"] = file.path
+        } else {
+            request["file"] = file.name
+        }
+        sendJSON([
+            "mtype": 12_289,
+            "cmdtype": 4,
+            "sequence": Int(sequence),
+            "req": request
+        ])
+    }
+
+    private func receive() {
+        connection?.receive(minimumIncompleteLength: 1, maximumLength: 131_072) { [weak self] data, _, complete, error in
+            guard let self, !self.completed else { return }
+            if let data, !data.isEmpty {
+                self.receiveBuffer.append(data)
+                self.consumeFrames()
+            }
+            if let error {
+                self.finish(.failure(BambuArchiveError.tunnel(error.localizedDescription)))
+                return
+            }
+            if complete {
+                self.finish(.failure(BambuArchiveError.tunnel("máy in đã đóng kênh file")))
+                return
+            }
+            self.receive()
+        }
+    }
+
+    private func consumeFrames() {
+        while receiveBuffer.count >= 16 {
+            let payloadLength = Int(receiveBuffer.uint32LE(at: 0))
+            guard payloadLength >= 0, payloadLength <= 96 * 1_024 * 1_024 else {
+                finish(.failure(BambuArchiveError.tunnel("khung dữ liệu file không hợp lệ")))
+                return
+            }
+            let frameLength = 16 + payloadLength
+            guard receiveBuffer.count >= frameLength else { return }
+            let magic = receiveBuffer.uint32LE(at: 4)
+            let payload = Data(receiveBuffer[16..<frameLength])
+            receiveBuffer.removeFirst(frameLength)
+            handleFrame(magic: magic, payload: payload)
+            if completed { return }
+        }
+    }
+
+    private func handleFrame(magic: UInt32, payload: Data) {
+        switch stage {
+        case .login:
+            guard magic == Self.serverLoginMagic else { return }
+            sendSetup()
+        case .setup:
+            guard magic == Self.serverRPCMagic else { return }
+            storageIndex = 0
+            requestNextStorage()
+        case .listing:
+            guard magic == Self.serverRPCMagic else { return }
+            if let (json, _) = splitJSONAndBinary(payload),
+               let object = try? JSONSerialization.jsonObject(with: json) {
+                collectRemoteFiles(from: object)
+            }
+            storageIndex += 1
+            requestNextStorage()
+        case .downloading:
+            guard magic == Self.serverRPCMagic else { return }
+            handleDownloadPayload(payload)
+        }
+    }
+
+    private func handleDownloadPayload(_ payload: Data) {
+        guard let (jsonData, binary) = splitJSONAndBinary(payload),
+              let root = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+            downloaded.append(payload)
+            validateDownloadLimit()
+            return
+        }
+        if !binary.isEmpty {
+            downloaded.append(binary)
+            validateDownloadLimit()
+        }
+        let reply = root["reply"] as? [String: Any]
+        let rawResult = root["result"] ?? reply?["result"]
+        let result = (rawResult as? NSNumber)?.intValue
+            ?? Int((rawResult as? String) ?? "")
+        if let result, result < 0 {
+            let reason = (root["reason"] as? String)
+                ?? (reply?["reason"] as? String)
+                ?? "máy in từ chối tải file"
+            finish(.failure(BambuArchiveError.tunnel(reason)))
+            return
+        }
+        if result == 0 || (expectedSize > 0 && downloaded.count >= expectedSize) {
+            guard downloaded.count >= 4,
+                  downloaded[downloaded.startIndex] == 0x50,
+                  downloaded[downloaded.index(after: downloaded.startIndex)] == 0x4B else {
+                finish(.failure(BambuArchiveError.tunnel("dữ liệu nhận được không phải file 3MF")))
+                return
+            }
+            finish(.success(downloaded))
+        }
+    }
+
+    private func validateDownloadLimit() {
+        if downloaded.count > 96 * 1_024 * 1_024 {
+            finish(.failure(BambuFTPError.tooLarge))
+        }
+    }
+
+    private func collectRemoteFiles(from value: Any) {
+        if let dictionary = value as? [String: Any] {
+            let name = (dictionary["name"] as? String)
+                ?? (dictionary["file"] as? String)
+                ?? ""
+            let path = (dictionary["path"] as? String) ?? name
+            if (name.lowercased().hasSuffix(".3mf") || path.lowercased().hasSuffix(".3mf")),
+               !path.isEmpty {
+                let size = (dictionary["size"] as? NSNumber)?.intValue ?? 0
+                if !remoteFiles.contains(where: { $0.path.caseInsensitiveCompare(path) == .orderedSame }) {
+                    remoteFiles.append(RemoteFile(
+                        name: name.isEmpty ? (path as NSString).lastPathComponent : name,
+                        path: path,
+                        size: size
+                    ))
+                }
+            }
+            for child in dictionary.values { collectRemoteFiles(from: child) }
+        } else if let array = value as? [Any] {
+            for child in array { collectRemoteFiles(from: child) }
+        }
+    }
+
+    private func bestRemoteFile() -> RemoteFile? {
+        let candidates = candidatePaths.map(normalizedPath)
+        let candidateNames = candidates.map { ($0 as NSString).lastPathComponent }
+        return remoteFiles
+            .map { file -> (RemoteFile, Int) in
+                let path = normalizedPath(file.path)
+                let name = (normalizedPath(file.name) as NSString).lastPathComponent.lowercased()
+                var score = 0
+                for (index, candidate) in candidates.enumerated() {
+                    if path == candidate { score = max(score, 1_000 - index) }
+                    if name == candidateNames[index] { score = max(score, 900 - index) }
+                }
+                return (file, score)
+            }
+            .filter { $0.1 > 0 }
+            .max { $0.1 < $1.1 }?.0
+    }
+
+    private func normalizedPath(_ value: String) -> String {
+        (value.removingPercentEncoding ?? value)
+            .replacingOccurrences(of: "\\", with: "/")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .lowercased()
+    }
+
+    private func splitJSONAndBinary(_ payload: Data) -> (Data, Data)? {
+        let bytes = [UInt8](payload)
+        guard let start = bytes.firstIndex(of: 0x7B) else { return nil }
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for index in start..<bytes.count {
+            let byte = bytes[index]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if byte == 0x5C {
+                    escaped = true
+                } else if byte == 0x22 {
+                    inString = false
+                }
+                continue
+            }
+            if byte == 0x22 {
+                inString = true
+            } else if byte == 0x7B {
+                depth += 1
+            } else if byte == 0x7D {
+                depth -= 1
+                if depth == 0 {
+                    let json = Data(bytes[start...index])
+                    var binaryStart = index + 1
+                    while binaryStart < bytes.count,
+                          bytes[binaryStart] == 0x0A || bytes[binaryStart] == 0x0D {
+                        binaryStart += 1
+                    }
+                    let binary = binaryStart < bytes.count
+                        ? Data(bytes[binaryStart..<bytes.count])
+                        : Data()
+                    return (json, binary)
+                }
+            }
+        }
+        return nil
+    }
+
+    private func sendJSON(_ object: [String: Any]) {
+        guard let payload = try? JSONSerialization.data(withJSONObject: object) else {
+            finish(.failure(BambuArchiveError.tunnel("không tạo được yêu cầu file")))
+            return
+        }
+        sendFrame(magic: Self.clientRPCMagic, payload: payload)
+    }
+
+    private func sendFrame(magic: UInt32, payload: Data) {
+        var frame = Data()
+        frame.appendUInt32LE(UInt32(payload.count))
+        frame.appendUInt32LE(magic)
+        frame.appendUInt32LE(sequence)
+        frame.appendUInt32LE(0)
+        frame.append(payload)
+        connection?.send(content: frame, completion: .contentProcessed { [weak self] error in
+            if let error {
+                self?.finish(.failure(BambuArchiveError.tunnel(error.localizedDescription)))
+            }
+        })
+    }
+
+    private func finish(_ result: Result<Data, Error>) {
+        guard !completed else { return }
+        completed = true
+        connection?.cancel()
+        completion(result)
+    }
+}
+
 private enum BambuFTPError: LocalizedError {
     case noCandidate
     case rejected(String)
@@ -930,6 +1490,7 @@ private final class BambuFTPSDownload {
             { _, _, complete in complete(true) },
             queue
         )
+        sec_protocol_options_set_tls_resumption_enabled(tls.securityProtocolOptions, true)
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
         return NWConnection(
@@ -1021,8 +1582,6 @@ private final class BambuFTPSDownload {
             switch state {
             case .ready:
                 self.receiveData()
-                self.stage = .retrieving
-                self.sendRaw("RETR \(self.candidatePaths[self.candidateIndex])")
             case .failed(let error):
                 self.finish(.failure(BambuFTPError.connection(error.localizedDescription)))
             default:
@@ -1030,6 +1589,16 @@ private final class BambuFTPSDownload {
             }
         }
         connection.start(queue: queue)
+        // vsftpd waits for RETR before it starts TLS on the passive socket.
+        // Sending RETR only after NWConnection reports .ready deadlocks both
+        // sides and used to surface as "FTPS hết thời gian chờ".
+        stage = .retrieving
+        queue.asyncAfter(deadline: .now() + 0.12) { [weak self, weak connection] in
+            guard let self, let connection, !self.completed,
+                  self.dataConnection === connection,
+                  self.stage == .retrieving else { return }
+            self.sendRaw("RETR \(self.candidatePaths[self.candidateIndex])")
+        }
     }
 
     private func receiveData() {
