@@ -180,7 +180,7 @@ jobs:
           grep -q "printerRemoteControlCard" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "skipSelectedPrintObjects" "RedCameraTest/H2DBLEManager.swift"
           grep -q "loadFilament" "RedCameraTest/H2DBLEManager.swift"
-          grep -q "Dừng bản in" "RedCameraTest/PrinterRemoteControlView.swift"
+          grep -q 'Label("Dừng", systemImage: "stop.fill")' "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q "CAMERA MÁY IN" "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q "Developer Mode" "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q "MQTT LAN TRỰC TIẾP TỪ IPHONE" "RedCameraTest/PrinterRemoteControlView.swift"
