@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.20.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.21.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -29,8 +29,6 @@ constexpr uint16_t MQTT_PORT = 8883;
 // The largest H2D status packet measured on the target printer is 21,775
 // bytes.  A 24-KB primary buffer leaves safe protocol headroom while freeing
 // enough classic-ESP32 heap for the rotating background-printer TLS sample.
-constexpr uint16_t MQTT_BUFFER_BYTES = 24576;
-constexpr uint16_t MQTT_FALLBACK_BUFFER_BYTES = 23552;
 // TLS needs a large contiguous heap block during its handshake. PubSubClient's
 // payload buffer is kept small until TLS is established, then expanded before
 // subscribing to Bambu reports.
@@ -40,8 +38,14 @@ constexpr uint16_t MQTT_CONNECT_BUFFER_BYTES = 1024;
 // buffer too; Bambu pushall packets are about 22 KB and were silently dropped
 // by the former 4-KB scanner, leaving an active printer yellow until its tab
 // was selected manually.
-constexpr uint16_t FLEET_MQTT_BUFFER_BYTES = 24576;
-constexpr uint16_t FLEET_MQTT_FALLBACK_BUFFER_BYTES = 23552;
+// H2D pushall packets are about 22 KB, while the observed A1/P2S packets are
+// much smaller. Giving every background sample a 24-KB heap block needlessly
+// fragmented classic ESP32 RAM and could leave the selected H2D unable to
+// restore its own receive buffer after a fleet refresh.
+constexpr uint16_t COMPACT_MQTT_BUFFER_BYTES = 16384;
+constexpr uint16_t COMPACT_MQTT_FALLBACK_BUFFER_BYTES = 15360;
+constexpr uint16_t H2D_MQTT_BUFFER_BYTES = 24576;
+constexpr uint16_t H2D_MQTT_FALLBACK_BUFFER_BYTES = 23552;
 constexpr uint32_t WIFI_RETRY_MS = 12000;
 // A printer profile switch keeps the Wi-Fi association alive and only
 // rebuilds MQTT.  A short retry interval makes an idle/offline target fail
@@ -2002,9 +2006,19 @@ bool startFleetMonitor(uint8_t slot) {
   // contiguous heap for outgoing records. No incoming packet is processed
   // until client.loop(), after the receive buffer is expanded below.
   publishFleetStatusRequest(slot);
-  if (!client.setBufferSize(Config::FLEET_MQTT_BUFFER_BYTES) &&
-      !client.setBufferSize(Config::FLEET_MQTT_FALLBACK_BUFFER_BYTES) &&
-      !client.setBufferSize(22528)) {
+  const bool profileIsH2D =
+      profile.kind.equalsIgnoreCase("H2D") ||
+      printerModelFromSerial(profile.printerSerial) == "H2D";
+  const uint16_t preferredBuffer =
+      profileIsH2D ? Config::H2D_MQTT_BUFFER_BYTES
+                   : Config::COMPACT_MQTT_BUFFER_BYTES;
+  const uint16_t fallbackBuffer =
+      profileIsH2D ? Config::H2D_MQTT_FALLBACK_BUFFER_BYTES
+                   : Config::COMPACT_MQTT_FALLBACK_BUFFER_BYTES;
+  const uint16_t emergencyBuffer = profileIsH2D ? 22528 : 14336;
+  if (!client.setBufferSize(preferredBuffer) &&
+      !client.setBufferSize(fallbackBuffer) &&
+      !client.setBufferSize(emergencyBuffer)) {
     Serial.printf("[FLEET] %s cannot allocate full status buffer\n",
                   profile.kind.c_str());
     client.disconnect();
@@ -2186,17 +2200,29 @@ void maintainFleetMonitors() {
 }
 
 bool expandSelectedMqttReceiveBuffer() {
-  if (mqtt.setBufferSize(Config::MQTT_BUFFER_BYTES)) return true;
-  if (mqtt.setBufferSize(Config::MQTT_FALLBACK_BUFFER_BYTES)) {
+  const bool selectedIsH2D =
+      printerModelFromSerial(settings.printerSerial) == "H2D";
+  const uint16_t preferredBuffer =
+      selectedIsH2D ? Config::H2D_MQTT_BUFFER_BYTES
+                    : Config::COMPACT_MQTT_BUFFER_BYTES;
+  const uint16_t fallbackBuffer =
+      selectedIsH2D ? Config::H2D_MQTT_FALLBACK_BUFFER_BYTES
+                    : Config::COMPACT_MQTT_FALLBACK_BUFFER_BYTES;
+  const uint16_t emergencyBuffer = selectedIsH2D ? 22528 : 14336;
+  if (mqtt.setBufferSize(preferredBuffer)) return true;
+  if (mqtt.setBufferSize(fallbackBuffer)) {
     Serial.printf("[MQTT] using %u-byte fallback receive buffer\n",
-                  Config::MQTT_FALLBACK_BUFFER_BYTES);
+                  fallbackBuffer);
     return true;
   }
-  if (mqtt.setBufferSize(22528)) {
-    Serial.println("[MQTT] using 22528-byte emergency receive buffer");
+  if (mqtt.setBufferSize(emergencyBuffer)) {
+    Serial.printf("[MQTT] using %u-byte emergency receive buffer\n",
+                  emergencyBuffer);
     return true;
   }
-  Serial.println("[MQTT] cannot allocate a safe selected-printer buffer");
+  Serial.printf("[MQTT] cannot allocate selected-printer buffer, heap=%u, "
+                "max=%u\n",
+                ESP.getFreeHeap(), ESP.getMaxAllocHeap());
   return false;
 }
 
@@ -2535,7 +2561,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.20.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.21.0");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -3433,7 +3459,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.20.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.21.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
