@@ -2,15 +2,6 @@ import Combine
 import Foundation
 import Network
 import Security
-import ZIPFoundation
-
-struct BambuPrintableObject: Identifiable, Equatable {
-    let id: Int
-    let name: String
-    var centerX: Double?
-    var centerY: Double?
-    var isSkipped: Bool
-}
 
 /// Direct LAN MQTT control for the selected printer. Control no longer depends
 /// on the ESP32's MQTT session, so a BLE reconnect or fleet scan cannot swallow
@@ -20,9 +11,6 @@ final class BambuPrinterControlManager: ObservableObject {
     @Published private(set) var isPending = false
     @Published private(set) var lastSucceeded: Bool?
     @Published private(set) var statusText = "Đang chuẩn bị điều khiển trực tiếp…"
-    @Published private(set) var printableObjects: [BambuPrintableObject] = []
-    @Published private(set) var isLoadingObjects = false
-    @Published private(set) var objectStatusText = "Đang chờ thông tin bản in…"
 
     private struct Configuration: Equatable {
         let profileID: String
@@ -35,7 +23,6 @@ final class BambuPrinterControlManager: ObservableObject {
         let sequence: String
         let mqttCommand: String
         let actionName: String
-        let expectedObjectIDs: Set<Int>
     }
 
     private let queue = DispatchQueue(label: "vn.se.bambu-printer-control", qos: .userInitiated)
@@ -47,13 +34,6 @@ final class BambuPrinterControlManager: ObservableObject {
     private var sequenceNumber: UInt64 = 200_000
     private var pending: PendingCommand?
     private var pingTimer: DispatchSourceTimer?
-    private var objectDownload: BambuArchiveDownload?
-    private var currentJobFile = ""
-    private var currentSubtaskName = ""
-    private var currentArchiveFile = ""
-    private var currentPrintState = ""
-    private var skippedObjectIDs = Set<Int>()
-    private var loadedObjectKey = ""
 
     func start(profile: BambuPrinterProfile, accessCode: String) {
         let next = Configuration(
@@ -87,15 +67,6 @@ final class BambuPrinterControlManager: ObservableObject {
         }
     }
 
-    func refreshObjects() {
-        queue.async { [weak self] in
-            guard let self else { return }
-            self.loadedObjectKey = ""
-            self.requestPushAll()
-            self.loadObjectsIfPossible(force: true)
-        }
-    }
-
     func pausePrint() {
         send(section: "print", command: "pause", fields: [:], actionName: "Tạm dừng bản in")
     }
@@ -108,24 +79,9 @@ final class BambuPrinterControlManager: ObservableObject {
         send(section: "print", command: "stop", fields: [:], actionName: "Dừng")
     }
 
-    func skipObjects(_ objectIDs: [Int]) {
-        let normalized = Array(Set(objectIDs.filter { $0 >= 0 })).sorted()
-        guard !normalized.isEmpty else {
-            publishFailure("Hãy chạm chọn ít nhất một vật thể trên bàn in")
-            return
-        }
-        send(
-            section: "print",
-            command: "skip_objects",
-            fields: ["obj_list": normalized, "timestamp": Int(Date().timeIntervalSince1970)],
-            actionName: "Bỏ qua \(normalized.count) vật thể",
-            expectedObjectIDs: Set(normalized)
-        )
-    }
-
-    /// The requested workflow is intentionally external-spool only. Bambu uses
-    /// virtual tray 254 for the first external spool and AMS id 255.
-    func loadExternalFilament(temperature: Int) {
+    /// On H2D, virtual tray 254 and extruder id 1 are the left external-spool
+    /// path. Keep this explicit so the right nozzle is never selected.
+    func loadExternalFilamentIntoLeftNozzle(temperature: Int) {
         guard (170...320).contains(temperature) else {
             publishFailure("Nhiệt độ nạp nhựa không hợp lệ")
             return
@@ -134,34 +90,34 @@ final class BambuPrinterControlManager: ObservableObject {
             section: "print",
             command: "ams_change_filament",
             fields: [
-                "ams_id": 255,
+                "ams_id": 254,
                 "slot_id": 0,
                 "target": 254,
+                "extruder_id": 1,
                 "curr_temp": 0,
                 "tar_temp": temperature
             ],
-            actionName: "Nạp nhựa từ cuộn ngoài"
+            actionName: "Nạp nhựa cuộn ngoài vào đầu trái"
         )
     }
 
-    func unloadExternalFilament(temperature: Int) {
+    func unloadExternalFilamentFromLeftNozzle(temperature: Int) {
         guard (170...320).contains(temperature) else {
             publishFailure("Nhiệt độ rút nhựa không hợp lệ")
             return
         }
-        // Current Bambu firmware represents the manual external-spool unload
-        // flow with virtual AMS/tray 255. It does not select a physical AMS.
         send(
             section: "print",
             command: "ams_change_filament",
             fields: [
-                "ams_id": 255,
+                "ams_id": 254,
                 "slot_id": 255,
                 "target": 255,
+                "extruder_id": 1,
                 "curr_temp": 0,
                 "tar_temp": temperature
             ],
-            actionName: "Rút nhựa cuộn ngoài"
+            actionName: "Rút nhựa cuộn ngoài khỏi đầu trái"
         )
     }
 
@@ -245,8 +201,6 @@ final class BambuPrinterControlManager: ObservableObject {
         generation &+= 1
         pingTimer?.cancel()
         pingTimer = nil
-        objectDownload?.cancel()
-        objectDownload = nil
         connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
@@ -345,47 +299,17 @@ final class BambuPrinterControlManager: ObservableObject {
 
     private func handleReport(_ root: [String: Any]) {
         if let print = root["print"] as? [String: Any] {
-            if let state = print["gcode_state"] as? String, !state.isEmpty {
-                currentPrintState = state.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-            }
-            if let file = print["gcode_file"] as? String, !file.isEmpty {
-                currentJobFile = file
-            }
-            if let name = print["subtask_name"] as? String, !name.isEmpty {
-                currentSubtaskName = name
-            }
-            for key in ["file", "project_file", "project_name"] {
-                if let archive = print[key] as? String,
-                   archive.lowercased().contains(".3mf") {
-                    currentArchiveFile = archive
-                    break
-                }
-            }
-            if let skipped = print["s_obj"] as? [Int] {
-                skippedObjectIDs = Set(skipped)
-                applySkippedObjects()
-            } else if let skippedNumbers = print["s_obj"] as? [NSNumber] {
-                skippedObjectIDs = Set(skippedNumbers.map(\.intValue))
-                applySkippedObjects()
-            }
             confirmPendingIfMatched(section: print)
         }
         if let system = root["system"] as? [String: Any] {
             confirmPendingIfMatched(section: system)
         }
-        loadObjectsIfPossible(force: false)
     }
 
     private func confirmPendingIfMatched(section: [String: Any]) {
         guard let pending else { return }
         let sequence = String(describing: section["sequence_id"] ?? "")
         let command = (section["command"] as? String) ?? ""
-        if pending.mqttCommand == "skip_objects",
-           !pending.expectedObjectIDs.isEmpty,
-           pending.expectedObjectIDs.isSubset(of: skippedObjectIDs) {
-            completePending(success: true, detail: "Máy in đã bỏ qua vật thể được chọn")
-            return
-        }
         guard sequence == pending.sequence, command == pending.mqttCommand else { return }
         if let result = section["result"] as? String {
             let normalized = result.lowercased()
@@ -409,8 +333,7 @@ final class BambuPrinterControlManager: ObservableObject {
         section: String,
         command: String,
         fields: [String: Any],
-        actionName: String,
-        expectedObjectIDs: Set<Int> = []
+        actionName: String
     ) {
         queue.async { [weak self] in
             guard let self, let configuration = self.configuration, self.connection != nil else {
@@ -435,8 +358,7 @@ final class BambuPrinterControlManager: ObservableObject {
             self.pending = PendingCommand(
                 sequence: sequence,
                 mqttCommand: command,
-                actionName: actionName,
-                expectedObjectIDs: expectedObjectIDs
+                actionName: actionName
             )
             self.publishPending("Đang gửi trực tiếp: \(actionName)…")
             self.sendPacket(self.publishPacket(
@@ -474,71 +396,6 @@ final class BambuPrinterControlManager: ObservableObject {
             payload: json,
             qos1: false
         ))
-    }
-
-    private func loadObjectsIfPossible(force: Bool) {
-        guard let configuration,
-              !currentJobFile.isEmpty || !currentSubtaskName.isEmpty || !currentArchiveFile.isEmpty,
-              objectDownload == nil else { return }
-        let activeStates: Set<String> = ["RUNNING", "PREPARE", "PAUSE", "PAUSED"]
-        // An IDLE report can retain the previous job's filename. Do not pull
-        // that archive into memory merely because the control sheet opened.
-        guard force || activeStates.contains(currentPrintState) else {
-            publishObjectLoading(false, text: "Vật thể sẽ được đọc khi máy bắt đầu in")
-            return
-        }
-        let key = "\(configuration.profileID)|\(currentArchiveFile)|\(currentJobFile)|\(currentSubtaskName)"
-        guard force || loadedObjectKey != key else { return }
-        loadedObjectKey = key
-        publishObjectLoading(true, text: "Đang đọc danh sách vật thể từ file 3MF…")
-        let candidates = BambuArchiveDownload.candidatePaths(
-            gcodeFile: currentJobFile,
-            subtaskName: currentSubtaskName,
-            archiveFile: currentArchiveFile
-        )
-        let download = BambuArchiveDownload(
-            host: configuration.host,
-            accessCode: configuration.accessCode,
-            candidatePaths: candidates,
-            queue: queue
-        ) { [weak self] result in
-            guard let self else { return }
-            self.objectDownload = nil
-            switch result {
-            case .success(let archiveData):
-                do {
-                    let plate = try Bambu3MFObjectParser.parse(
-                        archiveData,
-                        gcodeFile: self.currentJobFile,
-                        skippedObjectIDs: self.skippedObjectIDs
-                    )
-                    self.publishObjects(plate)
-                } catch {
-                    self.publishObjectLoading(
-                        false,
-                        text: "Không đọc được vật thể trong 3MF • \(error.localizedDescription)"
-                    )
-                }
-            case .failure(let error):
-                self.publishObjectLoading(
-                    false,
-                    text: "Chưa tải được file 3MF từ máy in • \(error.localizedDescription)"
-                )
-            }
-        }
-        objectDownload = download
-        download.start()
-    }
-
-    private func applySkippedObjects() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.printableObjects = self.printableObjects.map { object in
-                var updated = object
-                updated.isSkipped = updated.isSkipped || self.skippedObjectIDs.contains(updated.id)
-                return updated
-            }
-        }
     }
 
     private func startPingTimer() {
@@ -666,22 +523,6 @@ final class BambuPrinterControlManager: ObservableObject {
         }
     }
 
-    private func publishObjectLoading(_ loading: Bool, text: String) {
-        DispatchQueue.main.async { [weak self] in
-            self?.isLoadingObjects = loading
-            self?.objectStatusText = text
-        }
-    }
-
-    private func publishObjects(_ objects: [BambuPrintableObject]) {
-        DispatchQueue.main.async { [weak self] in
-            self?.printableObjects = objects
-            self?.isLoadingObjects = false
-            self?.objectStatusText = objects.isEmpty
-                ? "File in không có vật thể có thể bỏ qua"
-                : "Chạm trực tiếp vào vật thể cần bỏ qua"
-        }
-    }
 }
 
 private extension Data {
@@ -715,6 +556,10 @@ private extension Data {
     }
 }
 
+// The retired 3MF/FTPS object loader is intentionally excluded from the app.
+// Keeping the old implementation below the compile guard makes the rollback
+// history readable without shipping or executing the unreliable skip flow.
+#if false
 private enum BambuObjectError: LocalizedError {
     case invalidArchive
     case missingSliceInfo
@@ -1718,3 +1563,4 @@ private final class BambuFTPSDownload {
         completion(result)
     }
 }
+#endif

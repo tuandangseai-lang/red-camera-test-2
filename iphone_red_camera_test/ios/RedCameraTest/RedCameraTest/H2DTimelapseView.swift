@@ -29,7 +29,6 @@ struct H2DTimelapseView: View {
     @State private var profileDisplayName = ""
     @State private var savedProfiles: [BambuPrinterProfile] = []
     @State private var pendingProfileSwitch = false
-    @State private var showCriticalPrinterAlarm = false
     @State private var acknowledgedAlarmID = ""
     @State private var hardwareArmRequested = false
     @State private var hardwareStartedCapture = false
@@ -46,7 +45,6 @@ struct H2DTimelapseView: View {
     @State private var showCaptureBrightnessSlider = false
     @State private var captureBrightnessCollapseWorkItem: DispatchWorkItem?
     @State private var printerCameraExpanded = false
-    @State private var showPrinterControls = false
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -97,15 +95,6 @@ struct H2DTimelapseView: View {
             .onChange(of: timelapse.isRendering) { _, rendering in
                 if !rendering { applyHardwareControls(force: true) }
             }
-            .alert(localizedStatus("\(bluetooth.activeCriticalPrinterDisplayName) đang có lỗi"), isPresented: $showCriticalPrinterAlarm) {
-                Button("Tắt cảnh báo") {
-                    silenceCurrentPrinterAlarm()
-                }
-            } message: {
-                Text(localizedStatus(bluetooth.activeCriticalPrinterAlertText.isEmpty
-                    ? "Hãy kiểm tra màn hình máy in. Âm báo sẽ tự tắt khi lỗi được xử lý."
-                    : bluetooth.activeCriticalPrinterAlertText))
-            }
             .confirmationDialog(
                 "Bạn muốn xử lý các ảnh đã chụp thế nào?",
                 isPresented: $showStopOptions,
@@ -122,16 +111,6 @@ struct H2DTimelapseView: View {
                 Button("Tiếp tục chụp", role: .cancel) {}
             } message: {
                 Text("Dừng chụp không dừng máy in \(printerName).")
-            }
-            .sheet(isPresented: $showPrinterControls) {
-                PrinterRemoteControlView(
-                    bluetooth: bluetooth,
-                    printerCamera: printerCamera,
-                    cameraEnabled: $printerCameraEnabled,
-                    printerName: printerName,
-                    profile: activeControlProfile,
-                    accessCode: accessCode
-                )
             }
     }
 
@@ -611,11 +590,17 @@ struct H2DTimelapseView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     cinemaSystemHeader
-                    if bluetooth.hasActiveCriticalPrinterAlert {
-                        printerAlarmSilenceBanner
-                    }
                     printerCameraCard
-                    printerRemoteControlCard
+                    PrinterRemoteControlView(
+                        bluetooth: bluetooth,
+                        printerName: printerName,
+                        profile: activeControlProfile,
+                        accessCode: accessCode,
+                        alarmActive: bluetooth.hasActiveCriticalPrinterAlert,
+                        alarmAcknowledged: bluetooth.hasActiveCriticalPrinterAlert &&
+                            acknowledgedAlarmID == currentAlarmID,
+                        onSilenceAlarm: silenceCurrentPrinterAlarm
+                    )
                     bridgeStatusCard
                     configurationCard
 
@@ -722,7 +707,7 @@ struct H2DTimelapseView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(appLanguageCode == "vi" ? "Đổi sang tiếng Anh" : "Switch to Vietnamese")
 
-                    Text("V9.77")
+                    Text("V9.78")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.34))
                 }
@@ -730,45 +715,6 @@ struct H2DTimelapseView: View {
         }
         .padding(.horizontal, 2)
         .padding(.vertical, 5)
-    }
-
-    private var printerRemoteControlCard: some View {
-        Button {
-            showPrinterControls = true
-        } label: {
-            HStack(spacing: 12) {
-                ZStack {
-                    Circle()
-                        .fill(cinemaCyan.opacity(0.13))
-                        .frame(width: 42, height: 42)
-                    Image(systemName: "slider.horizontal.3")
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(cinemaCyan)
-                        .shadow(color: cinemaCyan.opacity(0.55), radius: 6)
-                }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("ĐIỀU KHIỂN MÁY IN")
-                        .font(.system(size: 13, weight: .black, design: .rounded))
-                    Text("Tạm dừng • bỏ qua vật thể • nạp/rút nhựa")
-                        .font(.system(size: 10, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.52))
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .black))
-                    .foregroundStyle(cinemaCyan)
-            }
-            .padding(15)
-            .frame(maxWidth: .infinity)
-            .background(.black.opacity(0.46), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(cinemaCyan.opacity(0.20), lineWidth: 1)
-            }
-        }
-        .buttonStyle(.plain)
-        .disabled(!bluetooth.isConnected || !bluetooth.isH2DBridge)
-        .opacity(bluetooth.isConnected && bluetooth.isH2DBridge ? 1 : 0.45)
     }
 
     private var printerCameraCard: some View {
@@ -2067,7 +2013,6 @@ struct H2DTimelapseView: View {
     private func synchronizePrinterAlarm() {
         guard bluetooth.hasActiveCriticalPrinterAlert else {
             printerAlarm.stop()
-            showCriticalPrinterAlarm = false
             acknowledgedAlarmID = ""
             return
         }
@@ -2075,23 +2020,19 @@ struct H2DTimelapseView: View {
         // must not have to open the faulty profile before the siren can start.
         guard bluetooth.shouldPlayPhonePrinterAlarm else {
             printerAlarm.stop()
-            showCriticalPrinterAlarm = false
             return
         }
         guard acknowledgedAlarmID != currentAlarmID else { return }
-        showCriticalPrinterAlarm = true
         printerAlarm.startLooping()
     }
 
     private func silenceCurrentPrinterAlarm() {
         guard bluetooth.hasActiveCriticalPrinterAlert else {
             printerAlarm.stop()
-            showCriticalPrinterAlarm = false
             return
         }
         acknowledgedAlarmID = currentAlarmID
         printerAlarm.stop()
-        showCriticalPrinterAlarm = false
         // ESP32 keeps the fault visible, but stops the repeating buzzer and the
         // flashing red strip for this exact incident. A new error automatically
         // clears the acknowledgement and raises both alarms again.

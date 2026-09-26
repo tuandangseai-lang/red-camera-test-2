@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.21.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.22.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -38,14 +38,13 @@ constexpr uint16_t MQTT_CONNECT_BUFFER_BYTES = 1024;
 // buffer too; Bambu pushall packets are about 22 KB and were silently dropped
 // by the former 4-KB scanner, leaving an active printer yellow until its tab
 // was selected manually.
-// H2D pushall packets are about 22 KB, while the observed A1/P2S packets are
-// much smaller. Giving every background sample a 24-KB heap block needlessly
-// fragmented classic ESP32 RAM and could leave the selected H2D unable to
-// restore its own receive buffer after a fleet refresh.
-constexpr uint16_t COMPACT_MQTT_BUFFER_BYTES = 16384;
-constexpr uint16_t COMPACT_MQTT_FALLBACK_BUFFER_BYTES = 15360;
-constexpr uint16_t H2D_MQTT_BUFFER_BYTES = 24576;
-constexpr uint16_t H2D_MQTT_FALLBACK_BUFFER_BYTES = 23552;
+// Use the proven full receive buffer for every printer. P2S/A1 reports can
+// grow when a fault carries extra HMS data; a compact buffer silently dropped
+// exactly those packets and made fault detection look insensitive.
+constexpr uint16_t MQTT_BUFFER_BYTES = 24576;
+constexpr uint16_t MQTT_FALLBACK_BUFFER_BYTES = 23552;
+constexpr uint16_t FLEET_MQTT_BUFFER_BYTES = 24576;
+constexpr uint16_t FLEET_MQTT_FALLBACK_BUFFER_BYTES = 23552;
 constexpr uint32_t WIFI_RETRY_MS = 12000;
 // A printer profile switch keeps the Wi-Fi association alive and only
 // rebuilds MQTT.  A short retry interval makes an idle/offline target fail
@@ -71,6 +70,7 @@ constexpr uint8_t FLEET_OFFLINE_FAILURES = 3;
 // making the iPhone state flash between colours.
 constexpr uint32_t FLEET_REFRESH_PERIOD_MS = 15000;
 constexpr uint8_t FLEET_SAMPLES_PER_REFRESH = 2;
+constexpr uint32_t FLEET_REFRESH_WATCHDOG_MS = 14000;
 // H2D's full 22-KB pushall can arrive noticeably later than A1/P2S. Keep the
 // short-lived scanner open long enough to receive that packet, otherwise an
 // H2D fault could be missed until its profile was selected manually.
@@ -2006,19 +2006,9 @@ bool startFleetMonitor(uint8_t slot) {
   // contiguous heap for outgoing records. No incoming packet is processed
   // until client.loop(), after the receive buffer is expanded below.
   publishFleetStatusRequest(slot);
-  const bool profileIsH2D =
-      profile.kind.equalsIgnoreCase("H2D") ||
-      printerModelFromSerial(profile.printerSerial) == "H2D";
-  const uint16_t preferredBuffer =
-      profileIsH2D ? Config::H2D_MQTT_BUFFER_BYTES
-                   : Config::COMPACT_MQTT_BUFFER_BYTES;
-  const uint16_t fallbackBuffer =
-      profileIsH2D ? Config::H2D_MQTT_FALLBACK_BUFFER_BYTES
-                   : Config::COMPACT_MQTT_FALLBACK_BUFFER_BYTES;
-  const uint16_t emergencyBuffer = profileIsH2D ? 22528 : 14336;
-  if (!client.setBufferSize(preferredBuffer) &&
-      !client.setBufferSize(fallbackBuffer) &&
-      !client.setBufferSize(emergencyBuffer)) {
+  if (!client.setBufferSize(Config::FLEET_MQTT_BUFFER_BYTES) &&
+      !client.setBufferSize(Config::FLEET_MQTT_FALLBACK_BUFFER_BYTES) &&
+      !client.setBufferSize(22528)) {
     Serial.printf("[FLEET] %s cannot allocate full status buffer\n",
                   profile.kind.c_str());
     client.disconnect();
@@ -2116,6 +2106,20 @@ void maintainFleetReachability() {
 void maintainFleetMonitors() {
   refreshFleetMonitorAssignments();
   const uint32_t now = millis();
+  // Never leave the selected printer parked behind a failed TLS fleet pass.
+  // The normal two-printer scan completes well inside this limit; if a socket
+  // stalls, release it and return to the selected machine before the next
+  // fifteen-second cycle.
+  if (fleetRefreshInProgress && lastFleetRefreshAt != 0 &&
+      now - lastFleetRefreshAt >= Config::FLEET_REFRESH_WATCHDOG_MS) {
+    Serial.println("[FLEET] refresh watchdog returning to selected printer");
+    disconnectFleetMonitors(false);
+    fleetRefreshInProgress = false;
+    fleetMonitorCursor = BACKGROUND_MONITOR_COUNT;
+    fleetSamplesThisRefresh = 0;
+    resumeSelectedMqttAfterFleetScan();
+    return;
+  }
   // The selected printer owns the primary TLS session and all timelapse layer
   // transitions.  Do not start a second TLS handshake until the first valid
   // selected-printer packet has arrived; this prevents a large H2D pushall
@@ -2200,29 +2204,17 @@ void maintainFleetMonitors() {
 }
 
 bool expandSelectedMqttReceiveBuffer() {
-  const bool selectedIsH2D =
-      printerModelFromSerial(settings.printerSerial) == "H2D";
-  const uint16_t preferredBuffer =
-      selectedIsH2D ? Config::H2D_MQTT_BUFFER_BYTES
-                    : Config::COMPACT_MQTT_BUFFER_BYTES;
-  const uint16_t fallbackBuffer =
-      selectedIsH2D ? Config::H2D_MQTT_FALLBACK_BUFFER_BYTES
-                    : Config::COMPACT_MQTT_FALLBACK_BUFFER_BYTES;
-  const uint16_t emergencyBuffer = selectedIsH2D ? 22528 : 14336;
-  if (mqtt.setBufferSize(preferredBuffer)) return true;
-  if (mqtt.setBufferSize(fallbackBuffer)) {
+  if (mqtt.setBufferSize(Config::MQTT_BUFFER_BYTES)) return true;
+  if (mqtt.setBufferSize(Config::MQTT_FALLBACK_BUFFER_BYTES)) {
     Serial.printf("[MQTT] using %u-byte fallback receive buffer\n",
-                  fallbackBuffer);
+                  Config::MQTT_FALLBACK_BUFFER_BYTES);
     return true;
   }
-  if (mqtt.setBufferSize(emergencyBuffer)) {
-    Serial.printf("[MQTT] using %u-byte emergency receive buffer\n",
-                  emergencyBuffer);
+  if (mqtt.setBufferSize(22528)) {
+    Serial.println("[MQTT] using 22528-byte emergency receive buffer");
     return true;
   }
-  Serial.printf("[MQTT] cannot allocate selected-printer buffer, heap=%u, "
-                "max=%u\n",
-                ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  Serial.println("[MQTT] cannot allocate a safe selected-printer buffer");
   return false;
 }
 
@@ -2561,7 +2553,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.21.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.22.0");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2802,40 +2794,6 @@ void handlePhoneCommand(String command) {
     enqueueRemoteControl("RESUME", makeSimplePrintCommand("resume"));
   } else if (head == "H2D_PRINT_STOP") {
     enqueueRemoteControl("STOP", makeSimplePrintCommand("stop"));
-  } else if (head == "H2D_SKIP_OBJECTS") {
-    String normalized;
-    int start = 0;
-    uint8_t count = 0;
-    bool valid = !argument.isEmpty();
-    while (valid && start <= static_cast<int>(argument.length())) {
-      const int separator = argument.indexOf(',', start);
-      String token = separator < 0 ? argument.substring(start)
-                                   : argument.substring(start, separator);
-      token.trim();
-      if (!isUnsignedDecimal(token)) {
-        valid = false;
-        break;
-      }
-      const int objectID = token.toInt();
-      if (objectID < 0 || objectID > 9999 || ++count > 24) {
-        valid = false;
-        break;
-      }
-      if (!normalized.isEmpty()) normalized += ',';
-      normalized += objectID;
-      if (separator < 0) break;
-      start = separator + 1;
-    }
-    if (!valid || count == 0) {
-      queuePhoneEvent(
-          "H2D,REMOTE_ERROR,SKIP_OBJECTS,Danh sách ID vật thể không hợp lệ");
-      return;
-    }
-    const String payload =
-        String("{\"print\":{\"sequence_id\":\"") +
-        nextRemoteControlSequence() +
-        "\",\"command\":\"skip_objects\",\"obj_list\":[" + normalized + "]}}";
-    enqueueRemoteControl("SKIP_OBJECTS", payload);
   } else if (head == "H2D_FILAMENT_LOAD") {
     const int first = argument.indexOf(',');
     const int second = first < 0 ? -1 : argument.indexOf(',', first + 1);
@@ -2854,7 +2812,7 @@ void handlePhoneCommand(String command) {
     const int slotID = slotText.toInt();
     const int target = targetText.toInt();
     const int temperature = temperatureText.toInt();
-    const bool externalSpool = amsID == 255 && slotID == 0 && target == 254;
+    const bool externalSpool = amsID == 254 && slotID == 0 && target == 254;
     if (!externalSpool || temperature < 170 || temperature > 320) {
       queuePhoneEvent(
           "H2D,REMOTE_ERROR,LOAD_FILAMENT,Chỉ hỗ trợ cuộn nhựa ngoài");
@@ -2865,7 +2823,8 @@ void handlePhoneCommand(String command) {
         nextRemoteControlSequence() +
         "\",\"command\":\"ams_change_filament\",\"ams_id\":" + amsID +
         ",\"slot_id\":" + slotID + ",\"target\":" + target +
-        ",\"curr_temp\":0,\"tar_temp\":" + temperature + "}}";
+        ",\"extruder_id\":1,\"curr_temp\":0,\"tar_temp\":" +
+        temperature + "}}";
     enqueueRemoteControl("LOAD_FILAMENT", payload);
   } else if (head == "H2D_FILAMENT_UNLOAD") {
     if (!isUnsignedDecimal(argument)) {
@@ -2874,7 +2833,7 @@ void handlePhoneCommand(String command) {
       return;
     }
     const int amsID = argument.toInt();
-    if (amsID != 255) {
+    if (amsID != 254) {
       queuePhoneEvent(
           "H2D,REMOTE_ERROR,UNLOAD_FILAMENT,Chỉ hỗ trợ cuộn nhựa ngoài");
       return;
@@ -2883,7 +2842,7 @@ void handlePhoneCommand(String command) {
         String("{\"print\":{\"sequence_id\":\"") +
         nextRemoteControlSequence() +
         "\",\"command\":\"ams_change_filament\",\"ams_id\":" + amsID +
-        ",\"slot_id\":255,\"target\":255}}";
+        ",\"slot_id\":255,\"target\":255,\"extruder_id\":1}}";
     enqueueRemoteControl("UNLOAD_FILAMENT", payload);
   } else if (head == "H2D_AMS_CONTROL") {
     String action = argument;
@@ -3459,7 +3418,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.21.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.22.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

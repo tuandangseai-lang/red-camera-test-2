@@ -680,19 +680,6 @@ final class H2DBLEManager: NSObject, ObservableObject {
         sendPrinterControl("H2D_PRINT_STOP", waitingText: "Đang gửi lệnh dừng bản in…")
     }
 
-    func skipSelectedPrintObjects(_ objectIDs: [Int]) {
-        let normalized = Array(Set(objectIDs.filter { (0...9999).contains($0) })).sorted()
-        guard !normalized.isEmpty, normalized.count <= 24 else {
-            failPrinterControlLocally("Danh sách vật thể không hợp lệ")
-            return
-        }
-        let payload = normalized.map(String.init).joined(separator: ",")
-        sendPrinterControl(
-            "H2D_SKIP_OBJECTS,\(payload)",
-            waitingText: "Đang gửi lệnh bỏ qua \(normalized.count) vật thể…"
-        )
-    }
-
     func loadFilament(amsID: Int, slotID: Int, target: Int, temperature: Int) {
         guard (0...255).contains(amsID), (0...254).contains(slotID),
               (0...254).contains(target), (170...320).contains(temperature) else {
@@ -1244,7 +1231,6 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 "PAUSE": "Máy in đã xác nhận tạm dừng",
                 "RESUME": "Máy in đã xác nhận tiếp tục",
                 "STOP": "Máy in đã xác nhận dừng bản in",
-                "SKIP_OBJECTS": "Máy in đã nhận danh sách vật thể bỏ qua",
                 "LOAD_FILAMENT": "Máy in đã xác nhận nạp nhựa",
                 "UNLOAD_FILAMENT": "Máy in đã xác nhận rút nhựa",
                 "AMS_RESUME": "AMS đã xác nhận tiếp tục",
