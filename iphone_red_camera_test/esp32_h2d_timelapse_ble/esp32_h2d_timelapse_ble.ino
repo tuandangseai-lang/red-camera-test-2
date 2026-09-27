@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.22.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.23.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -60,17 +60,18 @@ constexpr uint16_t MQTT_KEEPALIVE_SECONDS = 60;
 // A lightweight TCP reachability sweep is independent from MQTT. This lets
 // the three status pixels distinguish a powered printer (yellow) from a truly
 // offline printer (black), even while the selected printer is reconnecting.
-constexpr uint32_t FLEET_PROBE_PERIOD_MS = 900;
-constexpr uint32_t FLEET_PROBE_TIMEOUT_MS = 350;
-constexpr uint32_t FLEET_ONLINE_GRACE_MS = 6500;
+// A blocking TCP probe every 900 ms made BLE feel sticky whenever a saved
+// printer was powered off. Probe less often with a short LAN-only timeout.
+constexpr uint32_t FLEET_PROBE_PERIOD_MS = 2500;
+constexpr uint32_t FLEET_PROBE_TIMEOUT_MS = 160;
+constexpr uint32_t FLEET_ONLINE_GRACE_MS = 9000;
 constexpr uint8_t FLEET_OFFLINE_FAILURES = 3;
-// Every fifteen seconds, temporarily preserve the selected profile, scan both
-// non-selected printers in sequence, then restore the user's selected profile.
-// The longer interval prevents rapid TLS reconnects from fragmenting heap or
-// making the iPhone state flash between colours.
+// Every fifteen seconds, sample one non-selected printer and rotate the target
+// on the next pass. The earlier two-printer burst parked the selected MQTT
+// session for several seconds at a time and made BLE/control feel laggy.
 constexpr uint32_t FLEET_REFRESH_PERIOD_MS = 15000;
-constexpr uint8_t FLEET_SAMPLES_PER_REFRESH = 2;
-constexpr uint32_t FLEET_REFRESH_WATCHDOG_MS = 14000;
+constexpr uint8_t FLEET_SAMPLES_PER_REFRESH = 1;
+constexpr uint32_t FLEET_REFRESH_WATCHDOG_MS = 8000;
 // H2D's full 22-KB pushall can arrive noticeably later than A1/P2S. Keep the
 // short-lived scanner open long enough to receive that packet, otherwise an
 // H2D fault could be missed until its profile was selected manually.
@@ -90,7 +91,7 @@ constexpr uint32_t FILAMENT_CHANGE_ERROR_GRACE_MS = 6000;
 constexpr uint32_t DATA_TIMEOUT_MS = 45000;
 constexpr uint8_t MATERIAL_SYNC_RETRY_LIMIT = 5;
 constexpr uint8_t NOZZLE_SYNC_RETRY_LIMIT = 8;
-constexpr uint32_t BLE_NOTIFY_GAP_MS = 22;
+constexpr uint32_t BLE_NOTIFY_GAP_MS = 12;
 constexpr uint32_t CONFIG_NETWORK_QUIET_MS = 8000;
 constexpr uint8_t EVENT_QUEUE_SIZE = 24;
 constexpr size_t EVENT_LENGTH = 150;
@@ -236,7 +237,7 @@ uint32_t nextFleetMonitorAttemptAt = 0;
 uint8_t fleetMonitorCursor = 0;
 uint8_t nextFleetMonitorSlot = 0;
 uint8_t fleetSamplesThisRefresh = 0;
-volatile bool fleetRefreshRequested = true;
+volatile bool fleetRefreshRequested = false;
 bool fleetRefreshInProgress = false;
 uint32_t lastFleetProbeAt = 0;
 uint8_t nextFleetProbeIndex = 0;
@@ -1912,7 +1913,10 @@ void refreshFleetMonitorAssignments() {
     activeFleetMonitorSince = 0;
     fleetSampleReceived = false;
     fleetRefreshInProgress = false;
-    fleetRefreshRequested = true;
+    // Give the selected printer a full stable interval after boot/profile sync
+    // before borrowing TLS memory for the first background sample.
+    fleetRefreshRequested = false;
+    lastFleetRefreshAt = millis();
     fleetMonitorCursor = 0;
   }
 }
@@ -2068,7 +2072,7 @@ void maintainFleetReachability() {
   // The selected MQTT connection itself is stronger proof of reachability and
   // avoids opening a redundant socket to that printer.
   if (static_cast<int8_t>(profileIndex) == selectedFleetIndex &&
-      mqttWasConnected) {
+      (mqttWasConnected || fleetPrimaryPaused || fleetRefreshInProgress)) {
     markFleetReachable(profileIndex, now);
     return;
   }
@@ -2553,7 +2557,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.22.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.23.0");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2812,6 +2816,8 @@ void handlePhoneCommand(String command) {
     const int slotID = slotText.toInt();
     const int target = targetText.toInt();
     const int temperature = temperatureText.toInt();
+    const int externalExtruderID =
+        printerModelFromSerial(settings.printerSerial) == "H2D" ? 1 : 0;
     const bool externalSpool = amsID == 254 && slotID == 0 && target == 254;
     if (!externalSpool || temperature < 170 || temperature > 320) {
       queuePhoneEvent(
@@ -2823,7 +2829,8 @@ void handlePhoneCommand(String command) {
         nextRemoteControlSequence() +
         "\",\"command\":\"ams_change_filament\",\"ams_id\":" + amsID +
         ",\"slot_id\":" + slotID + ",\"target\":" + target +
-        ",\"extruder_id\":1,\"curr_temp\":0,\"tar_temp\":" +
+        ",\"extruder_id\":" + externalExtruderID +
+        ",\"curr_temp\":0,\"tar_temp\":" +
         temperature + "}}";
     enqueueRemoteControl("LOAD_FILAMENT", payload);
   } else if (head == "H2D_FILAMENT_UNLOAD") {
@@ -2833,6 +2840,8 @@ void handlePhoneCommand(String command) {
       return;
     }
     const int amsID = argument.toInt();
+    const int externalExtruderID =
+        printerModelFromSerial(settings.printerSerial) == "H2D" ? 1 : 0;
     if (amsID != 254) {
       queuePhoneEvent(
           "H2D,REMOTE_ERROR,UNLOAD_FILAMENT,Chỉ hỗ trợ cuộn nhựa ngoài");
@@ -2842,7 +2851,8 @@ void handlePhoneCommand(String command) {
         String("{\"print\":{\"sequence_id\":\"") +
         nextRemoteControlSequence() +
         "\",\"command\":\"ams_change_filament\",\"ams_id\":" + amsID +
-        ",\"slot_id\":255,\"target\":255,\"extruder_id\":1}}";
+        ",\"slot_id\":255,\"target\":255,\"extruder_id\":" +
+        externalExtruderID + "}}";
     enqueueRemoteControl("UNLOAD_FILAMENT", payload);
   } else if (head == "H2D_AMS_CONTROL") {
     String action = argument;
@@ -3418,7 +3428,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.22.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.23.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

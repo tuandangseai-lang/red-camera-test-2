@@ -21,7 +21,6 @@ struct H2DTimelapseView: View {
     @State private var wifiPassword = ""
     @State private var accessCode = ""
     @State private var showConfiguration = true
-    @State private var idlePulse = false
     @State private var showStopOptions = false
     @State private var automaticConfigurationAttempted = false
     @State private var selectedPrinterKind: BambuPrinterKind = .h2d
@@ -168,19 +167,6 @@ struct H2DTimelapseView: View {
                     }
                 }
             }
-            .task {
-                // Give the selected printer first use of the ESP32 TLS session.
-                // A fleet scan pauses that session, so starting the scan at the
-                // same moment as initial telemetry made IDLE values intermittent.
-                try? await Task.sleep(nanoseconds: 8_000_000_000)
-                guard !Task.isCancelled else { return }
-                bluetooth.requestFleetRefresh()
-                while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 120_000_000_000)
-                    guard !Task.isCancelled else { return }
-                    bluetooth.requestFleetRefresh()
-                }
-            }
             .onChange(of: bluetooth.printerSerial) { _, _ in
                 reconcileBridgeWithSelectedProfile()
             }
@@ -316,9 +302,6 @@ struct H2DTimelapseView: View {
                 !printerSerial.isEmpty && !accessCode.isEmpty {
                 showConfiguration = false
             }
-            withAnimation(.linear(duration: 0.18).repeatForever(autoreverses: true)) {
-                idlePulse = true
-            }
             updateCompletionPresentation(for: bluetooth.h2dPrintState)
             timelapse.didStoreFrame = { layer, success in
                 bluetooth.acknowledgeH2DFrame(layer: layer, success: success)
@@ -443,11 +426,6 @@ struct H2DTimelapseView: View {
                 .fill(printerIslandState.color)
                 .frame(width: 9, height: 9)
                 .shadow(color: printerIslandState.color.opacity(0.8), radius: 5)
-                .opacity(
-                    printerIslandState == .error
-                        ? (idlePulse ? 1 : 0.18)
-                        : 1
-                )
         }
         .padding(.horizontal, 13)
         .frame(height: 43)
@@ -471,13 +449,14 @@ struct H2DTimelapseView: View {
         .accessibilityLabel(localizedStatus(printerIslandTitle))
     }
 
-    /// Keep the screen edge quiet during normal use. It is reserved for the
-    /// two states that require immediate attention: a printer fault or an
-    /// active stop request. Keep the red edge steady: rapid opacity animation
-    /// looked like the whole iPhone screen was juddering during an alarm.
+    /// Keep the screen edge quiet during normal use. It is reserved for a
+    /// confirmed printer fault. Keep the red edge steady: rapid opacity
+    /// animation looked like the whole iPhone screen was juddering.
     private var screenEdgeLEDStrip: some View {
-        let isError = printerIslandState == .error
-        let shouldShowEdge = isError || printerIslandState == .stopping
+        // The full-screen edge is reserved for a confirmed printer fault.
+        // Transient MQTT/bridge retries remain visible in the compact Island,
+        // but may no longer flash the entire screen red during fleet polling.
+        let shouldShowEdge = bluetooth.hasSelectedCriticalPrinterAlert
 
         return ScreenEdgeLEDStrip(
             color: .red,
@@ -596,6 +575,7 @@ struct H2DTimelapseView: View {
                         printerName: printerName,
                         profile: activeControlProfile,
                         accessCode: accessCode,
+                        languageCode: appLanguageCode,
                         alarmActive: bluetooth.hasActiveCriticalPrinterAlert,
                         alarmAcknowledged: bluetooth.hasActiveCriticalPrinterAlert &&
                             acknowledgedAlarmID == currentAlarmID,
@@ -707,7 +687,7 @@ struct H2DTimelapseView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(appLanguageCode == "vi" ? "Đổi sang tiếng Anh" : "Switch to Vietnamese")
 
-                    Text("V9.78")
+                    Text("V9.79")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.34))
                 }

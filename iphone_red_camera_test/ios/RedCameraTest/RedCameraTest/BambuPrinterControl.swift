@@ -79,11 +79,15 @@ final class BambuPrinterControlManager: ObservableObject {
         send(section: "print", command: "stop", fields: [:], actionName: "Dừng")
     }
 
-    /// On H2D, virtual tray 254 and extruder id 1 are the left external-spool
-    /// path. Keep this explicit so the right nozzle is never selected.
-    func loadExternalFilamentIntoLeftNozzle(temperature: Int) {
+    /// H2D uses extruder 1 for its left external-spool path. Single-nozzle
+    /// printers (A1/A1 mini/P2S) use their only extruder, id 0.
+    func loadExternalFilament(temperature: Int, extruderID: Int) {
         guard (170...320).contains(temperature) else {
             publishFailure("Nhiệt độ nạp nhựa không hợp lệ")
+            return
+        }
+        guard extruderID == 0 || extruderID == 1 else {
+            publishFailure("Đầu đùn nạp nhựa không hợp lệ")
             return
         }
         send(
@@ -93,17 +97,23 @@ final class BambuPrinterControlManager: ObservableObject {
                 "ams_id": 254,
                 "slot_id": 0,
                 "target": 254,
-                "extruder_id": 1,
+                "extruder_id": extruderID,
                 "curr_temp": 0,
                 "tar_temp": temperature
             ],
-            actionName: "Nạp nhựa cuộn ngoài vào đầu trái"
+            actionName: extruderID == 1
+                ? "Nạp nhựa cuộn ngoài vào đầu trái"
+                : "Nạp nhựa cuộn ngoài"
         )
     }
 
-    func unloadExternalFilamentFromLeftNozzle(temperature: Int) {
+    func unloadExternalFilament(temperature: Int, extruderID: Int) {
         guard (170...320).contains(temperature) else {
             publishFailure("Nhiệt độ rút nhựa không hợp lệ")
+            return
+        }
+        guard extruderID == 0 || extruderID == 1 else {
+            publishFailure("Đầu đùn rút nhựa không hợp lệ")
             return
         }
         send(
@@ -113,11 +123,13 @@ final class BambuPrinterControlManager: ObservableObject {
                 "ams_id": 254,
                 "slot_id": 255,
                 "target": 255,
-                "extruder_id": 1,
+                "extruder_id": extruderID,
                 "curr_temp": 0,
                 "tar_temp": temperature
             ],
-            actionName: "Rút nhựa cuộn ngoài khỏi đầu trái"
+            actionName: extruderID == 1
+                ? "Rút nhựa cuộn ngoài khỏi đầu trái"
+                : "Rút nhựa cuộn ngoài"
         )
     }
 

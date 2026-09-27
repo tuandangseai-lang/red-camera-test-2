@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.78 build157 - hop nhat phong cho va dieu khien
+name: Tao IPA SE v9.79 build158 - ket noi muot va dieu khien song ngu
 
 on:
   workflow_dispatch:
@@ -185,6 +185,9 @@ jobs:
           grep -q "alarmNeedsAttention" "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q "Tắt cảnh báo" "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q "NHỰA CUỘN NGOÀI • ĐẦU TRÁI" "RedCameraTest/PrinterRemoteControlView.swift"
+          grep -q 'usesLeftNozzlePath ? "Rút đầu trái" : "Rút nhựa"' "RedCameraTest/PrinterRemoteControlView.swift"
+          grep -q 'languageCode: appLanguageCode' "RedCameraTest/H2DTimelapseView.swift"
+          grep -q 'Preparing direct controls' "RedCameraTest/SELanguage.swift"
           ! grep -q "CAMERA MÁY IN\|CHẠM VẬT THỂ CẦN BỎ QUA" "RedCameraTest/PrinterRemoteControlView.swift"
           ! grep -q "objectIDsText\|filamentSource\|selectedObjectIDs" "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q "BambuPrinterControl.swift" project.yml
@@ -192,8 +195,9 @@ jobs:
           ! grep -q 'command: "skip_objects"' "RedCameraTest/BambuPrinterControl.swift"
           grep -q '"target": 254' "RedCameraTest/BambuPrinterControl.swift"
           grep -q '"ams_id": 254' "RedCameraTest/BambuPrinterControl.swift"
-          grep -q '"extruder_id": 1' "RedCameraTest/BambuPrinterControl.swift"
+          grep -q '"extruder_id": extruderID' "RedCameraTest/BambuPrinterControl.swift"
           grep -q "blinks: false" "RedCameraTest/H2DTimelapseView.swift"
+          ! grep -q "idlePulse" "RedCameraTest/H2DTimelapseView.swift"
           ! grep -q "ESP32-C3" "RedCameraTest/H2DTimelapseView.swift"
           /usr/libexec/PlistBuddy -c "Print :NSLocalNetworkUsageDescription" "$PLIST"
           ! grep -q "NSMicrophoneUsageDescription" "$PLIST"
@@ -238,19 +242,19 @@ jobs:
           test -f "$APP_PATH/en.lproj/Localizable.strings"
           test -f "$APP_PATH/vi.lproj/Localizable.strings"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.78"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "157"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.79"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "158"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.78-build157-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.79-build158-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.78-build157-unsigned-ipa
-          path: SE-v9.78-build157-unsigned.ipa
+          name: SE-v9.79-build158-unsigned-ipa
+          path: SE-v9.79-build158-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -315,8 +319,10 @@ jobs:
           grep -q 'maintainFleetMonitors' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'FLEET_REFRESH_PERIOD_MS = 15000' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'FLEET_MONITOR_DWELL_MS = 3000' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'FLEET_SAMPLES_PER_REFRESH = 2' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'FLEET_REFRESH_WATCHDOG_MS = 14000' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'FLEET_SAMPLES_PER_REFRESH = 1' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'FLEET_REFRESH_WATCHDOG_MS = 8000' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'FLEET_PROBE_PERIOD_MS = 2500' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'BLE_NOTIFY_GAP_MS = 12' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'FLEET_MQTT_BUFFER_BYTES = 24576' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'H2D_FLEET_REFRESH' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'BUZZER_PIN = 33' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
@@ -378,7 +384,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.22.0
+          name: SE-Bambu-ESP32-v1.23.0
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7
