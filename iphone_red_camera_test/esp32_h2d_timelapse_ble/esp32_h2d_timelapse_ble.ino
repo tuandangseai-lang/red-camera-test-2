@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.23.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.24.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -284,6 +284,9 @@ bool hmsAlertActive = false;
 bool printErrorActive = false;
 bool criticalAlarmLatched = false;
 bool physicalCriticalAcknowledged = false;
+volatile uint32_t phoneReportedCriticalCode = 0;
+volatile uint32_t phoneReportedCriticalUntil = 0;
+volatile bool phoneReportedCriticalAcknowledged = false;
 volatile bool buzzerEnabled = true;
 volatile uint8_t buzzerVolumePercent = 100;
 volatile uint8_t ledBrightnessPercent = Config::LED_DEFAULT_BRIGHTNESS_PERCENT;
@@ -592,6 +595,10 @@ void syncSelectedFleetRuntime(bool forceReport = false) {
 }
 
 bool hasAnyFleetCriticalError() {
+  if (phoneReportedCriticalCode != 0 &&
+      static_cast<int32_t>(phoneReportedCriticalUntil - millis()) > 0) {
+    return true;
+  }
   if (criticalAlarmLatched && !isStoppedPrintState(printState)) return true;
   for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
     if (fleetProfiles[i].complete() && fleetRuntimeCritical(fleetRuntimes[i])) {
@@ -602,6 +609,11 @@ bool hasAnyFleetCriticalError() {
 }
 
 bool hasAnyFleetPhysicalCriticalError() {
+  if (phoneReportedCriticalCode != 0 &&
+      static_cast<int32_t>(phoneReportedCriticalUntil - millis()) > 0 &&
+      !phoneReportedCriticalAcknowledged) {
+    return true;
+  }
   if (criticalAlarmLatched && !isStoppedPrintState(printState) &&
       !physicalCriticalAcknowledged) {
     return true;
@@ -708,6 +720,9 @@ void resetPrinterRuntimeForProfileSwitch() {
   hmsAlertActive = false;
   printErrorActive = false;
   criticalAlarmLatched = false;
+  phoneReportedCriticalCode = 0;
+  phoneReportedCriticalUntil = 0;
+  phoneReportedCriticalAcknowledged = false;
   lastReportedPrinterAlert = false;
   lastReportedPrinterAlertCritical = false;
   printErrorCode = 0;
@@ -2557,7 +2572,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.23.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.24.0");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2958,6 +2973,38 @@ void handlePhoneCommand(String command) {
     queueHardwareControl("LED_BRIGHTNESS", ledBrightnessPercent);
   } else if (head == "H2D_BEEP") {
     requestBuzzerBeep();
+  } else if (head == "H2D_HOST_FAULT") {
+    const int separator = argument.indexOf(',');
+    if (separator <= 0) return;
+    String serial = argument.substring(0, separator);
+    serial.trim();
+    serial.toUpperCase();
+    String selectedSerial = settings.printerSerial;
+    selectedSerial.trim();
+    selectedSerial.toUpperCase();
+    if (serial != selectedSerial) return;
+    const uint32_t code = static_cast<uint32_t>(
+        strtoul(argument.substring(separator + 1).c_str(), nullptr, 10));
+    if (code == 0) return;
+    if (phoneReportedCriticalCode != code) {
+      phoneReportedCriticalAcknowledged = false;
+    }
+    phoneReportedCriticalCode = code;
+    // The iPhone renews a confirmed LAN fault while its direct MQTT report is
+    // fresh. An app disconnect cannot leave a stale physical siren latched.
+    phoneReportedCriticalUntil = millis() + 75000;
+  } else if (head == "H2D_HOST_FAULT_CLEAR") {
+    String serial = argument;
+    serial.trim();
+    serial.toUpperCase();
+    String selectedSerial = settings.printerSerial;
+    selectedSerial.trim();
+    selectedSerial.toUpperCase();
+    if (serial == selectedSerial) {
+      phoneReportedCriticalCode = 0;
+      phoneReportedCriticalUntil = 0;
+      phoneReportedCriticalAcknowledged = false;
+    }
   } else if (head == "H2D_ALARM_ACK") {
     // The iPhone OK button acknowledges the incidents that are active right
     // now, regardless of which printer tab is selected. The fault remains red
@@ -2966,6 +3013,7 @@ void handlePhoneCommand(String command) {
     if (criticalAlarmLatched && !isStoppedPrintState(printState)) {
       physicalCriticalAcknowledged = true;
     }
+    phoneReportedCriticalAcknowledged = true;
     for (uint8_t i = 0; i < FLEET_PRINTER_COUNT; ++i) {
       if (fleetRuntimeCritical(fleetRuntimes[i])) {
         fleetRuntimes[i].physicalAlarmAcknowledged = true;
@@ -3428,7 +3476,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.23.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.24.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

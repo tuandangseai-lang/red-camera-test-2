@@ -14,7 +14,7 @@ struct PrinterRemoteControlView: View {
     let alarmAcknowledged: Bool
     let onSilenceAlarm: () -> Void
 
-    @StateObject private var directControl = BambuPrinterControlManager()
+    @ObservedObject var directControl: BambuPrinterControlManager
     @State private var filamentTemperature = 220
     @State private var automaticTemperatureSignature = ""
     @State private var printSpeed = 2
@@ -61,7 +61,6 @@ struct PrinterRemoteControlView: View {
             startDirectControl()
             updateAlarmPulse()
         }
-        .onDisappear { directControl.stop() }
         .onChange(of: profile.id) { _, _ in startDirectControl() }
         .onChange(of: accessCode) { _, _ in startDirectControl() }
         .onChange(of: bluetooth.filamentType) { _, _ in applyAutomaticFilamentTemperature() }

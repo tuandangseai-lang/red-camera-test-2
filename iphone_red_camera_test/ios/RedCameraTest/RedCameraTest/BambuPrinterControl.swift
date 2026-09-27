@@ -3,6 +3,37 @@ import Foundation
 import Network
 import Security
 
+struct BambuDirectSnapshot: Equatable {
+    var printState = ""
+    var printPercent: Int?
+    var currentLayer: Int?
+    var totalLayers: Int?
+    var remainingMinutes: Int?
+    var nozzleTemperature: Int?
+    var nozzleTargetTemperature: Int?
+    var leftNozzleTemperature: Int?
+    var leftNozzleTargetTemperature: Int?
+    var bedTemperature: Int?
+    var bedTargetTemperature: Int?
+    var printErrorCode: UInt32?
+    var receivedAt: Date?
+
+    var isRecent: Bool {
+        guard let receivedAt else { return false }
+        return Date().timeIntervalSince(receivedAt) < 35
+    }
+
+    var hasActivePrintJob: Bool {
+        ["RUNNING", "PREPARE", "PREPARING", "PAUSE", "PAUSED", "SLICING", "INIT", "HEATING"]
+            .contains(printState)
+    }
+
+    var hasCriticalError: Bool {
+        printState == "ERROR" ||
+            ((printErrorCode ?? 0) != 0 && (hasActivePrintJob || printState == "FAILED"))
+    }
+}
+
 /// Direct LAN MQTT control for the selected printer. Control no longer depends
 /// on the ESP32's MQTT session, so a BLE reconnect or fleet scan cannot swallow
 /// a user command. The ESP32 remains responsible for telemetry and timelapse.
@@ -11,12 +42,14 @@ final class BambuPrinterControlManager: ObservableObject {
     @Published private(set) var isPending = false
     @Published private(set) var lastSucceeded: Bool?
     @Published private(set) var statusText = "Đang chuẩn bị điều khiển trực tiếp…"
+    @Published private(set) var snapshot = BambuDirectSnapshot()
 
     private struct Configuration: Equatable {
         let profileID: String
         let host: String
         let serial: String
         let accessCode: String
+        let isDualNozzle: Bool
     }
 
     private struct PendingCommand {
@@ -35,13 +68,16 @@ final class BambuPrinterControlManager: ObservableObject {
     private var sequenceNumber: UInt64 = 200_000
     private var pending: PendingCommand?
     private var pingTimer: DispatchSourceTimer?
+    private var snapshotStorage = BambuDirectSnapshot()
+    private var lastFullStatusRequest = Date.distantPast
 
     func start(profile: BambuPrinterProfile, accessCode: String) {
         let next = Configuration(
             profileID: profile.id,
             host: profile.ip.trimmingCharacters(in: .whitespacesAndNewlines),
             serial: profile.serial.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
-            accessCode: accessCode.trimmingCharacters(in: .whitespacesAndNewlines)
+            accessCode: accessCode.trimmingCharacters(in: .whitespacesAndNewlines),
+            isDualNozzle: profile.kind == .h2d
         )
         guard !next.host.isEmpty, !next.serial.isEmpty, !next.accessCode.isEmpty else {
             publishFailure("Thiếu IP, serial hoặc Access Code của máy in")
@@ -50,6 +86,10 @@ final class BambuPrinterControlManager: ObservableObject {
         queue.async { [weak self] in
             guard let self else { return }
             if self.configuration == next, self.connection != nil { return }
+            self.snapshotStorage = BambuDirectSnapshot()
+            DispatchQueue.main.async { [weak self] in
+                self?.snapshot = BambuDirectSnapshot()
+            }
             self.configuration = next
             self.connect()
         }
@@ -349,10 +389,76 @@ final class BambuPrinterControlManager: ObservableObject {
     private func handleReport(_ root: [String: Any]) {
         if let print = root["print"] as? [String: Any] {
             confirmPendingIfMatched(section: print)
+            updateSnapshot(from: print)
         }
         if let system = root["system"] as? [String: Any] {
             confirmPendingIfMatched(section: system)
         }
+    }
+
+    private func updateSnapshot(from report: [String: Any]) {
+        var next = snapshotStorage
+        var changed = false
+        func number(_ value: Any?) -> Int? {
+            if let value = value as? NSNumber { return value.intValue }
+            if let value = value as? String { return Int(value) }
+            return nil
+        }
+        func update(_ key: String, _ field: WritableKeyPath<BambuDirectSnapshot, Int?>) {
+            guard let value = number(report[key]) else { return }
+            next[keyPath: field] = value
+            changed = true
+        }
+
+        if let state = report["gcode_state"] as? String {
+            next.printState = state.uppercased()
+            if report["print_error"] == nil,
+               (!next.hasActivePrintJob && next.printState != "ERROR" && next.printState != "FAILED" ||
+                   !snapshotStorage.hasActivePrintJob && next.hasActivePrintJob) {
+                next.printErrorCode = 0
+            }
+            changed = true
+        }
+        update("mc_percent", \.printPercent)
+        update("layer_num", \.currentLayer)
+        update("total_layer_num", \.totalLayers)
+        update("mc_remaining_time", \.remainingMinutes)
+        update("bed_temper", \.bedTemperature)
+        update("bed_target_temper", \.bedTargetTemperature)
+
+        if configuration?.isDualNozzle == true,
+           let extruder = report["extruder"] as? [String: Any],
+           let info = extruder["info"] as? [[String: Any]] {
+            for (index, entry) in info.enumerated() {
+                guard let packed = number(entry["temp"]), packed >= 0 else { continue }
+                let id = number(entry["id"]) ?? index
+                let actual = packed & 0xFFFF
+                let target = (packed >> 16) & 0xFFFF
+                if id == 0 {
+                    next.nozzleTemperature = actual
+                    next.nozzleTargetTemperature = target
+                    changed = true
+                } else if id == 1 {
+                    next.leftNozzleTemperature = actual
+                    next.leftNozzleTargetTemperature = target
+                    changed = true
+                }
+            }
+        } else if configuration?.isDualNozzle == false {
+            update("nozzle_temper", \.nozzleTemperature)
+            update("nozzle_target_temper", \.nozzleTargetTemperature)
+        }
+
+        if let error = number(report["print_error"]), error >= 0 {
+            next.printErrorCode = UInt32(truncatingIfNeeded: error)
+            changed = true
+        }
+        guard changed else { return }
+        next.receivedAt = Date()
+        guard next != snapshotStorage else { return }
+        snapshotStorage = next
+        let publishedSnapshot = next
+        DispatchQueue.main.async { [weak self] in self?.snapshot = publishedSnapshot }
     }
 
     private func confirmPendingIfMatched(section: [String: Any]) {
@@ -431,6 +537,7 @@ final class BambuPrinterControlManager: ObservableObject {
 
     private func requestPushAll() {
         guard let configuration, connection != nil else { return }
+        lastFullStatusRequest = Date()
         sequenceNumber &+= 1
         let root: [String: Any] = [
             "pushing": [
@@ -453,7 +560,20 @@ final class BambuPrinterControlManager: ObservableObject {
         pingTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 12, repeating: 12)
-        timer.setEventHandler { [weak self] in self?.sendPacket(Data([0xC0, 0x00])) }
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.sendPacket(Data([0xC0, 0x00]))
+            let missingData = self.snapshotStorage.printState.isEmpty ||
+                self.snapshotStorage.bedTemperature == nil ||
+                self.snapshotStorage.hasCriticalError ||
+                (self.configuration?.isDualNozzle == true
+                    ? self.snapshotStorage.leftNozzleTemperature == nil
+                    : self.snapshotStorage.nozzleTemperature == nil)
+            let refreshInterval: TimeInterval = missingData ? 24 : 60
+            if Date().timeIntervalSince(self.lastFullStatusRequest) >= refreshInterval {
+                self.requestPushAll()
+            }
+        }
         pingTimer = timer
         timer.resume()
     }
@@ -531,8 +651,16 @@ final class BambuPrinterControlManager: ObservableObject {
     private func failConnection(_ text: String) {
         connection?.cancel()
         connection = nil
+        pingTimer?.cancel()
+        pingTimer = nil
         pending = nil
         publishFailure(text)
+        let failedGeneration = generation
+        queue.asyncAfter(deadline: .now() + 4) { [weak self] in
+            guard let self, self.generation == failedGeneration,
+                  self.configuration != nil, self.connection == nil else { return }
+            self.connect()
+        }
     }
 
     private func humanReadablePrinterError(_ reason: String) -> String {

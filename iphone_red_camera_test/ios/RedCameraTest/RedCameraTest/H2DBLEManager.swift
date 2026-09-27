@@ -668,6 +668,16 @@ final class H2DBLEManager: NSObject, ObservableObject {
         _ = send("H2D_ALARM_ACK")
     }
 
+    @discardableResult
+    func relayDirectPrinterFault(serial: String, code: UInt32?) -> Bool {
+        let normalized = normalizeSerial(serial)
+        guard !normalized.isEmpty else { return false }
+        if let code, code != 0 {
+            return send("H2D_HOST_FAULT,\(normalized),\(code)")
+        }
+        return send("H2D_HOST_FAULT_CLEAR,\(normalized)")
+    }
+
     func pauseSelectedPrint() {
         sendPrinterControl("H2D_PRINT_PAUSE", waitingText: "Đang gửi lệnh tạm dừng…")
     }
