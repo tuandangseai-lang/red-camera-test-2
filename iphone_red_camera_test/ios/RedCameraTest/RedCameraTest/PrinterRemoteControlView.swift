@@ -23,9 +23,9 @@ struct PrinterRemoteControlView: View {
     @State private var showsUtilityControls = false
     @State private var alarmPulse = false
 
-    private let cyan = Color(red: 0.18, green: 0.88, blue: 0.96)
-    private let amber = Color(red: 0.96, green: 0.61, blue: 0.20)
-    private let green = Color(red: 0.20, green: 0.94, blue: 0.57)
+    private let cyan = Color(red: 0.12, green: 0.48, blue: 0.46)
+    private let amber = Color(red: 0.78, green: 0.48, blue: 0.10)
+    private let green = Color(red: 0.16, green: 0.58, blue: 0.38)
 
     private var controlsReady: Bool {
         directControl.isReady && !directControl.isPending
@@ -44,18 +44,18 @@ struct PrinterRemoteControlView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
+        VStack(alignment: .leading, spacing: 14) {
             controlHeader
-            Divider().overlay(.white.opacity(0.08))
+            Divider().overlay(.black.opacity(0.08))
             quickActions
             filamentControls
             utilityControls
         }
-        .padding(15)
-        .background(.black.opacity(0.46), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(16)
+        .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(cyan.opacity(0.20), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(.black.opacity(0.08), lineWidth: 1)
         }
         .onAppear {
             startDirectControl()
@@ -111,19 +111,14 @@ struct PrinterRemoteControlView: View {
     private var controlHeader: some View {
         HStack(spacing: 10) {
             Image(systemName: "slider.horizontal.3")
-                .font(.system(size: 18, weight: .bold))
+                .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(cyan)
-                .frame(width: 34, height: 34)
-                .background(cyan.opacity(0.12), in: Circle())
+                .frame(width: 32, height: 32)
+                .background(cyan.opacity(0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text("\(localized("ĐIỀU KHIỂN")) \(printerName.uppercased())")
-                    .font(.system(size: 12, weight: .black, design: .monospaced))
-                Text(localized(directControl.statusText))
-                    .font(.system(size: 9, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.52))
-                    .lineLimit(2)
-            }
+            Text("\(localized("Điều khiển")) \(printerName)")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.primary)
 
             Spacer(minLength: 6)
 
@@ -133,7 +128,6 @@ struct PrinterRemoteControlView: View {
                 Circle()
                     .fill(directControl.isReady ? green : amber)
                     .frame(width: 8, height: 8)
-                    .shadow(color: directControl.isReady ? green : amber, radius: 5)
             }
 
             if !directControl.isReady && !directControl.isPending {
@@ -148,11 +142,13 @@ struct PrinterRemoteControlView: View {
                 .accessibilityLabel(localized("Kết nối lại điều khiển máy in"))
             }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(localized(directControl.statusText))
     }
 
     private var quickActions: some View {
         VStack(alignment: .leading, spacing: 9) {
-            controlTitle("THAO TÁC NHANH", icon: "hand.tap.fill")
+            controlTitle("Thao tác nhanh", icon: "hand.tap.fill")
 
             HStack(spacing: 8) {
                 Button {
@@ -223,8 +219,8 @@ struct PrinterRemoteControlView: View {
                     Image(systemName: "thermometer.medium")
                         .foregroundStyle(amber)
                     Text(localized(filamentTemperatureDescription))
-                        .font(.system(size: 10, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.54))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
                     Spacer(minLength: 4)
                     Button(localized("Theo máy")) { applyAutomaticFilamentTemperature(force: true) }
                         .font(.system(size: 10, weight: .bold, design: .rounded))
@@ -258,14 +254,14 @@ struct PrinterRemoteControlView: View {
                 Text(localized(usesLeftNozzlePath
                     ? "Chỉ dùng cuộn ngoài bên trái của H2D; không chọn và không chạy motor AMS."
                     : "Chỉ dùng cuộn ngoài; không chọn và không chạy motor AMS."))
-                    .font(.system(size: 9, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.42))
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.top, 10)
         } label: {
             controlTitle(
-                usesLeftNozzlePath ? "NHỰA CUỘN NGOÀI • ĐẦU TRÁI" : "NHỰA CUỘN NGOÀI",
+                usesLeftNozzlePath ? "Nhựa cuộn ngoài • đầu trái" : "Nhựa cuộn ngoài",
                 icon: "arrow.triangle.2.circlepath"
             )
         }
@@ -302,13 +298,13 @@ struct PrinterRemoteControlView: View {
                     Button(localized("Tắt đèn")) { directControl.setChamberLight(enabled: false) }
                         .frame(maxWidth: .infinity)
                         .buttonStyle(.bordered)
-                        .tint(.white.opacity(0.72))
+                        .tint(.secondary)
                         .disabled(!controlsReady)
                 }
             }
             .padding(.top, 10)
         } label: {
-            controlTitle("TỐC ĐỘ & ĐÈN BUỒNG IN", icon: "slider.horizontal.3")
+            controlTitle("Tốc độ và đèn buồng in", icon: "slider.horizontal.3")
         }
         .tint(cyan)
     }
@@ -318,7 +314,7 @@ struct PrinterRemoteControlView: View {
             Image(systemName: icon)
                 .font(.system(size: 15, weight: .bold))
             Text(localized(title))
-                .font(.system(size: 9, weight: .black, design: .rounded))
+                .font(.system(size: 11, weight: .semibold))
                 .lineLimit(1)
                 .minimumScaleFactor(0.68)
         }
@@ -389,8 +385,8 @@ struct PrinterRemoteControlView: View {
 
     private func controlTitle(_ title: String, icon: String) -> some View {
         Label(localized(title), systemImage: icon)
-            .font(.system(size: 10, weight: .black, design: .monospaced))
-            .foregroundStyle(cyan.opacity(0.88))
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.primary)
     }
 
     private func localized(_ source: String) -> String {
@@ -472,11 +468,11 @@ private struct RemoteActionButtonStyle: ButtonStyle {
             .padding(.horizontal, 7)
             .frame(minHeight: 48)
             .foregroundStyle(tint)
-            .background(tint.opacity(configuration.isPressed ? 0.24 : 0.12))
-            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .background(tint.opacity(configuration.isPressed ? 0.16 : 0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .stroke(tint.opacity(0.34), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(tint.opacity(0.18), lineWidth: 1)
             }
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
     }

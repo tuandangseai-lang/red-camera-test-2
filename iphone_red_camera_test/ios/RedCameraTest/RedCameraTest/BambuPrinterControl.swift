@@ -23,6 +23,7 @@ final class BambuPrinterControlManager: ObservableObject {
         let sequence: String
         let mqttCommand: String
         let actionName: String
+        let onSuccess: (() -> Void)?
     }
 
     private let queue = DispatchQueue(label: "vn.se.bambu-printer-control", qos: .userInitiated)
@@ -90,21 +91,13 @@ final class BambuPrinterControlManager: ObservableObject {
             publishFailure("Đầu đùn nạp nhựa không hợp lệ")
             return
         }
-        send(
-            section: "print",
-            command: "ams_change_filament",
-            fields: [
-                "ams_id": 254,
-                "slot_id": 0,
-                "target": 254,
-                "extruder_id": extruderID,
-                "curr_temp": 0,
-                "tar_temp": temperature
-            ],
-            actionName: extruderID == 1
-                ? "Nạp nhựa cuộn ngoài vào đầu trái"
-                : "Nạp nhựa cuộn ngoài"
-        )
+        preheatNozzle(temperature: temperature, extruderID: extruderID) { [weak self] in
+            self?.sendExternalFilamentCommand(
+                load: true,
+                temperature: temperature,
+                extruderID: extruderID
+            )
+        }
     }
 
     func unloadExternalFilament(temperature: Int, extruderID: Int) {
@@ -116,20 +109,64 @@ final class BambuPrinterControlManager: ObservableObject {
             publishFailure("Đầu đùn rút nhựa không hợp lệ")
             return
         }
+        preheatNozzle(temperature: temperature, extruderID: extruderID) { [weak self] in
+            self?.sendExternalFilamentCommand(
+                load: false,
+                temperature: temperature,
+                extruderID: extruderID
+            )
+        }
+    }
+
+    /// Bambu Studio explicitly sets the nozzle target before a manual filament
+    /// operation. Without this step some firmwares begin the positioning/home
+    /// phase while leaving the target at 0°C. H2D needs the structured command
+    /// so the left nozzle can be addressed; single-nozzle printers use Studio's
+    /// broadly supported M104 fallback.
+    private func preheatNozzle(
+        temperature: Int,
+        extruderID: Int,
+        completion: @escaping () -> Void
+    ) {
+        if extruderID == 1 {
+            send(
+                section: "print",
+                command: "set_nozzle_temp",
+                fields: [
+                    "extruder_index": extruderID,
+                    "target_temp": temperature
+                ],
+                actionName: "Gia nhiệt đầu trái tới \(temperature)°C",
+                onSuccess: completion
+            )
+        } else {
+            send(
+                section: "print",
+                command: "gcode_line",
+                fields: ["param": "M104 S\(temperature)\n"],
+                actionName: "Gia nhiệt đầu in tới \(temperature)°C",
+                onSuccess: completion
+            )
+        }
+    }
+
+    private func sendExternalFilamentCommand(load: Bool, temperature: Int, extruderID: Int) {
         send(
             section: "print",
             command: "ams_change_filament",
             fields: [
                 "ams_id": 254,
-                "slot_id": 255,
-                "target": 255,
+                "slot_id": load ? 0 : 255,
+                "target": load ? 254 : 255,
                 "extruder_id": extruderID,
-                "curr_temp": 0,
+                // Studio supplies both the current-filament and target-filament
+                // temperatures. Zero here can leave the nozzle target unchanged.
+                "curr_temp": temperature,
                 "tar_temp": temperature
             ],
-            actionName: extruderID == 1
-                ? "Rút nhựa cuộn ngoài khỏi đầu trái"
-                : "Rút nhựa cuộn ngoài"
+            actionName: load
+                ? (extruderID == 1 ? "Nạp nhựa cuộn ngoài vào đầu trái" : "Nạp nhựa cuộn ngoài")
+                : (extruderID == 1 ? "Rút nhựa cuộn ngoài khỏi đầu trái" : "Rút nhựa cuộn ngoài")
         )
     }
 
@@ -345,7 +382,8 @@ final class BambuPrinterControlManager: ObservableObject {
         section: String,
         command: String,
         fields: [String: Any],
-        actionName: String
+        actionName: String,
+        onSuccess: (() -> Void)? = nil
     ) {
         queue.async { [weak self] in
             guard let self, let configuration = self.configuration, self.connection != nil else {
@@ -370,7 +408,8 @@ final class BambuPrinterControlManager: ObservableObject {
             self.pending = PendingCommand(
                 sequence: sequence,
                 mqttCommand: command,
-                actionName: actionName
+                actionName: actionName,
+                onSuccess: onSuccess
             )
             self.publishPending("Đang gửi trực tiếp: \(actionName)…")
             self.sendPacket(self.publishPacket(
@@ -478,6 +517,7 @@ final class BambuPrinterControlManager: ObservableObject {
     }
 
     private func completePending(success: Bool, detail: String) {
+        let continuation = success ? pending?.onSuccess : nil
         pending = nil
         DispatchQueue.main.async { [weak self] in
             self?.isPending = false
@@ -485,6 +525,7 @@ final class BambuPrinterControlManager: ObservableObject {
             self?.statusText = detail
         }
         requestPushAll()
+        continuation?()
     }
 
     private func failConnection(_ text: String) {
