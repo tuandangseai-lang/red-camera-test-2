@@ -777,6 +777,7 @@ struct H2DTimelapseView: View {
                         .frame(width: 7, height: 7)
                 }
                 Spacer()
+                captureScreenBrightnessControl
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         appLanguageCode = appLanguageCode == SEAppLanguage.vietnamese.rawValue
@@ -941,9 +942,13 @@ struct H2DTimelapseView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 1) {
                     Text(current.map(String.init) ?? "—")
                         .font(.system(size: 13, weight: .semibold))
-                    if current != nil {
+                    if let target, target > 0 {
+                        Text("/\(target)°C")
+                            .font(.system(size: 6.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    } else if current != nil {
                         Text("°C")
-                            .font(.system(size: 7, weight: .medium))
+                            .font(.system(size: 6.5, weight: .medium))
                     }
                 }
                 .monospacedDigit()
@@ -1044,13 +1049,6 @@ struct H2DTimelapseView: View {
                         .stroke(Color.black.opacity(0.08), lineWidth: 1)
                 }
 
-            HStack(alignment: .top, spacing: 7) {
-                Image(systemName: "network")
-                    .foregroundStyle(cinemaCyan)
-                Text(printerCameraHelpText)
-            }
-            .font(.system(size: 11, weight: .regular))
-            .foregroundStyle(.secondary)
         }
         .cardStyle()
     }
@@ -1119,12 +1117,6 @@ struct H2DTimelapseView: View {
         guard printerCameraEnabled else { return .white.opacity(0.42) }
         if printerCamera.isStreaming { return cinemaGreen }
         return printerCamera.isConnecting ? cinemaAmber : .red
-    }
-
-    private var printerCameraHelpText: LocalizedStringKey {
-        detectedPrinterKind == .a1
-            ? "A1 phát camera trực tiếp trong mạng LAN qua MJPEG/TLS."
-            : "Trên máy in, hãy bật LAN Only Liveview (Local RTSP Stream) để SE nhận hình."
     }
 
     private var isFlashArtworkActive: Bool {
@@ -1547,7 +1539,6 @@ struct H2DTimelapseView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                captureScreenBrightnessControl
                 Button {
                     timelapse.setLiveMonitorVisible(!timelapse.isLiveMonitorVisible)
                 } label: {
@@ -1598,7 +1589,6 @@ struct H2DTimelapseView: View {
                 .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
             }
         }
-        .cardStyle(dark: true)
     }
 
     private var legacyActiveCaptureView: some View {
@@ -1974,7 +1964,6 @@ struct H2DTimelapseView: View {
                         .tint(.blue)
                         .padding(.top, 8)
                 }
-                captureScreenBrightnessControl
             }
 
             if timelapse.recentFramePreviews.isEmpty {
@@ -2926,7 +2915,14 @@ private struct LivePrintProgressRing: View {
                         .trim(from: 0, to: clampedProgress)
                         .stroke(
                             AngularGradient(
-                                gradient: Gradient(colors: [green, cyan, blue]),
+                                gradient: Gradient(stops: [
+                                    .init(color: cyan, location: 0.00),
+                                    .init(color: green, location: 0.055),
+                                    .init(color: green, location: 0.24),
+                                    .init(color: cyan, location: 0.58),
+                                    .init(color: blue, location: 0.90),
+                                    .init(color: cyan, location: 1.00)
+                                ]),
                                 center: .center,
                                 startAngle: .degrees(0),
                                 endAngle: .degrees(360)

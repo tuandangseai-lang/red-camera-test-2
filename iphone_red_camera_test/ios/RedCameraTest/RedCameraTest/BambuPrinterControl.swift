@@ -930,12 +930,16 @@ final class BambuPrinterControlManager: ObservableObject {
 
         if next.hasActivePrintJob,
            next.currentAMSTrayID == nil,
-           next.externalSpoolExtruderID != nil {
+           (next.externalSpoolExtruderID != nil || next.extruderCount == 1) {
             // The active route is authoritative while material is physically
             // being consumed. Some firmwares briefly publish a zero sensor bit
             // in an incremental packet even though the external spool is the
-            // source of the running job.
+            // source of the running job. P2S can omit externalSpoolExtruderID
+            // from incremental packets, so its single extruder is route 0.
+            let externalID = next.externalSpoolExtruderID ?? 0
+            next.externalSpoolExtruderID = externalID
             next.externalFilamentPresent = true
+            next.filamentPresentByExtruder[externalID] = true
             changed = true
         }
 
