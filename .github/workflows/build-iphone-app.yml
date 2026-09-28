@@ -229,7 +229,7 @@ jobs:
           grep -q 'command: "set_nozzle_temp"' "RedCameraTest/BambuPrinterControl.swift"
           grep -q '"param": "M104 S' "RedCameraTest/BambuPrinterControl.swift"
           grep -q 'private func printerDashboardSummary' "RedCameraTest/H2DTimelapseView.swift"
-          grep -q 'frame(width: 230, height: 230)' "RedCameraTest/H2DTimelapseView.swift"
+          grep -q 'frame(width: 230 \* scale, height: 230 \* scale)' "RedCameraTest/H2DTimelapseView.swift"
           grep -q "blinks: false" "RedCameraTest/H2DTimelapseView.swift"
           ! grep -q "idlePulse" "RedCameraTest/H2DTimelapseView.swift"
           ! grep -q "ESP32-C3" "RedCameraTest/H2DTimelapseView.swift"
