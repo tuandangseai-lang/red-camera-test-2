@@ -59,7 +59,7 @@ struct PrinterRemoteControlView: View {
         let snapshot = directControl.snapshot
         if snapshot.hasActivePrintJob,
            snapshot.currentAMSTrayID == nil,
-           snapshot.externalSpoolExtruderID == externalSpoolExtruderID {
+           (snapshot.externalSpoolExtruderID == externalSpoolExtruderID || profile.kind == .p2s) {
             return true
         }
         if let value = snapshot.filamentPresentByExtruder[externalSpoolExtruderID] {
@@ -396,7 +396,7 @@ struct PrinterRemoteControlView: View {
                 }
                 .buttonStyle(RemoteActionButtonStyle(tint: green))
                 .disabled(!controlsReady || selectedExternalFilamentPresent != false)
-                .opacity(selectedExternalFilamentPresent == false ? 1 : 0.28)
+                .opacity(selectedExternalFilamentPresent == false ? 1 : 0.46)
                 .accessibilityHint(localized(externalLoadUnavailable
                     ? "Cảm biến đã phát hiện nhựa trong đầu đùn"
                     : "Nạp nhựa từ cuộn ngoài"))
@@ -412,7 +412,7 @@ struct PrinterRemoteControlView: View {
                 }
                 .buttonStyle(RemoteActionButtonStyle(tint: amber))
                 .disabled(!controlsReady || selectedExternalFilamentPresent != true)
-                .opacity(selectedExternalFilamentPresent == true ? 1 : 0.28)
+                .opacity(selectedExternalFilamentPresent == true ? 1 : 0.46)
                 .accessibilityHint(localized(externalUnloadUnavailable
                     ? "Cảm biến chưa phát hiện nhựa trong đầu đùn"
                     : "Rút nhựa ra khỏi cuộn ngoài"))

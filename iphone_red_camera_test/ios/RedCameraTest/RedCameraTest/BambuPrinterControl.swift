@@ -752,7 +752,11 @@ final class BambuPrinterControlManager: ObservableObject {
             changed = true
         }
 
-        if let extruder = report["extruder"] as? [String: Any],
+        let device = report["device"] as? [String: Any]
+        let extruderReport = (report["extruder"] as? [String: Any]) ??
+            (device?["extruder"] as? [String: Any])
+
+        if let extruder = extruderReport,
            let entries = extruder["info"] as? [[String: Any]] {
             if let packedState = number(extruder["state"]) {
                 let count = max(1, packedState & 0xF)
@@ -816,9 +820,14 @@ final class BambuPrinterControlManager: ObservableObject {
                 next.currentAMSTrayID = detectedCurrentTray
                 changed = true
             }
-        } else if let switchState = number(report["hw_switch_state"]) {
+        }
+
+        if let switchState = number(report["hw_switch_state"]),
+           extruderReport == nil || next.extruderCount == 1 {
             // Single-nozzle printers expose the same sensor as a top-level
-            // field. 0 means empty, 1 means filament has reached the extruder.
+            // field. It remains authoritative on newer P2S packets even when
+            // the packet also contains the nested device.extruder structure.
+            // 0 means empty, 1 means filament has reached the extruder.
             next.extruderCount = 1
             next.currentExtruderID = 0
             next.externalSpoolExtruderID = 0
@@ -950,7 +959,7 @@ final class BambuPrinterControlManager: ObservableObject {
             changed = true
         }
 
-        if report["extruder"] == nil, configuration?.isDualNozzle == false {
+        if extruderReport == nil, configuration?.isDualNozzle == false {
             update("nozzle_temper", \.nozzleTemperature)
             update("nozzle_target_temper", \.nozzleTargetTemperature)
         }

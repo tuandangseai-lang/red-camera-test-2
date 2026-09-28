@@ -777,7 +777,6 @@ struct H2DTimelapseView: View {
                         .frame(width: 7, height: 7)
                 }
                 Spacer()
-                captureScreenBrightnessControl
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         appLanguageCode = appLanguageCode == SEAppLanguage.vietnamese.rawValue
@@ -1539,6 +1538,7 @@ struct H2DTimelapseView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                captureScreenBrightnessControl
                 Button {
                     timelapse.setLiveMonitorVisible(!timelapse.isLiveMonitorVisible)
                 } label: {
@@ -2910,6 +2910,12 @@ private struct LivePrintProgressRing: View {
     var body: some View {
         GeometryReader { _ in
             ZStack {
+                Circle()
+                    .stroke(
+                        darkMode ? Color.white.opacity(0.10) : Color.black.opacity(0.07),
+                        style: StrokeStyle(lineWidth: 9, lineCap: .round, lineJoin: .round)
+                    )
+
                 if clampedProgress > 0 {
                     Circle()
                         .trim(from: 0, to: clampedProgress)

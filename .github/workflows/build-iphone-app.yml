@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.89 build168 - telemetry va giao dien tinh gon
+name: Tao IPA SE v9.90 build169 - khoi phuc bo cuc va cam bien P2S
 
 on:
   workflow_dispatch:
@@ -280,13 +280,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.89-build168-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.90-build169-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.89-build168-unsigned-ipa
-          path: SE-v9.89-build168-unsigned.ipa
+          name: SE-v9.90-build169-unsigned-ipa
+          path: SE-v9.90-build169-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
