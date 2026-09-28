@@ -661,7 +661,6 @@ struct H2DTimelapseView: View {
                     printerCameraCard
                     PrinterRemoteControlView(
                         bluetooth: bluetooth,
-                        directControl: directControl,
                         printerName: printerName,
                         profile: activeControlProfile,
                         accessCode: accessCode,
@@ -669,7 +668,8 @@ struct H2DTimelapseView: View {
                         alarmActive: hasAnyCriticalPrinterAlert,
                         alarmAcknowledged: hasAnyCriticalPrinterAlert &&
                             acknowledgedAlarmID == currentAlarmID,
-                        onSilenceAlarm: silenceCurrentPrinterAlarm
+                        onSilenceAlarm: silenceCurrentPrinterAlarm,
+                        directControl: directControl
                     )
                     configurationCard
 
