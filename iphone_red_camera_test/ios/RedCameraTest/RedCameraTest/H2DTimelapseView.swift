@@ -698,9 +698,9 @@ struct H2DTimelapseView: View {
     private var setupView: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 16) {
+                VStack(spacing: 13) {
                     cinemaSystemHeader
-                    printerDashboardSummary()
+                    printerDashboardSummary(compact: true)
                     printerCameraCard
                     PrinterRemoteControlView(
                         bluetooth: bluetooth,
@@ -712,7 +712,8 @@ struct H2DTimelapseView: View {
                         alarmAcknowledged: hasAnyCriticalPrinterAlert &&
                             acknowledgedAlarmID == currentAlarmID,
                         onSilenceAlarm: silenceCurrentPrinterAlarm,
-                        directControl: directControl
+                        directControl: directControl,
+                        compactLayout: true
                     )
                     configurationCard
 
@@ -726,35 +727,36 @@ struct H2DTimelapseView: View {
                         }
                         timelapse.arm(startingAtLayer: bluetooth.h2dCurrentLayer)
                     } label: {
-                        HStack(spacing: 12) {
+                        HStack(spacing: 10) {
                             ZStack {
                                 Circle()
                                     .fill(.white.opacity(0.18))
-                                    .frame(width: 36, height: 36)
+                                    .frame(width: 30, height: 30)
                                 Image(systemName: "record.circle.fill")
-                                    .font(.system(size: 21, weight: .semibold))
+                                    .font(.system(size: 17, weight: .semibold))
                                     .foregroundStyle(.white)
                             }
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(localizedStatus("Bắt đầu timelapse"))
-                                    .font(.system(size: 15, weight: .semibold))
+                                    .font(.system(size: 12, weight: .semibold))
                                 Text("Theo dõi \(printerName) • tự chụp từng lớp")
-                                    .font(.system(size: 11, weight: .regular))
+                                    .font(.system(size: 9, weight: .regular))
                                     .opacity(0.72)
                             }
                             Spacer()
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 13, weight: .black))
+                                .font(.system(size: 11, weight: .black))
                         }
-                        .padding(.horizontal, 15)
-                        .frame(maxWidth: .infinity, minHeight: 58)
+                        .padding(.horizontal, 12)
+                        .frame(maxWidth: .infinity, minHeight: 48)
                     }
                     .buttonStyle(CinemaLaunchButtonStyle())
                     .disabled(!bluetooth.isH2DReady)
                     .opacity(bluetooth.isH2DReady ? 1 : 0.42)
 
                 }
-                .padding(16)
+                .padding(.horizontal, 13)
+                .padding(.vertical, 10)
             }
             .background(Color.clear)
             .scrollIndicators(.hidden)
@@ -796,22 +798,23 @@ struct H2DTimelapseView: View {
         .frame(minHeight: 36)
     }
 
-    private func printerDashboardSummary(darkMode: Bool = false) -> some View {
-        VStack(spacing: 22) {
+    private func printerDashboardSummary(darkMode: Bool = false, compact: Bool = false) -> some View {
+        let scale: CGFloat = compact ? 0.80 : 1
+        return VStack(spacing: 22 * scale) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(localizedStatus("Trạng thái bản in"))
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 16 * scale, weight: .semibold))
                     Text(localizedStatus(displayedStatusText))
-                        .font(.system(size: 11, weight: .regular))
+                        .font(.system(size: 11 * scale, weight: .regular))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 Spacer()
                 Button { bluetooth.requestH2DStatus() } label: {
                     Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 34, height: 34)
+                        .font(.system(size: 14 * scale, weight: .semibold))
+                        .frame(width: 34 * scale, height: 34 * scale)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(cinemaCyan)
@@ -826,21 +829,21 @@ struct H2DTimelapseView: View {
 
                 VStack(spacing: 5) {
                     Text("\(displayedPrintPercent)%")
-                        .font(.system(size: 52, weight: .light))
+                        .font(.system(size: 52 * scale, weight: .light))
                         .monospacedDigit()
                         .foregroundStyle(darkMode ? Color.white.opacity(0.84) : Color.black.opacity(0.66))
                     Text(localizedStatus(displayedLayerText))
-                        .font(.system(size: 13, weight: .regular))
+                        .font(.system(size: 13 * scale, weight: .regular))
                         .foregroundStyle(.secondary)
                 }
             }
-            .frame(width: 230, height: 230)
+            .frame(width: 230 * scale, height: 230 * scale)
 
-            dashboardMetrics
+            dashboardMetrics(compact: compact)
 
             if bluetooth.hasSelectedCriticalPrinterAlert && !bluetooth.printerAlertText.isEmpty {
                 Label(localizedStatus(bluetooth.printerAlertText), systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 12 * scale, weight: .medium))
                     .foregroundStyle(bluetooth.hasSelectedCriticalPrinterAlert ? Color.red : cinemaAmber)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -851,42 +854,46 @@ struct H2DTimelapseView: View {
                         : bluetooth.manualFilamentActionText),
                     systemImage: "hand.raised.fill"
                 )
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 12 * scale, weight: .semibold))
                 .foregroundStyle(.red)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .cardStyle(dark: darkMode)
+        .cardStyle(dark: darkMode, compact: compact)
     }
 
     @ViewBuilder
-    private var dashboardMetrics: some View {
+    private func dashboardMetrics(compact: Bool = false) -> some View {
         HStack(alignment: .top, spacing: 0) {
             if detectedPrinterKind == .h2d {
                 dashboardTemperatureMetric(
                     current: displayedTemperature(bluetooth.leftNozzleTemperature, direct: directSnapshot.leftNozzleTemperature),
                     target: displayedTemperature(bluetooth.leftNozzleTargetTemperature, direct: directSnapshot.leftNozzleTargetTemperature),
                     label: "Đầu trái",
-                    targetKind: .nozzle(extruderID: 1)
+                    targetKind: .nozzle(extruderID: 1),
+                    compact: compact
                 )
                 dashboardTemperatureMetric(
                     current: displayedTemperature(bluetooth.nozzleTemperature, direct: directSnapshot.nozzleTemperature),
                     target: displayedTemperature(bluetooth.nozzleTargetTemperature, direct: directSnapshot.nozzleTargetTemperature),
                     label: "Đầu phải",
-                    targetKind: .nozzle(extruderID: 0)
+                    targetKind: .nozzle(extruderID: 0),
+                    compact: compact
                 )
             } else {
                 dashboardTemperatureMetric(
                     current: displayedTemperature(bluetooth.nozzleTemperature, direct: directSnapshot.nozzleTemperature),
                     target: displayedTemperature(bluetooth.nozzleTargetTemperature, direct: directSnapshot.nozzleTargetTemperature),
                     label: "Đầu in",
-                    targetKind: .nozzle(extruderID: 0)
+                    targetKind: .nozzle(extruderID: 0),
+                    compact: compact
                 )
                 dashboardTemperatureMetric(
                     current: displayedTemperature(bluetooth.bedTemperature, direct: directSnapshot.bedTemperature),
                     target: displayedTemperature(bluetooth.bedTargetTemperature, direct: directSnapshot.bedTargetTemperature),
                     label: "Bàn in",
-                    targetKind: .bed
+                    targetKind: .bed,
+                    compact: compact
                 )
             }
             if detectedPrinterKind == .h2d {
@@ -894,28 +901,36 @@ struct H2DTimelapseView: View {
                     current: displayedTemperature(bluetooth.bedTemperature, direct: directSnapshot.bedTemperature),
                     target: displayedTemperature(bluetooth.bedTargetTemperature, direct: directSnapshot.bedTargetTemperature),
                     label: "Bàn in",
-                    targetKind: .bed
+                    targetKind: .bed,
+                    compact: compact
                 )
             } else {
-                dashboardMetric(value: primaryFanDisplay, label: "Quạt")
+                dashboardMetric(value: primaryFanDisplay, label: "Quạt", compact: compact)
             }
             dashboardMetric(
                 value: remainingDashboardText,
-                label: "Hoàn thành"
+                label: "Hoàn thành",
+                compact: compact
             )
         }
     }
 
-    private func dashboardMetric(value: String, label: String, tint: Color = .primary) -> some View {
-        VStack(spacing: 5) {
+    private func dashboardMetric(
+        value: String,
+        label: String,
+        tint: Color = .primary,
+        compact: Bool = false
+    ) -> some View {
+        let scale: CGFloat = compact ? 0.80 : 1
+        return VStack(spacing: 5 * scale) {
             Text(value)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 13 * scale, weight: .medium))
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.65)
                 .foregroundStyle(tint)
             Text(localizedStatus(label))
-                .font(.system(size: 10, weight: .regular))
+                .font(.system(size: 10 * scale, weight: .regular))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
@@ -926,8 +941,10 @@ struct H2DTimelapseView: View {
         current: Int?,
         target: Int?,
         label: String,
-        targetKind: DashboardTemperatureTarget
+        targetKind: DashboardTemperatureTarget,
+        compact: Bool = false
     ) -> some View {
+        let scale: CGFloat = compact ? 0.80 : 1
         let tint: Color = temperatureIsHeating(current: current, target: target) ? .red : .primary
         return Button {
             temperatureEditor = DashboardTemperatureEditor(
@@ -937,23 +954,23 @@ struct H2DTimelapseView: View {
                 initialTarget: target ?? current ?? (targetKind == .bed ? 60 : 220)
             )
         } label: {
-            VStack(spacing: 5) {
+            VStack(spacing: 5 * scale) {
                 HStack(alignment: .firstTextBaseline, spacing: 1) {
                     Text(current.map(String.init) ?? "—")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 13 * scale, weight: .semibold))
                     if let target, target > 0 {
                         Text("/\(target)°C")
-                            .font(.system(size: 6.5, weight: .medium))
+                            .font(.system(size: max(5.5, 6.5 * scale), weight: .medium))
                             .foregroundStyle(.secondary)
                     } else if current != nil {
                         Text("°C")
-                            .font(.system(size: 6.5, weight: .medium))
+                            .font(.system(size: max(5.5, 6.5 * scale), weight: .medium))
                     }
                 }
                 .monospacedDigit()
                 .foregroundStyle(tint)
                 Text(localizedStatus(label))
-                    .font(.system(size: 9, weight: .regular))
+                    .font(.system(size: 9 * scale, weight: .regular))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -1001,13 +1018,13 @@ struct H2DTimelapseView: View {
     }
 
     private var printerCameraCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(localizedStatus("Camera máy in"))
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                     Text("\(printerName) • \(printerCamera.transportText)")
-                        .font(.system(size: 11, weight: .regular))
+                        .font(.system(size: 9, weight: .regular))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -1021,17 +1038,17 @@ struct H2DTimelapseView: View {
                             : printerCamera.isConnecting ? "Đang kết nối" : "Chờ"
                     ))
                 }
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 8, weight: .medium))
                 .foregroundStyle(printerCameraStatusColor)
                 .padding(.horizontal, 8)
-                .frame(height: 26)
+                .frame(height: 22)
                 .background(printerCameraStatusColor.opacity(0.08), in: Capsule())
 
                 Button {
                     printerCameraEnabled.toggle()
                 } label: {
                     Image(systemName: printerCameraEnabled ? "video.slash.fill" : "video.fill")
-                        .frame(width: 28, height: 28)
+                        .frame(width: 24, height: 24)
                 }
                 .buttonStyle(CinemaIconButtonStyle(
                     tint: printerCameraEnabled ? .white.opacity(0.68) : cinemaCyan
@@ -1049,7 +1066,7 @@ struct H2DTimelapseView: View {
                 }
 
         }
-        .cardStyle()
+        .cardStyle(compact: true)
     }
 
     private var printerCameraViewport: some View {
@@ -1246,7 +1263,7 @@ struct H2DTimelapseView: View {
     }
 
     private var configurationCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) { showConfiguration.toggle() }
             } label: {
@@ -1384,7 +1401,7 @@ struct H2DTimelapseView: View {
                 }
             }
         }
-        .cardStyle()
+        .cardStyle(compact: true)
     }
 
     private var printerProfileSelector: some View {
@@ -2485,16 +2502,18 @@ private struct PrinterActivityDot: View {
 }
 
 private extension View {
-    func cardStyle(dark: Bool = false) -> some View {
-        self
-            .padding(16)
+    func cardStyle(dark: Bool = false, compact: Bool = false) -> some View {
+        let padding: CGFloat = compact ? 13 : 16
+        let radius: CGFloat = compact ? 14 : 16
+        return self
+            .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 dark ? Color(white: 0.055) : Color.white,
-                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                in: RoundedRectangle(cornerRadius: radius, style: .continuous)
             )
             .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .stroke(
                         dark ? Color.white.opacity(0.10) : Color.black.opacity(0.07),
                         lineWidth: 1

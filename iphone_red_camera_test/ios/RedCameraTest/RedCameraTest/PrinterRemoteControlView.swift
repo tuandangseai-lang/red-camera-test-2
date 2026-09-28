@@ -16,6 +16,7 @@ struct PrinterRemoteControlView: View {
     var lowPowerDarkMode = false
 
     @ObservedObject var directControl: BambuPrinterControlManager
+    var compactLayout = false
     @State private var filamentTemperature = 220
     @State private var automaticTemperatureSignature = ""
     @State private var printSpeed = 2
@@ -92,7 +93,7 @@ struct PrinterRemoteControlView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: compactLayout ? 10 : 14) {
             controlHeader
             Divider().overlay(hairlineColor)
             if let prompt = directControl.activePrompt {
@@ -105,12 +106,16 @@ struct PrinterRemoteControlView: View {
             }
             utilityControls
         }
-        .padding(16)
-        .background(surfaceColor, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(compactLayout ? 12 : 16)
+        .background(
+            surfaceColor,
+            in: RoundedRectangle(cornerRadius: compactLayout ? 14 : 16, style: .continuous)
+        )
         .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: compactLayout ? 14 : 16, style: .continuous)
                 .stroke(hairlineColor, lineWidth: 1)
         }
+        .controlSize(compactLayout ? .small : .regular)
         .onAppear {
             startDirectControl()
             updateAlarmPulse()

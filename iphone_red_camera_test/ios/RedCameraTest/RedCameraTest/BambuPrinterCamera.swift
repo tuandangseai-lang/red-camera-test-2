@@ -34,6 +34,9 @@ final class BambuPrinterCameraManager: ObservableObject {
     private var retryAttempt = 0
     private var generation = 0
     private var firstFrameDeadline: DispatchWorkItem?
+    private var lastFramePublishedAt = Date.distantPast
+    private let minimumFramePublishInterval: TimeInterval = 0.125
+    private var streamingStatusPublished = false
 
     func start(profile: BambuPrinterProfile, accessCode: String) {
         let host = profile.ip.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -82,6 +85,7 @@ final class BambuPrinterCameraManager: ObservableObject {
         let connectionGeneration = generation
         cancelConnection()
         activeConfiguration = configuration
+        streamingStatusPublished = false
 
         let usesMJPEG = configuration.kind == .a1
         publishTransport(usesMJPEG ? "MJPEG • LAN" : "RTSPS • LAN")
@@ -102,7 +106,10 @@ final class BambuPrinterCameraManager: ObservableObject {
             self.firstFrameDeadline = nil
             self.retryAttempt = 0
             self.publishFrame(image)
-            self.publishStatus("Camera máy in đang phát trực tiếp", connecting: false, streaming: true)
+            if !self.streamingStatusPublished {
+                self.streamingStatusPublished = true
+                self.publishStatus("Camera máy in đang phát trực tiếp", connecting: false, streaming: true)
+            }
         }
         let onFailure: (String) -> Void = { [weak self] reason in
             guard let self, self.generation == connectionGeneration else { return }
@@ -150,6 +157,7 @@ final class BambuPrinterCameraManager: ObservableObject {
         activeConfiguration = nil
         firstFrameDeadline?.cancel()
         firstFrameDeadline = nil
+        streamingStatusPublished = false
         retryAttempt += 1
         let delay = min(15.0, pow(2.0, Double(min(retryAttempt, 4))))
         publishStatus("\(reason) • đang thử lại", connecting: false, streaming: false)
@@ -171,22 +179,34 @@ final class BambuPrinterCameraManager: ObservableObject {
         transport?.stop()
         transport = nil
         activeConfiguration = nil
+        streamingStatusPublished = false
     }
 
     private func publishStatus(_ text: String, connecting: Bool, streaming: Bool) {
         DispatchQueue.main.async { [weak self] in
-            self?.statusText = text
-            self?.isConnecting = connecting
-            self?.isStreaming = streaming
+            guard let self else { return }
+            if self.statusText != text { self.statusText = text }
+            if self.isConnecting != connecting { self.isConnecting = connecting }
+            if self.isStreaming != streaming { self.isStreaming = streaming }
         }
     }
 
     private func publishFrame(_ image: CGImage?) {
+        if image == nil {
+            lastFramePublishedAt = .distantPast
+        } else {
+            let now = Date()
+            guard now.timeIntervalSince(lastFramePublishedAt) >= minimumFramePublishInterval else { return }
+            lastFramePublishedAt = now
+        }
         DispatchQueue.main.async { [weak self] in self?.frame = image }
     }
 
     private func publishTransport(_ text: String) {
-        DispatchQueue.main.async { [weak self] in self?.transportText = text }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.transportText != text else { return }
+            self.transportText = text
+        }
     }
 }
 
