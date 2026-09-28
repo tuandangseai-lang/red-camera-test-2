@@ -1,4 +1,5 @@
 import AVFoundation
+import AudioToolbox
 import Combine
 import Foundation
 
@@ -64,6 +65,13 @@ final class PrinterAlarmPlayer: ObservableObject {
             player.stop()
             engine.stop()
         }
+    }
+
+    /// A short, non-looping acknowledgement for a printer step that requires
+    /// the operator (feed filament / pull cut filament). It deliberately uses
+    /// a separate system sound so it cannot start or disturb the fault siren.
+    func playOneShotBeep() {
+        AudioServicesPlaySystemSound(1057)
     }
 
     func stop() {

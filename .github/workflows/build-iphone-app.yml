@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.83 build162 - dong ho moi va xac nhan nhua chinh xac
+name: Tao IPA SE v9.84 build163 - cam bien nhua AMS va canh bao truc tiep
 
 on:
   workflow_dispatch:
@@ -206,8 +206,8 @@ jobs:
           grep -q "BambuPrinterControl.swift" project.yml
           ! grep -q "ZIPFoundation" project.yml
           ! grep -q 'command: "skip_objects"' "RedCameraTest/BambuPrinterControl.swift"
-          grep -q '"target": load ? 254 : 255' "RedCameraTest/BambuPrinterControl.swift"
-          grep -q '"ams_id": 254' "RedCameraTest/BambuPrinterControl.swift"
+          grep -q 'let virtualAMSID = extruderID == 1 ? 253 : 254' "RedCameraTest/BambuPrinterControl.swift"
+          grep -q '"ams_id": virtualAMSID' "RedCameraTest/BambuPrinterControl.swift"
           grep -q '"extruder_id": extruderID' "RedCameraTest/BambuPrinterControl.swift"
           grep -q 'command: "set_nozzle_temp"' "RedCameraTest/BambuPrinterControl.swift"
           grep -q '"param": "M104 S' "RedCameraTest/BambuPrinterControl.swift"
@@ -259,19 +259,19 @@ jobs:
           test -f "$APP_PATH/en.lproj/Localizable.strings"
           test -f "$APP_PATH/vi.lproj/Localizable.strings"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.83"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "162"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.84"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "163"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.83-build162-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.84-build163-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.83-build162-unsigned-ipa
-          path: SE-v9.83-build162-unsigned.ipa
+          name: SE-v9.84-build163-unsigned-ipa
+          path: SE-v9.84-build163-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -401,7 +401,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.24.0
+          name: SE-Bambu-ESP32-v1.25.0
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

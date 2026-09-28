@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.24.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.25.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -284,6 +284,10 @@ bool hmsAlertActive = false;
 bool printErrorActive = false;
 bool criticalAlarmLatched = false;
 bool physicalCriticalAcknowledged = false;
+bool manualFilamentActionActive = false;
+bool lastReportedManualFilamentAction = false;
+String manualFilamentActionKind = "";
+String manualFilamentActionText = "";
 volatile uint32_t phoneReportedCriticalCode = 0;
 volatile uint32_t phoneReportedCriticalUntil = 0;
 volatile bool phoneReportedCriticalAcknowledged = false;
@@ -294,10 +298,12 @@ bool lastReportedPrinterAlert = false;
 bool lastReportedPrinterAlertCritical = false;
 uint32_t printErrorCode = 0;
 uint32_t lastReportedPrintErrorCode = 0;
+uint32_t manualFilamentActionCode = 0;
 uint32_t deferredFilamentErrorCode = 0;
 uint32_t filamentChangeGraceUntil = 0;
 String printState = "IDLE";
 String activeJob = "0";
+String announcedPrintJob = "0";
 String activeFilamentType = "";
 int activeFilamentSlot = -1;
 uint8_t materialSyncRequests = 0;
@@ -313,6 +319,11 @@ int bedTargetTemperature = -1;
 int partFanPercent = -1;
 int auxiliaryFanPercent = -1;
 int exhaustFanPercent = -1;
+int printerExtruderCount = 1;
+int currentPrinterExtruderID = 0;
+int externalSpoolExtruderID = 0;
+int externalFilamentSensorState = -1;
+String printerErrorDetail = "";
 bool telemetryDirty = false;
 int currentLayer = 0;
 int totalLayers = 0;
@@ -720,6 +731,10 @@ void resetPrinterRuntimeForProfileSwitch() {
   hmsAlertActive = false;
   printErrorActive = false;
   criticalAlarmLatched = false;
+  manualFilamentActionActive = false;
+  lastReportedManualFilamentAction = false;
+  manualFilamentActionKind = "";
+  manualFilamentActionText = "";
   phoneReportedCriticalCode = 0;
   phoneReportedCriticalUntil = 0;
   phoneReportedCriticalAcknowledged = false;
@@ -727,8 +742,10 @@ void resetPrinterRuntimeForProfileSwitch() {
   lastReportedPrinterAlertCritical = false;
   printErrorCode = 0;
   lastReportedPrintErrorCode = 0;
+  manualFilamentActionCode = 0;
   printState = "IDLE";
   activeJob = "0";
+  announcedPrintJob = "0";
   currentLayer = 0;
   totalLayers = 0;
   printPercent = 0;
@@ -750,6 +767,12 @@ void resetPrinterRuntimeForProfileSwitch() {
   partFanPercent = -1;
   auxiliaryFanPercent = -1;
   exhaustFanPercent = -1;
+  printerExtruderCount = 1;
+  currentPrinterExtruderID = 0;
+  externalSpoolExtruderID =
+      printerModelFromSerial(settings.printerSerial) == "H2D" ? 1 : 0;
+  externalFilamentSensorState = -1;
+  printerErrorDetail = "";
   telemetryDirty = false;
   lastTelemetryNotifyAt = 0;
 }
@@ -1047,6 +1070,14 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
   }
   const uint8_t *extruder = payload + extruderStart;
   const size_t extruderLength = extruderEnd - extruderStart;
+  int packedSystemState = 0;
+  if (extractLastJsonInt(extruder, extruderLength, "state", packedSystemState)) {
+    printerExtruderCount = max(1, packedSystemState & 0xF);
+    const int activeExtruder = (packedSystemState >> 4) & 0xF;
+    if (activeExtruder < printerExtruderCount) {
+      currentPrinterExtruderID = activeExtruder;
+    }
+  }
   size_t infoPosition = 0;
   if (!findKey(extruder, extruderLength, "info", 0, infoPosition)) return false;
   size_t cursor = infoPosition;
@@ -1054,6 +1085,7 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
   if (cursor >= extruderLength) return false;
 
   bool changed = false;
+  int sensorByExtruder[2] = {-1, -1};
   uint8_t entryIndex = 0;
   ++cursor;
   while (cursor < extruderLength && extruder[cursor] != ']') {
@@ -1091,6 +1123,26 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
     // packets omit id but preserve the documented two-entry order, so retain
     // that order as a fallback instead of dropping the left nozzle entirely.
     if (!hasExplicitId && entryIndex < 2) id = entryIndex;
+    int infoBits = 0;
+    if (id >= 0 && id < 2 &&
+        extractLastJsonInt(object, objectLength, "info", infoBits)) {
+      // Bambu Studio DevExtruderSystem: bit 1 is the toolhead filament
+      // presence sensor; bit 2 is the upstream buffer sensor.
+      sensorByExtruder[id] = (infoBits >> 1) & 0x1;
+    }
+    int slotNow = -1;
+    int slotTarget = -1;
+    const bool hasSlotNow =
+        extractLastJsonInt(object, objectLength, "snow", slotNow);
+    const bool hasSlotTarget =
+        extractLastJsonInt(object, objectLength, "star", slotTarget);
+    const auto noteExternalRoute = [&](int packedSlot) {
+      if (id < 0 || id >= 2 || packedSlot < 0) return;
+      const int amsID = (packedSlot >> 8) & 0xFF;
+      if (amsID == 253 || amsID == 254) externalSpoolExtruderID = id;
+    };
+    if (hasSlotNow) noteExternalRoute(slotNow);
+    if (hasSlotTarget) noteExternalRoute(slotTarget);
     if (extractLastJsonUInt32(object, objectLength, "temp", packed) &&
         (id == 0 || id == 1)) {
       foundPackedNozzles = true;
@@ -1107,6 +1159,11 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
     }
     ++entryIndex;
     cursor = objectEnd;
+  }
+  if (externalSpoolExtruderID >= 0 && externalSpoolExtruderID < 2 &&
+      sensorByExtruder[externalSpoolExtruderID] >= 0) {
+    externalFilamentSensorState =
+        sensorByExtruder[externalSpoolExtruderID];
   }
   if (nozzleTemperature >= 0 && leftNozzleTemperature >= 0) {
     nozzleSyncRequests = Config::NOZZLE_SYNC_RETRY_LIMIT;
@@ -1128,6 +1185,13 @@ void updatePrinterTelemetry(const uint8_t *payload, size_t length) {
     changed |= updateIntIfPresent(payload, length, "nozzle_temper", nozzleTemperature);
     changed |= updateIntIfPresent(payload, length, "nozzle_target_temper",
                                   nozzleTargetTemperature);
+    int switchState = -1;
+    if (extractLastJsonInt(payload, length, "hw_switch_state", switchState)) {
+      printerExtruderCount = 1;
+      currentPrinterExtruderID = 0;
+      externalSpoolExtruderID = 0;
+      externalFilamentSensorState = switchState == 1 ? 1 : 0;
+    }
   }
   changed |= updateIntIfPresent(payload, length, "bed_temper", bedTemperature);
   changed |= updateIntIfPresent(payload, length, "bed_target_temper",
@@ -1457,6 +1521,64 @@ bool hasCriticalPrinterError() {
   return criticalAlarmLatched;
 }
 
+bool isManualFilamentLoadCode(uint32_t code) {
+  return code == 0x07FEC00AUL || code == 0x07FFC00AUL ||
+         code == 0x07FE8007UL || code == 0x07FF8007UL;
+}
+
+bool isManualFilamentUnloadCode(uint32_t code) {
+  // H2D firmware variants use FE/FF for the same two physical tool paths.
+  return code == 0x07FEC003UL || code == 0x07FFC003UL ||
+         code == 0x07FEC006UL || code == 0x07FFC006UL;
+}
+
+String printerStageErrorText(int stage, uint32_t code) {
+  if (isManualFilamentLoadCode(code)) {
+    return "Đẩy sợi nhựa tới khi nhựa chảy ra rồi xác nhận trên iPhone";
+  }
+  if (isManualFilamentUnloadCode(code)) {
+    return "Kéo sợi nhựa đã cắt ra khỏi đường nạp rồi xác nhận trên iPhone";
+  }
+  switch (stage) {
+    case 20: return "Nhiệt độ đầu phun bất thường";
+    case 21: return "Nhiệt độ bàn in bất thường";
+    case 26: return "AMS mất kết nối";
+    case 27: return "Quạt tản nhiệt đầu in chạy quá chậm";
+    case 32: return "Phát hiện nhựa đóng cục ở đầu phun";
+    case 33: return "Cơ cấu cắt nhựa cần xử lý";
+    case 34: return "Phát hiện lỗi lớp in đầu tiên";
+    case 35: return "Đầu phun có thể bị tắc";
+    default: return "";
+  }
+}
+
+void reportManualFilamentAction(bool force) {
+  if (!force && manualFilamentActionActive == lastReportedManualFilamentAction) {
+    return;
+  }
+  if (manualFilamentActionActive) {
+    queuePhoneEvent(String("H2D,FILAMENT_ACTION,1,") +
+                    manualFilamentActionKind + "," +
+                    safeEventField(manualFilamentActionText));
+  } else {
+    queuePhoneEvent("H2D,FILAMENT_ACTION,0,CLEAR");
+  }
+  lastReportedManualFilamentAction = manualFilamentActionActive;
+}
+
+void setManualFilamentAction(bool active, const String &kind,
+                             const String &text, uint32_t code) {
+  const bool newIncident = active &&
+      (!manualFilamentActionActive || code != manualFilamentActionCode ||
+       kind != manualFilamentActionKind);
+  manualFilamentActionActive = active;
+  manualFilamentActionKind = active ? kind : "";
+  manualFilamentActionText = active ? text : "";
+  manualFilamentActionCode = active ? code : 0;
+  if (newIncident) requestBuzzerBeep(170);
+  reportManualFilamentAction(newIncident);
+}
+
 void reportPrinterAlert(bool force = false) {
   // H2D keeps acknowledged/old HMS entries in some full-state packets even
   // while the printer is idle. Only surface them during a real print session;
@@ -1480,10 +1602,13 @@ void reportPrinterAlert(bool force = false) {
       char errorCode[11];
       snprintf(errorCode, sizeof(errorCode), "0x%08lX",
                static_cast<unsigned long>(printErrorCode));
+      const String detail = printerErrorDetail.isEmpty()
+          ? printerStageErrorText(currentStage, printErrorCode)
+          : printerErrorDetail;
       queuePhoneEvent(String("H2D,ALERT,1,ERROR,") +
                       printerModelFromSerial(settings.printerSerial) +
-                      " báo lỗi máy in • mã " +
-                      errorCode + " • xem màn hình máy in");
+                      " • " + (detail.isEmpty() ? "Lỗi máy in" : detail) +
+                      " • mã " + errorCode);
     } else {
       // HMS can contain an acknowledged advisory (for example a lens-cleaning
       // reminder) while H2D is legitimately cleaning the nozzle. Report it as
@@ -1698,6 +1823,15 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
       extractLastJsonString(payload, length, "gcode_state", state);
   bool hasJob = extractJsonString(payload, length, "job_id", job);
   if (!hasJob) hasJob = extractJsonString(payload, length, "subtask_id", job);
+  const String jobToken = hasJob ? safeJobID(job) : activeJob;
+  if (firstStatusPacket && hasJob && jobToken != "0") {
+    // Establish a baseline for a bridge restart so an old idle subtask does
+    // not masquerade as a newly submitted print on the second pushall.
+    announcedPrintJob = jobToken;
+  }
+  const bool newPrintSubmission = !firstStatusPacket && hasJob &&
+      jobToken != "0" && jobToken != activeJob &&
+      jobToken != announcedPrintJob;
 
   if (hasLayer || hasTotal || hasPercent || hasStage || hasRemaining || hasState ||
       hasPrintError || hasHms) {
@@ -1710,12 +1844,27 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
                     hasTotal ? total : -1, hasPercent ? percent : -1);
     }
   }
-  if (hasLayer || hasTotal || hasPercent || hasStage || hasRemaining || hasState) {
-    processPrintUpdate(hasState ? state : "", hasLayer ? layer : -1,
+  if (hasLayer || hasTotal || hasPercent || hasStage || hasRemaining || hasState ||
+      newPrintSubmission) {
+    String effectiveState = hasState ? state : "";
+    String normalizedState = effectiveState;
+    normalizedState.toUpperCase();
+    if (newPrintSubmission && !isActivePrintState(normalizedState)) {
+      // job_id/subtask_id changes before Bambu finishes upload/setup. Announce
+      // PREPARE now so the buzzer and green LEDs react to Send immediately.
+      effectiveState = "PREPARE";
+      announcedPrintJob = jobToken;
+    } else if (announcedPrintJob == jobToken && jobToken != "0" &&
+               !isActivePrintState(normalizedState) &&
+               !isCompletedPrintState(normalizedState) &&
+               normalizedState != "FAILED" && normalizedState != "ERROR") {
+      effectiveState = "PREPARE";
+    }
+    processPrintUpdate(effectiveState, hasLayer ? layer : -1,
                        hasTotal ? total : -1, hasPercent ? percent : -1,
                        hasStage ? stage : -999,
                        hasRemaining ? remaining : -1,
-                       hasJob ? safeJobID(job) : activeJob);
+                       jobToken);
   }
   if (payloadShowsActiveFilamentTransition(payload, length, currentStage) &&
       printState != "ERROR" && printState != "FAILED") {
@@ -1731,6 +1880,24 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
       filamentChangeGraceUntil = 0;
       criticalAlarmLatched = false;
       physicalCriticalAcknowledged = false;
+      printerErrorDetail = "";
+      setManualFilamentAction(false, "", "", 0);
+    } else if (printState != "ERROR" && printState != "FAILED" &&
+               (isManualFilamentLoadCode(incomingPrintError) ||
+                isManualFilamentUnloadCode(incomingPrintError) ||
+                (currentStage == 22 &&
+                 (incomingPrintError & 0xFFFFUL) == 0x8003UL))) {
+      const bool loadStep = isManualFilamentLoadCode(incomingPrintError) ||
+                            currentStage == 24;
+      const String detail = loadStep
+          ? "Hãy đẩy sợi nhựa đi tiếp tới khi nhựa chảy ra"
+          : "Hãy kéo sợi nhựa đã cắt ra khỏi đường nạp";
+      printErrorActive = false;
+      deferredFilamentErrorCode = 0;
+      filamentChangeGraceUntil = 0;
+      criticalAlarmLatched = false;
+      setManualFilamentAction(true, loadStep ? "LOAD" : "UNLOAD",
+                              detail, incomingPrintError);
     } else if (!criticalAlarmLatched &&
                filamentChangeGraceActive(filamentChangeGraceUntil) &&
                printState != "ERROR" && printState != "FAILED") {
@@ -1739,11 +1906,13 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
       // window, while ERROR/FAILED always bypasses suppression immediately.
       printErrorActive = false;
       deferredFilamentErrorCode = incomingPrintError;
+      setManualFilamentAction(false, "", "", 0);
       Serial.printf("[ALERT] defer filament-change error 0x%08lX\n",
                     static_cast<unsigned long>(incomingPrintError));
     } else if (isActivePrintState(printState) || printState == "FAILED" ||
                printState == "ERROR") {
       printErrorActive = true;
+      setManualFilamentAction(false, "", "", 0);
       deferredFilamentErrorCode = 0;
       // Ignore old error codes contained in an idle pushall packet, but once a
       // real job fault is seen keep the alarm latched until the printer clears it.
@@ -1755,6 +1924,7 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
     }
   }
   if (hasState && printState == "ERROR") {
+    setManualFilamentAction(false, "", "", 0);
     printErrorActive = printErrorCode != 0;
     deferredFilamentErrorCode = 0;
     criticalAlarmLatched = true;
@@ -1766,6 +1936,18 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   if (hasState && isExplicitlyStoppedState()) {
     criticalAlarmLatched = false;
     physicalCriticalAcknowledged = false;
+    setManualFilamentAction(false, "", "", 0);
+  }
+  if (hasPrintError && incomingPrintError != 0) {
+    String detail;
+    if (extractJsonString(payload, length, "error_msg", detail) ||
+        extractJsonString(payload, length, "reason", detail)) {
+      detail = safeEventField(detail);
+      if (!detail.isEmpty() && detail != "0") printerErrorDetail = detail;
+    }
+    if (printerErrorDetail.isEmpty()) {
+      printerErrorDetail = printerStageErrorText(currentStage, incomingPrintError);
+    }
   }
   if (hasHms) hmsAlertActive = incomingHmsAlert;
   updateActiveMaterial(payload, length);
@@ -2572,7 +2754,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.24.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.25.0");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -2596,6 +2778,7 @@ void sendCurrentStatus() {
       reportStatus(timelapseArmed ? "ARMED" : "READY");
       reportPrintStatus(true);
       reportPrinterAlert(true);
+      reportManualFilamentAction(true);
     }
   }
 }
@@ -2831,9 +3014,10 @@ void handlePhoneCommand(String command) {
     const int slotID = slotText.toInt();
     const int target = targetText.toInt();
     const int temperature = temperatureText.toInt();
-    const int externalExtruderID =
-        printerModelFromSerial(settings.printerSerial) == "H2D" ? 1 : 0;
-    const bool externalSpool = amsID == 254 && slotID == 0 && target == 254;
+    const int externalExtruderID = externalSpoolExtruderID;
+    const int expectedVirtualAmsID = externalExtruderID == 1 ? 253 : 254;
+    const bool externalSpool = amsID == expectedVirtualAmsID && slotID == 0 &&
+                               target == expectedVirtualAmsID;
     if (!externalSpool || temperature < 170 || temperature > 320) {
       queuePhoneEvent(
           "H2D,REMOTE_ERROR,LOAD_FILAMENT,Chỉ hỗ trợ cuộn nhựa ngoài");
@@ -2845,7 +3029,7 @@ void handlePhoneCommand(String command) {
         "\",\"command\":\"ams_change_filament\",\"ams_id\":" + amsID +
         ",\"slot_id\":" + slotID + ",\"target\":" + target +
         ",\"extruder_id\":" + externalExtruderID +
-        ",\"curr_temp\":0,\"tar_temp\":" +
+        ",\"curr_temp\":" + temperature + ",\"tar_temp\":" +
         temperature + "}}";
     enqueueRemoteControl("LOAD_FILAMENT", payload);
   } else if (head == "H2D_FILAMENT_UNLOAD") {
@@ -2855,9 +3039,9 @@ void handlePhoneCommand(String command) {
       return;
     }
     const int amsID = argument.toInt();
-    const int externalExtruderID =
-        printerModelFromSerial(settings.printerSerial) == "H2D" ? 1 : 0;
-    if (amsID != 254) {
+    const int externalExtruderID = externalSpoolExtruderID;
+    const int expectedVirtualAmsID = externalExtruderID == 1 ? 253 : 254;
+    if (amsID != expectedVirtualAmsID) {
       queuePhoneEvent(
           "H2D,REMOTE_ERROR,UNLOAD_FILAMENT,Chỉ hỗ trợ cuộn nhựa ngoài");
       return;
@@ -3367,6 +3551,13 @@ void updateLedStrip() {
     fillStatusLeds(ledColor(255, 0, 0));
     fillAnimatedLeds(alarmOn ? ledColor(255, 0, 0)
                              : ledStrip.Color(0, 0, 0));
+  } else if (manualFilamentActionActive) {
+    // A requested hand action is not a machine fault: beep once when it
+    // appears, then keep an unmistakable red visual until firmware clears the
+    // prompt. Never enter the repeating critical siren path for this state.
+    const uint8_t pulse = smoothPulseScale(now, 1200, 70, 255);
+    fillStatusLeds(ledColor(255, 0, 0));
+    fillAnimatedLeds(scaledLedColor(255, 0, 0, pulse));
   } else if (settingsPreviewType != 0 &&
              static_cast<int32_t>(settingsPreviewUntil - now) > 0) {
     // Buzzer volume uses a segment meter. LED brightness keeps the whole strip
@@ -3476,7 +3667,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.24.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.25.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

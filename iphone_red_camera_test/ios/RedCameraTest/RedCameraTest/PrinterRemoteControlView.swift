@@ -36,11 +36,19 @@ struct PrinterRemoteControlView: View {
     }
 
     private var usesLeftNozzlePath: Bool {
-        profile.kind == .h2d
+        directControl.snapshot.extruderCount > 1 && externalSpoolExtruderID == 1
     }
 
     private var externalSpoolExtruderID: Int {
-        usesLeftNozzlePath ? 1 : 0
+        directControl.snapshot.externalSpoolExtruderID ?? (profile.kind == .h2d ? 1 : 0)
+    }
+
+    private var externalLoadUnavailable: Bool {
+        directControl.snapshot.externalFilamentPresent == true
+    }
+
+    private var externalUnloadUnavailable: Bool {
+        directControl.snapshot.externalFilamentPresent == false
     }
 
     var body: some View {
@@ -52,6 +60,9 @@ struct PrinterRemoteControlView: View {
             }
             quickActions
             filamentControls
+            if directControl.snapshot.hasAMS {
+                amsControls
+            }
             utilityControls
         }
         .padding(16)
@@ -229,7 +240,7 @@ struct PrinterRemoteControlView: View {
                     Text(liveNozzleTemperatureText)
                         .font(.system(size: 19, weight: .semibold, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(liveNozzleIsHeating ? Color.red : Color.primary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.72)
                 }
@@ -277,7 +288,11 @@ struct PrinterRemoteControlView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(RemoteActionButtonStyle(tint: green))
-                .disabled(!controlsReady)
+                .disabled(!controlsReady || externalLoadUnavailable)
+                .opacity(externalLoadUnavailable ? 0.34 : 1)
+                .accessibilityHint(localized(externalLoadUnavailable
+                    ? "Cảm biến đã phát hiện nhựa trong đầu đùn"
+                    : "Nạp nhựa từ cuộn ngoài"))
 
                 Button {
                     confirmation = .unload(
@@ -289,7 +304,20 @@ struct PrinterRemoteControlView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(RemoteActionButtonStyle(tint: amber))
-                .disabled(!controlsReady)
+                .disabled(!controlsReady || externalUnloadUnavailable)
+                .opacity(externalUnloadUnavailable ? 0.34 : 1)
+                .accessibilityHint(localized(externalUnloadUnavailable
+                    ? "Cảm biến chưa phát hiện nhựa trong đầu đùn"
+                    : "Rút nhựa ra khỏi cuộn ngoài"))
+            }
+
+            if let present = directControl.snapshot.externalFilamentPresent {
+                Label(
+                    localized(present ? "Cảm biến: đã có nhựa" : "Cảm biến: chưa có nhựa"),
+                    systemImage: present ? "checkmark.circle.fill" : "circle.dashed"
+                )
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(present ? green : .secondary)
             }
         }
         .padding(12)
@@ -300,6 +328,82 @@ struct PrinterRemoteControlView: View {
         .overlay {
             RoundedRectangle(cornerRadius: 15, style: .continuous)
                 .stroke(cyan.opacity(0.10), lineWidth: 1)
+        }
+    }
+
+    private var amsControls: some View {
+        let trays = directControl.snapshot.amsTrays.filter(\.isPresent)
+        return VStack(alignment: .leading, spacing: 10) {
+            controlTitle("AMS", icon: "square.grid.2x2.fill")
+
+            if trays.isEmpty {
+                Text(localized("Đã phát hiện AMS • đang chờ dữ liệu khay nhựa"))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(trays) { tray in
+                    let selected = directControl.snapshot.currentAMSTrayID == tray.id
+                    let extruderID = tray.extruderID
+                        ?? directControl.snapshot.currentExtruderID
+                        ?? 0
+                    HStack(spacing: 9) {
+                        Circle()
+                            .fill(amsColor(tray.colorHex))
+                            .frame(width: 15, height: 15)
+                            .overlay(Circle().stroke(.black.opacity(0.14), lineWidth: 1))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("AMS \(tray.amsID + 1) • \(tray.slotID + 1)")
+                                .font(.system(size: 11, weight: .semibold))
+                            HStack(spacing: 4) {
+                                Text(tray.material.isEmpty ? localized("Chưa đặt loại nhựa") : tray.material)
+                                if directControl.snapshot.extruderCount > 1 {
+                                    Text("• \(localized(extruderID == 1 ? "Đầu trái" : "Đầu phải"))")
+                                }
+                            }
+                            .font(.system(size: 10, weight: .regular))
+                            .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 5)
+                        if selected {
+                            Button {
+                                directControl.unloadAMSFilament(
+                                    temperature: filamentTemperature,
+                                    extruderID: extruderID
+                                )
+                            } label: {
+                                Image(systemName: "arrow.up.from.line.compact")
+                                    .frame(width: 30, height: 30)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(amber)
+                            .disabled(!controlsReady)
+                            .accessibilityLabel(localized("Rút nhựa AMS"))
+                        } else {
+                            Button {
+                                directControl.loadAMSFilament(
+                                    tray,
+                                    temperature: filamentTemperature,
+                                    extruderID: extruderID
+                                )
+                            } label: {
+                                Image(systemName: "arrow.down.to.line.compact")
+                                    .frame(width: 30, height: 30)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(green)
+                            .disabled(!controlsReady)
+                            .accessibilityLabel(localized("Nạp nhựa AMS"))
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+        .padding(12)
+        .background(Color.black.opacity(0.025), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .stroke(Color.black.opacity(0.07), lineWidth: 1)
         }
     }
 
@@ -452,6 +556,9 @@ struct PrinterRemoteControlView: View {
                 : "Rút sợi nhựa ra khỏi đường cuộn ngoài."
         case .printerError:
             let code = prompt.errorCode.map { String(format: "%08X", $0) } ?? "—"
+            if let detail = prompt.detail, !detail.isEmpty {
+                return "\(detail) • \(code)"
+            }
             return languageCode == SEAppLanguage.english.rawValue
                 ? "Printer error \(code). Fix the cause, then continue, ignore, or stop."
                 : "Lỗi máy in \(code). Khắc phục nguyên nhân rồi tiếp tục, bỏ qua hoặc dừng."
@@ -477,6 +584,32 @@ struct PrinterRemoteControlView: View {
             ?? (bridgeTarget > 0 ? bridgeTarget : nil)
             ?? filamentTemperature
         return "\(current.map { String($0) } ?? "—")/\(target)°C"
+    }
+
+    private var liveNozzleIsHeating: Bool {
+        let snapshot = directControl.snapshot
+        let directCurrent = usesLeftNozzlePath ? snapshot.leftNozzleTemperature : snapshot.nozzleTemperature
+        let directTarget = usesLeftNozzlePath ? snapshot.leftNozzleTargetTemperature : snapshot.nozzleTargetTemperature
+        let bridgeCurrent = usesLeftNozzlePath ? bluetooth.leftNozzleTemperature : bluetooth.nozzleTemperature
+        let bridgeTarget = usesLeftNozzlePath ? bluetooth.leftNozzleTargetTemperature : bluetooth.nozzleTargetTemperature
+        let current = (snapshot.isRecent ? directCurrent : nil) ?? (bridgeCurrent >= 0 ? bridgeCurrent : nil)
+        let target = (snapshot.isRecent ? directTarget : nil) ?? (bridgeTarget > 0 ? bridgeTarget : nil)
+        guard let current, let target, target > 0 else { return false }
+        return current + 2 < target
+    }
+
+    private func amsColor(_ raw: String) -> Color {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasPrefix("#") { value.removeFirst() }
+        if value.count >= 8 { value = String(value.prefix(6)) }
+        guard value.count == 6, let rgb = UInt64(value, radix: 16) else {
+            return Color.gray.opacity(0.45)
+        }
+        return Color(
+            red: Double((rgb >> 16) & 0xFF) / 255,
+            green: Double((rgb >> 8) & 0xFF) / 255,
+            blue: Double(rgb & 0xFF) / 255
+        )
     }
 
     private func temperatureButton(systemName: String, action: @escaping () -> Void) -> some View {

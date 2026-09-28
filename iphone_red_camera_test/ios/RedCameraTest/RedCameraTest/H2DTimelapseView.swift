@@ -32,6 +32,7 @@ struct H2DTimelapseView: View {
     @State private var acknowledgedAlarmID = ""
     @State private var lastRelayedDirectFaultCode: UInt32?
     @State private var lastRelayedDirectFaultAt = Date.distantPast
+    @State private var lastManualFilamentActionID = ""
     @State private var hardwareArmRequested = false
     @State private var hardwareStartedCapture = false
     @State private var hardwareModeOneLatched = false
@@ -93,6 +94,22 @@ struct H2DTimelapseView: View {
 
     private var hasAnyCriticalPrinterAlert: Bool {
         bluetooth.hasActiveCriticalPrinterAlert || directCriticalAlert
+    }
+
+    private var directManualFilamentPrompt: BambuRemotePrompt? {
+        guard let prompt = directControl.activePrompt, prompt.kind != .printerError else { return nil }
+        return prompt
+    }
+
+    private var hasManualFilamentAction: Bool {
+        bluetooth.hasManualFilamentAction || directManualFilamentPrompt != nil
+    }
+
+    private var manualFilamentActionID: String {
+        if bluetooth.hasManualFilamentAction {
+            return "bridge-\(bluetooth.manualFilamentActionText)"
+        }
+        return directManualFilamentPrompt.map { "direct-\($0.id)" } ?? ""
     }
 
     private var displayedPrintPercent: Int {
@@ -192,6 +209,9 @@ struct H2DTimelapseView: View {
             }
             .onChange(of: directSnapshot.printErrorCode) { _, _ in
                 synchronizePrinterAlarm()
+            }
+            .onChange(of: manualFilamentActionID) { _, value in
+                synchronizeManualFilamentBeep(value)
             }
             .onChange(of: directSnapshot) { _, _ in
                 relayDirectPrinterFaultIfNeeded()
@@ -389,6 +409,7 @@ struct H2DTimelapseView: View {
                 showConfiguration = false
             }
             updateCompletionPresentation(for: bluetooth.h2dPrintState)
+            synchronizeManualFilamentBeep(manualFilamentActionID)
             timelapse.didStoreFrame = { layer, success in
                 bluetooth.acknowledgeH2DFrame(layer: layer, success: success)
             }
@@ -446,7 +467,8 @@ struct H2DTimelapseView: View {
     }
 
     private var printerIslandState: PrinterIslandState {
-        if bluetooth.hasSelectedCriticalPrinterAlert || directCriticalAlert || visibleBridgeError { return .error }
+        if bluetooth.hasSelectedCriticalPrinterAlert || directCriticalAlert ||
+            hasManualFilamentAction || visibleBridgeError { return .error }
         if timelapse.isStopping || bluetooth.isStoppingPrint { return .stopping }
         if bluetooth.isPausedPrint { return .paused }
         if timelapse.isCapturing { return .capturing }
@@ -494,6 +516,9 @@ struct H2DTimelapseView: View {
         case .paused: return "\(printerName) • ĐANG TẠM DỪNG"
         case .completed: return "\(printerName) • ĐÃ IN XONG"
         case .error:
+            if hasManualFilamentAction {
+                return "\(printerName) • CẦN THAO TÁC NHỰA"
+            }
             if bluetooth.hasSelectedCriticalPrinterAlert || directCriticalAlert {
                 return "\(activeAlarmPrinterName) • CÓ LỖI"
             }
@@ -546,7 +571,8 @@ struct H2DTimelapseView: View {
         // The full-screen edge is reserved for a confirmed printer fault.
         // Transient MQTT/bridge retries remain visible in the compact Island,
         // but may no longer flash the entire screen red during fleet polling.
-        let shouldShowEdge = bluetooth.hasSelectedCriticalPrinterAlert || directCriticalAlert
+        let shouldShowEdge = bluetooth.hasSelectedCriticalPrinterAlert ||
+            directCriticalAlert || hasManualFilamentAction
 
         return ScreenEdgeLEDStrip(
             color: .red,
@@ -798,6 +824,17 @@ struct H2DTimelapseView: View {
                     .foregroundStyle(bluetooth.hasSelectedCriticalPrinterAlert ? Color.red : cinemaAmber)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if hasManualFilamentAction {
+                Label(
+                    localizedStatus(bluetooth.manualFilamentActionText.isEmpty
+                        ? "Máy in đang chờ bạn cho sợi nhựa đi tiếp hoặc rút sợi đã cắt"
+                        : bluetooth.manualFilamentActionText),
+                    systemImage: "hand.raised.fill"
+                )
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.red)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .cardStyle()
     }
@@ -806,29 +843,34 @@ struct H2DTimelapseView: View {
     private var dashboardMetrics: some View {
         HStack(alignment: .top, spacing: 0) {
             if detectedPrinterKind == .h2d {
-                dashboardMetric(value: temperatureDisplay(
-                    displayedTemperature(bluetooth.leftNozzleTemperature, direct: directSnapshot.leftNozzleTemperature),
-                    target: displayedTemperature(bluetooth.leftNozzleTargetTemperature, direct: directSnapshot.leftNozzleTargetTemperature)
-                ), label: "Đầu trái")
-                dashboardMetric(value: temperatureDisplay(
-                    displayedTemperature(bluetooth.nozzleTemperature, direct: directSnapshot.nozzleTemperature),
-                    target: displayedTemperature(bluetooth.nozzleTargetTemperature, direct: directSnapshot.nozzleTargetTemperature)
-                ), label: "Đầu phải")
+                dashboardTemperatureMetric(
+                    current: displayedTemperature(bluetooth.leftNozzleTemperature, direct: directSnapshot.leftNozzleTemperature),
+                    target: displayedTemperature(bluetooth.leftNozzleTargetTemperature, direct: directSnapshot.leftNozzleTargetTemperature),
+                    label: "Đầu trái"
+                )
+                dashboardTemperatureMetric(
+                    current: displayedTemperature(bluetooth.nozzleTemperature, direct: directSnapshot.nozzleTemperature),
+                    target: displayedTemperature(bluetooth.nozzleTargetTemperature, direct: directSnapshot.nozzleTargetTemperature),
+                    label: "Đầu phải"
+                )
             } else {
-                dashboardMetric(value: temperatureDisplay(
-                    displayedTemperature(bluetooth.nozzleTemperature, direct: directSnapshot.nozzleTemperature),
-                    target: displayedTemperature(bluetooth.nozzleTargetTemperature, direct: directSnapshot.nozzleTargetTemperature)
-                ), label: "Đầu in")
-                dashboardMetric(value: temperatureDisplay(
-                    displayedTemperature(bluetooth.bedTemperature, direct: directSnapshot.bedTemperature),
-                    target: displayedTemperature(bluetooth.bedTargetTemperature, direct: directSnapshot.bedTargetTemperature)
-                ), label: "Bàn in")
+                dashboardTemperatureMetric(
+                    current: displayedTemperature(bluetooth.nozzleTemperature, direct: directSnapshot.nozzleTemperature),
+                    target: displayedTemperature(bluetooth.nozzleTargetTemperature, direct: directSnapshot.nozzleTargetTemperature),
+                    label: "Đầu in"
+                )
+                dashboardTemperatureMetric(
+                    current: displayedTemperature(bluetooth.bedTemperature, direct: directSnapshot.bedTemperature),
+                    target: displayedTemperature(bluetooth.bedTargetTemperature, direct: directSnapshot.bedTargetTemperature),
+                    label: "Bàn in"
+                )
             }
             if detectedPrinterKind == .h2d {
-                dashboardMetric(value: temperatureDisplay(
-                    displayedTemperature(bluetooth.bedTemperature, direct: directSnapshot.bedTemperature),
-                    target: displayedTemperature(bluetooth.bedTargetTemperature, direct: directSnapshot.bedTargetTemperature)
-                ), label: "Bàn in")
+                dashboardTemperatureMetric(
+                    current: displayedTemperature(bluetooth.bedTemperature, direct: directSnapshot.bedTemperature),
+                    target: displayedTemperature(bluetooth.bedTargetTemperature, direct: directSnapshot.bedTargetTemperature),
+                    label: "Bàn in"
+                )
             } else {
                 dashboardMetric(value: primaryFanDisplay, label: "Quạt")
             }
@@ -839,19 +881,33 @@ struct H2DTimelapseView: View {
         }
     }
 
-    private func dashboardMetric(value: String, label: String) -> some View {
+    private func dashboardMetric(value: String, label: String, tint: Color = .primary) -> some View {
         VStack(spacing: 5) {
             Text(value)
                 .font(.system(size: 16, weight: .medium))
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.65)
+                .foregroundStyle(tint)
             Text(localizedStatus(label))
                 .font(.system(size: 10, weight: .regular))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private func dashboardTemperatureMetric(current: Int?, target: Int?, label: String) -> some View {
+        dashboardMetric(
+            value: temperatureDisplay(current, target: target),
+            label: label,
+            tint: temperatureIsHeating(current: current, target: target) ? .red : .primary
+        )
+    }
+
+    private func temperatureIsHeating(current: Int?, target: Int?) -> Bool {
+        guard let current, let target, target > 0 else { return false }
+        return current + 2 < target
     }
 
     private func temperatureDisplay(_ value: Int?, target: Int?) -> String {
@@ -2001,7 +2057,9 @@ struct H2DTimelapseView: View {
         let targetText = target.map { String($0) } ?? "–"
         return Label("\(localizedStatus(label)) \(currentText)/\(targetText)°C", systemImage: "thermometer.medium")
             .font(.custom("Arial", size: 11).monospacedDigit().weight(.semibold))
-            .foregroundStyle(.orange.opacity(0.88))
+            .foregroundStyle(temperatureIsHeating(current: current, target: target)
+                ? Color.red
+                : Color.orange.opacity(0.88))
     }
 
     @ViewBuilder
@@ -2150,6 +2208,22 @@ struct H2DTimelapseView: View {
         // must not have to open the faulty profile before the siren can start.
         guard acknowledgedAlarmID != currentAlarmID else { return }
         printerAlarm.startLooping()
+    }
+
+    private func synchronizeManualFilamentBeep(_ actionID: String) {
+        guard !actionID.isEmpty else {
+            lastManualFilamentActionID = ""
+            return
+        }
+        guard actionID != lastManualFilamentActionID else { return }
+        // A single physical intervention may arrive first over direct MQTT and
+        // then over the ESP32 relay. Treat that source hand-off as the same
+        // incident: beep only when the alert changes from inactive to active.
+        let wasAlreadyActive = !lastManualFilamentActionID.isEmpty
+        lastManualFilamentActionID = actionID
+        if !wasAlreadyActive {
+            printerAlarm.playOneShotBeep()
+        }
     }
 
     private func relayDirectPrinterFaultIfNeeded(force: Bool = false) {

@@ -3,6 +3,18 @@ import Foundation
 import Network
 import Security
 
+struct BambuAMSTraySnapshot: Identifiable, Equatable {
+    let amsID: Int
+    let slotID: Int
+    let material: String
+    let colorHex: String
+    let isPresent: Bool
+    let extruderID: Int?
+
+    var id: String { "\(amsID)-\(slotID)" }
+    var trayIndex: Int { amsID >= 128 ? amsID : amsID * 4 + slotID }
+}
+
 struct BambuDirectSnapshot: Equatable {
     var printState = ""
     var printPercent: Int?
@@ -18,9 +30,17 @@ struct BambuDirectSnapshot: Equatable {
     var printSpeedLevel: Int?
     var printStage: Int?
     var printErrorCode: UInt32?
+    var printerErrorText = ""
     var jobID = ""
     var subtaskID = ""
     var chamberLightOn: Bool?
+    var extruderCount = 1
+    var currentExtruderID: Int?
+    var externalSpoolExtruderID: Int?
+    var externalFilamentPresent: Bool?
+    var currentAMSTrayID: String?
+    var hasAMS = false
+    var amsTrays: [BambuAMSTraySnapshot] = []
     var receivedAt: Date?
 
     var isRecent: Bool {
@@ -33,9 +53,25 @@ struct BambuDirectSnapshot: Equatable {
             .contains(printState)
     }
 
+    var isManualFilamentLoadRequest: Bool {
+        guard let code = printErrorCode else { return false }
+        return [0x07FEC00A, 0x07FFC00A, 0x07FE8007, 0x07FF8007].contains(code)
+    }
+
+    var isManualFilamentUnloadRequest: Bool {
+        guard let code = printErrorCode else { return false }
+        return [0x07FEC003, 0x07FFC003, 0x07FEC006, 0x07FFC006].contains(code) ||
+            (printStage == 22 && (code & 0xFFFF) == 0x8003)
+    }
+
+    var hasManualFilamentRequest: Bool {
+        isManualFilamentLoadRequest || isManualFilamentUnloadRequest
+    }
+
     var hasCriticalError: Bool {
-        printState == "ERROR" ||
+        !hasManualFilamentRequest && (printState == "ERROR" ||
             ((printErrorCode ?? 0) != 0 && (hasActivePrintJob || printState == "FAILED"))
+        )
     }
 }
 
@@ -49,6 +85,7 @@ struct BambuRemotePrompt: Identifiable, Equatable {
     let id: String
     let kind: BambuRemotePromptKind
     let errorCode: UInt32?
+    let detail: String?
 }
 
 /// Direct LAN MQTT control for the selected printer. Control no longer depends
@@ -231,8 +268,8 @@ final class BambuPrinterControlManager: ObservableObject {
         }
     }
 
-    /// H2D uses extruder 1 for its left external-spool path. Single-nozzle
-    /// printers (A1/A1 mini/P2S) use their only extruder, id 0.
+    /// The selected external-spool path comes from the printer's own extruder
+    /// report. Single-nozzle printers use their only extruder, id 0.
     func loadExternalFilament(temperature: Int, extruderID: Int) {
         guard (170...320).contains(temperature) else {
             publishFailure("Nhiệt độ nạp nhựa không hợp lệ")
@@ -269,6 +306,67 @@ final class BambuPrinterControlManager: ObservableObject {
         }
     }
 
+    func loadAMSFilament(_ tray: BambuAMSTraySnapshot, temperature: Int, extruderID: Int) {
+        guard tray.isPresent else {
+            publishFailure("Khay AMS này chưa có nhựa")
+            return
+        }
+        guard (170...320).contains(temperature), extruderID == 0 || extruderID == 1 else {
+            publishFailure("Thông số nạp nhựa AMS không hợp lệ")
+            return
+        }
+        preheatNozzle(temperature: temperature, extruderID: extruderID) { [weak self] in
+            guard let self else { return }
+            self.filamentOperationNumber &+= 1
+            self.activeFilamentOperation = .filamentLoad
+            self.dismissedPromptID = nil
+            self.send(
+                section: "print",
+                command: "ams_change_filament",
+                fields: [
+                    "ams_id": tray.amsID,
+                    "slot_id": tray.slotID,
+                    "target": tray.trayIndex,
+                    "extruder_id": extruderID,
+                    "curr_temp": temperature,
+                    "tar_temp": temperature
+                ],
+                actionName: "Nạp \(tray.material.isEmpty ? "nhựa" : tray.material) từ AMS"
+            )
+        }
+    }
+
+    func unloadAMSFilament(temperature: Int, extruderID: Int) {
+        guard (170...320).contains(temperature), extruderID == 0 || extruderID == 1 else {
+            publishFailure("Thông số rút nhựa AMS không hợp lệ")
+            return
+        }
+        let current = snapshotStorage.amsTrays.first { $0.id == snapshotStorage.currentAMSTrayID }
+        guard let current else {
+            publishFailure("Máy in chưa báo khay AMS đang dùng")
+            return
+        }
+        preheatNozzle(temperature: temperature, extruderID: extruderID) { [weak self] in
+            guard let self else { return }
+            self.filamentOperationNumber &+= 1
+            self.activeFilamentOperation = .filamentUnload
+            self.dismissedPromptID = nil
+            self.send(
+                section: "print",
+                command: "ams_change_filament",
+                fields: [
+                    "ams_id": current.amsID,
+                    "slot_id": 255,
+                    "target": 255,
+                    "extruder_id": extruderID,
+                    "curr_temp": temperature,
+                    "tar_temp": temperature
+                ],
+                actionName: "Rút nhựa khỏi AMS"
+            )
+        }
+    }
+
     /// Bambu Studio explicitly sets the nozzle target before a manual filament
     /// operation. Without this step some firmwares begin the positioning/home
     /// phase while leaving the target at 0°C. H2D needs the structured command
@@ -279,7 +377,7 @@ final class BambuPrinterControlManager: ObservableObject {
         extruderID: Int,
         completion: @escaping () -> Void
     ) {
-        if extruderID == 1 {
+        if snapshotStorage.extruderCount > 1 {
             send(
                 section: "print",
                 command: "set_nozzle_temp",
@@ -287,7 +385,7 @@ final class BambuPrinterControlManager: ObservableObject {
                     "extruder_index": extruderID,
                     "target_temp": temperature
                 ],
-                actionName: "Gia nhiệt đầu trái tới \(temperature)°C",
+                actionName: "Gia nhiệt đầu \(extruderID == 1 ? "trái" : "phải") tới \(temperature)°C",
                 onSuccess: completion
             )
         } else {
@@ -305,13 +403,16 @@ final class BambuPrinterControlManager: ObservableObject {
         filamentOperationNumber &+= 1
         activeFilamentOperation = load ? .filamentLoad : .filamentUnload
         dismissedPromptID = nil
+        // Bambu's virtual tray 254 belongs to the main/right extruder; 253 is
+        // the deputy/left path on dual-tool printers.
+        let virtualAMSID = extruderID == 1 ? 253 : 254
         send(
             section: "print",
             command: "ams_change_filament",
             fields: [
-                "ams_id": 254,
+                "ams_id": virtualAMSID,
                 "slot_id": load ? 0 : 255,
-                "target": load ? 254 : 255,
+                "target": load ? virtualAMSID : 255,
                 "extruder_id": extruderID,
                 // Studio supplies both the current-filament and target-filament
                 // temperatures. Zero here can leave the nozzle target unchanged.
@@ -320,8 +421,7 @@ final class BambuPrinterControlManager: ObservableObject {
             ],
             actionName: load
                 ? (extruderID == 1 ? "Nạp nhựa cuộn ngoài vào đầu trái" : "Nạp nhựa cuộn ngoài")
-                : (extruderID == 1 ? "Rút nhựa cuộn ngoài khỏi đầu trái" : "Rút nhựa cuộn ngoài"),
-            onSuccess: { [weak self] in self?.publishFilamentPrompt() }
+                : (extruderID == 1 ? "Rút nhựa cuộn ngoài khỏi đầu trái" : "Rút nhựa cuộn ngoài")
         )
     }
 
@@ -519,6 +619,13 @@ final class BambuPrinterControlManager: ObservableObject {
             if let value = value as? String { return Int(value) }
             return nil
         }
+        func hexadecimal(_ value: Any?) -> UInt64? {
+            if let value = value as? NSNumber { return value.uint64Value }
+            guard var text = value as? String else { return nil }
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text.hasPrefix("0x") || text.hasPrefix("0X") { text.removeFirst(2) }
+            return UInt64(text, radix: 16)
+        }
         func update(_ key: String, _ field: WritableKeyPath<BambuDirectSnapshot, Int?>) {
             guard let value = number(report[key]) else { return }
             next[keyPath: field] = value
@@ -555,6 +662,138 @@ final class BambuPrinterControlManager: ObservableObject {
             changed = true
         }
 
+        if let extruder = report["extruder"] as? [String: Any],
+           let entries = extruder["info"] as? [[String: Any]] {
+            if let packedState = number(extruder["state"]) {
+                let count = max(1, packedState & 0xF)
+                let current = (packedState >> 4) & 0xF
+                next.extruderCount = count
+                next.currentExtruderID = current < count ? current : nil
+                changed = true
+            } else if !entries.isEmpty {
+                next.extruderCount = max(1, entries.count)
+                changed = true
+            }
+
+            var filamentByExtruder: [Int: Bool] = [:]
+            var detectedExternalExtruder: Int?
+            var detectedCurrentTray: String?
+            for (index, entry) in entries.enumerated() {
+                let id = number(entry["id"]) ?? index
+                if let info = number(entry["info"]) {
+                    // Bambu Studio's DevExtruderSystem uses bit 1 for the
+                    // toolhead filament sensor (bit 2 is the buffer sensor).
+                    filamentByExtruder[id] = ((info >> 1) & 1) != 0
+                }
+                if let packedSlot = number(entry["snow"]), packedSlot >= 0 {
+                    let amsID = (packedSlot >> 8) & 0xFF
+                    let slotID = packedSlot & 0xFF
+                    if amsID == 253 || amsID == 254 {
+                        detectedExternalExtruder = id
+                    } else if amsID < 253, slotID < 255 {
+                        detectedCurrentTray = "\(amsID)-\(slotID)"
+                    }
+                }
+
+                guard let packedTemperature = number(entry["temp"]), packedTemperature >= 0 else { continue }
+                let actual = packedTemperature & 0xFFFF
+                let target = (packedTemperature >> 16) & 0xFFFF
+                if id == 0 {
+                    next.nozzleTemperature = actual
+                    next.nozzleTargetTemperature = target
+                } else if id == 1 {
+                    next.leftNozzleTemperature = actual
+                    next.leftNozzleTargetTemperature = target
+                }
+                changed = true
+            }
+            if let detectedExternalExtruder {
+                next.externalSpoolExtruderID = detectedExternalExtruder
+                next.externalFilamentPresent = filamentByExtruder[detectedExternalExtruder]
+                changed = true
+            } else if let configured = next.externalSpoolExtruderID,
+                      let present = filamentByExtruder[configured] {
+                next.externalFilamentPresent = present
+                changed = true
+            }
+            if let detectedCurrentTray {
+                next.currentAMSTrayID = detectedCurrentTray
+                changed = true
+            }
+        } else if let switchState = number(report["hw_switch_state"]) {
+            // Single-nozzle printers expose the same sensor as a top-level
+            // field. 0 means empty, 1 means filament has reached the extruder.
+            next.extruderCount = 1
+            next.currentExtruderID = 0
+            next.externalSpoolExtruderID = 0
+            next.externalFilamentPresent = switchState == 1
+            changed = true
+        }
+
+        let virtualTrays: [[String: Any]] = {
+            if let tray = report["vt_tray"] as? [String: Any] { return [tray] }
+            return report["vt_tray"] as? [[String: Any]] ?? []
+        }()
+        for tray in virtualTrays {
+            guard let id = number(tray["id"]) else { continue }
+            if id == 254 {
+                next.externalSpoolExtruderID = 0
+                changed = true
+            } else if id == 253 {
+                next.externalSpoolExtruderID = 1
+                changed = true
+            }
+        }
+
+        if let ams = report["ams"] as? [String: Any] {
+            let units = ams["ams"] as? [[String: Any]] ?? []
+            let existenceBits = hexadecimal(ams["ams_exist_bits"])
+            let trayExistenceBits = hexadecimal(ams["tray_exist_bits"])
+            let hasReportedAMS = (existenceBits ?? 0) != 0 || !units.isEmpty
+            next.hasAMS = hasReportedAMS
+
+            if let trayNow = number(ams["tray_now"]), trayNow >= 0, trayNow < 253 {
+                if next.extruderCount == 1 {
+                    next.currentAMSTrayID = "\(trayNow >> 2)-\(trayNow & 0x3)"
+                }
+            } else if number(ams["tray_now"]) == 255 {
+                next.currentAMSTrayID = nil
+            }
+
+            var trays: [BambuAMSTraySnapshot] = []
+            for unit in units {
+                guard let amsID = number(unit["id"]) else { continue }
+                var boundExtruder: Int?
+                if let info = hexadecimal(unit["info"]) {
+                    let candidate = Int((info >> 8) & 0xF)
+                    if candidate != 0xE { boundExtruder = candidate }
+                }
+                for tray in unit["tray"] as? [[String: Any]] ?? [] {
+                    guard let slotID = number(tray["id"]) else { continue }
+                    let bitIndex = amsID >= 128 ? 16 + amsID - 128 + slotID : amsID * 4 + slotID
+                    let present = trayExistenceBits.map { ($0 & (UInt64(1) << UInt64(bitIndex))) != 0 }
+                        ?? !(tray["tray_type"] as? String ?? "").isEmpty
+                    let material = (tray["tray_type"] as? String ?? "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .uppercased()
+                    let color = (tray["tray_color"] as? String ?? "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    trays.append(BambuAMSTraySnapshot(
+                        amsID: amsID,
+                        slotID: slotID,
+                        material: material,
+                        colorHex: color,
+                        isPresent: present,
+                        extruderID: boundExtruder
+                    ))
+                }
+            }
+            next.amsTrays = trays.sorted {
+                $0.amsID == $1.amsID ? $0.slotID < $1.slotID : $0.amsID < $1.amsID
+            }
+            changed = true
+        }
+
         if let lights = report["lights_report"] as? [[String: Any]],
            let chamber = lights.first(where: { ($0["node"] as? String) == "chamber_light" }),
            let mode = chamber["mode"] as? String {
@@ -562,31 +801,19 @@ final class BambuPrinterControlManager: ObservableObject {
             changed = true
         }
 
-        if configuration?.isDualNozzle == true,
-           let extruder = report["extruder"] as? [String: Any],
-           let info = extruder["info"] as? [[String: Any]] {
-            for (index, entry) in info.enumerated() {
-                guard let packed = number(entry["temp"]), packed >= 0 else { continue }
-                let id = number(entry["id"]) ?? index
-                let actual = packed & 0xFFFF
-                let target = (packed >> 16) & 0xFFFF
-                if id == 0 {
-                    next.nozzleTemperature = actual
-                    next.nozzleTargetTemperature = target
-                    changed = true
-                } else if id == 1 {
-                    next.leftNozzleTemperature = actual
-                    next.leftNozzleTargetTemperature = target
-                    changed = true
-                }
-            }
-        } else if configuration?.isDualNozzle == false {
+        if report["extruder"] == nil, configuration?.isDualNozzle == false {
             update("nozzle_temper", \.nozzleTemperature)
             update("nozzle_target_temper", \.nozzleTargetTemperature)
         }
 
         if let error = number(report["print_error"]), error >= 0 {
             next.printErrorCode = UInt32(truncatingIfNeeded: error)
+            if error == 0 { next.printerErrorText = "" }
+            changed = true
+        }
+        if let text = printerErrorDetail(in: report), !text.isEmpty,
+           (next.printErrorCode ?? 0) != 0 {
+            next.printerErrorText = text
             changed = true
         }
         guard changed else { return }
@@ -599,6 +826,15 @@ final class BambuPrinterControlManager: ObservableObject {
     }
 
     private func refreshActivePrompt(for snapshot: BambuDirectSnapshot) {
+        if snapshot.printErrorCode == 0,
+           snapshot.printStage != 22, snapshot.printStage != 24,
+           let active = activePromptStorage,
+           active.kind == .filamentLoad || active.kind == .filamentUnload {
+            activeFilamentOperation = nil
+            dismissedPromptID = nil
+            publishPrompt(nil)
+        }
+
         if snapshot.printStage != 22, snapshot.printStage != 24,
            snapshot.printErrorCode == 0,
            dismissedPromptID?.hasPrefix("filament-") == true {
@@ -612,11 +848,11 @@ final class BambuPrinterControlManager: ObservableObject {
             activeFilamentOperation = .filamentLoad
         }
 
-        // 07FEC003 is Bambu's interactive external-filament dialog. If SE is
-        // reopened mid-operation, the current stage/command may be gone; the
-        // official action table identifies it as Continue + Assistant.
-        if activeFilamentOperation == nil,
-           snapshot.printErrorCode == 0x07FEC003 {
+        // Reconstruct the interactive dialog even when SE is opened after the
+        // operation began and the incremental stage packet is already gone.
+        if snapshot.isManualFilamentLoadRequest {
+            activeFilamentOperation = .filamentLoad
+        } else if snapshot.isManualFilamentUnloadRequest {
             activeFilamentOperation = .filamentUnload
         }
 
@@ -624,14 +860,25 @@ final class BambuPrinterControlManager: ObservableObject {
         // backing code for its interactive dialog (for example 07FEC003).
         // It is not a generic print failure. Preserve the operation type so
         // the iPhone exposes the same `done`/`resume` actions as Bambu Studio.
-        if activeFilamentOperation != nil {
+        if activeFilamentOperation != nil, (snapshot.printErrorCode ?? 0) != 0 {
             publishFilamentPrompt()
+            return
+        }
+
+        if activeFilamentOperation != nil, snapshot.printErrorCode == 0,
+           activePromptStorage?.kind != .printerError {
+            publishPrompt(nil)
             return
         }
 
         if let code = snapshot.printErrorCode, code != 0 {
             let id = "error-\(String(format: "%08X", code))-\(snapshot.jobID)-\(snapshot.subtaskID)"
-            publishPrompt(BambuRemotePrompt(id: id, kind: .printerError, errorCode: code))
+            publishPrompt(BambuRemotePrompt(
+                id: id,
+                kind: .printerError,
+                errorCode: code,
+                detail: snapshot.printerErrorText.isEmpty ? nil : snapshot.printerErrorText
+            ))
             return
         }
 
@@ -644,7 +891,29 @@ final class BambuPrinterControlManager: ObservableObject {
     private func publishFilamentPrompt() {
         guard let kind = activeFilamentOperation else { return }
         let id = "filament-\(filamentOperationNumber)-\(kind == .filamentLoad ? "load" : "unload")"
-        publishPrompt(BambuRemotePrompt(id: id, kind: kind, errorCode: nil))
+        publishPrompt(BambuRemotePrompt(id: id, kind: kind, errorCode: nil, detail: nil))
+    }
+
+    private func printerErrorDetail(in report: [String: Any]) -> String? {
+        for key in ["error_msg", "error_message", "reason", "message"] {
+            if let value = report[key] as? String {
+                let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty, !["ok", "good", "success"].contains(text.lowercased()) {
+                    return text
+                }
+            }
+        }
+        if let entries = report["hms"] as? [[String: Any]] {
+            for entry in entries {
+                for key in ["message", "msg", "description", "reason"] {
+                    if let value = entry[key] as? String,
+                       !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+            }
+        }
+        return nil
     }
 
     private func publishPrompt(_ prompt: BambuRemotePrompt?) {

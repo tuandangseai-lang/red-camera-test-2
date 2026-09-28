@@ -48,6 +48,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var hasPrinterAlert = false
     @Published private(set) var hasCriticalPrinterAlert = false
     @Published private(set) var printerAlertText = ""
+    @Published private(set) var hasManualFilamentAction = false
+    @Published private(set) var manualFilamentActionText = ""
     @Published private(set) var h2dStatusCode = "BOOTING"
     @Published private(set) var printerModelCode = "Bambu"
     @Published private(set) var printerSerial = ""
@@ -197,6 +199,8 @@ final class H2DBLEManager: NSObject, ObservableObject {
         hasPrinterAlert = false
         hasCriticalPrinterAlert = false
         printerAlertText = ""
+        hasManualFilamentAction = false
+        manualFilamentActionText = ""
         h2dStatusCode = isSwitchingPrinter ? "SWITCHING" : "BOOTING"
         h2dBridgeStatus = isSwitchingPrinter
             ? printerSwitchPhaseText
@@ -1496,6 +1500,23 @@ final class H2DBLEManager: NSObject, ObservableObject {
                             : "\(printerDisplayName) chưa bắt đầu • đang theo dõi")
                         : "Đang kết nối \(printerDisplayName)"
                 }
+            }
+        case "FILAMENT_ACTION":
+            guard !isSwitchingPrinter, fields.count >= 3 else { return }
+            let active = fields[2] == "1"
+            hasManualFilamentAction = active
+            manualFilamentActionText = active && fields.count >= 5
+                ? fields.dropFirst(4).joined(separator: " • ")
+                : ""
+            if active {
+                hasBridgeError = false
+                h2dBridgeStatus = manualFilamentActionText.isEmpty
+                    ? "Máy in đang chờ thao tác nhựa"
+                    : manualFilamentActionText
+            } else if !hasSelectedCriticalPrinterAlert {
+                h2dBridgeStatus = isPrintSessionActive
+                    ? h2dStageText
+                    : "\(printerDisplayName) chưa bắt đầu • đang theo dõi"
             }
         case "ERROR":
             let detail = fields.dropFirst(2).joined(separator: " • ")
