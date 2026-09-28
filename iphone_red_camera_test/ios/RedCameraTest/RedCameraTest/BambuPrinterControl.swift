@@ -10,6 +10,8 @@ struct BambuAMSTraySnapshot: Identifiable, Equatable {
     let colorHex: String
     let isPresent: Bool
     let extruderID: Int?
+    let dryingTemperature: Int?
+    let dryingHours: Int?
 
     var id: String { "\(amsID)-\(slotID)" }
     var trayIndex: Int { amsID >= 128 ? amsID : amsID * 4 + slotID }
@@ -39,8 +41,13 @@ struct BambuDirectSnapshot: Equatable {
     var currentExtruderID: Int?
     var externalSpoolExtruderID: Int?
     var externalFilamentPresent: Bool?
+    var filamentPresentByExtruder: [Int: Bool] = [:]
     var currentAMSTrayID: String?
     var hasAMS = false
+    var amsDryerUnitID: Int?
+    var amsDrying = false
+    var amsDryingRemainingMinutes: Int?
+    var amsDryingTemperature: Int?
     var amsTrays: [BambuAMSTraySnapshot] = []
     var receivedAt: Date?
 
@@ -187,6 +194,70 @@ final class BambuPrinterControlManager: ObservableObject {
 
     func stopPrint() {
         send(section: "print", command: "stop", fields: [:], actionName: "Dừng")
+    }
+
+    func setNozzleTemperature(_ temperature: Int, extruderID: Int) {
+        guard (0...320).contains(temperature), extruderID == 0 || extruderID == 1 else {
+            publishFailure("Nhiệt độ đầu in không hợp lệ")
+            return
+        }
+        if snapshotStorage.extruderCount > 1 {
+            send(
+                section: "print",
+                command: "set_nozzle_temp",
+                fields: ["extruder_index": extruderID, "target_temp": temperature],
+                actionName: "Đặt nhiệt độ đầu in"
+            )
+        } else {
+            send(
+                section: "print",
+                command: "gcode_line",
+                fields: ["param": "M104 S\(temperature)\n"],
+                actionName: "Đặt nhiệt độ đầu in"
+            )
+        }
+    }
+
+    func setBedTemperature(_ temperature: Int) {
+        guard (0...120).contains(temperature) else {
+            publishFailure("Nhiệt độ bàn in không hợp lệ")
+            return
+        }
+        send(
+            section: "print",
+            command: "gcode_line",
+            fields: ["param": "M140 S\(temperature)\n"],
+            actionName: "Đặt nhiệt độ bàn in"
+        )
+    }
+
+    /// Heating-capable AMS units accept this command over the printer's LAN
+    /// MQTT channel. Rotation stays off by default so a drying cycle never
+    /// starts moving a spool unexpectedly.
+    func setAMSDrying(
+        enabled: Bool,
+        amsID: Int,
+        durationHours: Int,
+        temperature: Int
+    ) {
+        guard amsID >= 0, (1...48).contains(durationHours), (45...90).contains(temperature) else {
+            publishFailure("Thông số sấy AMS không hợp lệ")
+            return
+        }
+        send(
+            section: "print",
+            command: "ams_filament_drying",
+            fields: [
+                "ams_id": amsID,
+                "cooling_temp": enabled ? 45 : 40,
+                "duration": enabled ? durationHours : 0,
+                "humidity": 0,
+                "mode": enabled ? 1 : 0,
+                "rotate_tray": false,
+                "temp": enabled ? temperature : 0
+            ],
+            actionName: enabled ? "Bật sấy AMS" : "Tắt sấy AMS"
+        )
     }
 
     func continueActivePrompt() {
@@ -732,6 +803,10 @@ final class BambuPrinterControlManager: ObservableObject {
                 next.externalFilamentPresent = present
                 changed = true
             }
+            if !filamentByExtruder.isEmpty {
+                next.filamentPresentByExtruder = filamentByExtruder
+                changed = true
+            }
             if let detectedCurrentTray {
                 next.currentAMSTrayID = detectedCurrentTray
                 changed = true
@@ -743,6 +818,7 @@ final class BambuPrinterControlManager: ObservableObject {
             next.currentExtruderID = 0
             next.externalSpoolExtruderID = 0
             next.externalFilamentPresent = switchState == 1
+            next.filamentPresentByExtruder[0] = switchState == 1
             changed = true
         }
 
@@ -788,6 +864,17 @@ final class BambuPrinterControlManager: ObservableObject {
             var trays: [BambuAMSTraySnapshot] = []
             for unit in units {
                 guard let amsID = number(unit["id"]) else { continue }
+                if unit["dry_time"] != nil {
+                    next.amsDryerUnitID = next.amsDryerUnitID ?? amsID
+                    let dryMinutes = number(unit["dry_time"])
+                    if let dryMinutes {
+                        next.amsDryingRemainingMinutes = max(0, dryMinutes)
+                        next.amsDrying = dryMinutes > 0
+                    }
+                    if let temperature = number(unit["temp"]), temperature >= 40 {
+                        next.amsDryingTemperature = temperature
+                    }
+                }
                 var boundExtruder: Int?
                 if let info = hexadecimal(unit["info"]) {
                     let candidate = Int((info >> 8) & 0xF)
@@ -803,13 +890,17 @@ final class BambuPrinterControlManager: ObservableObject {
                         .uppercased()
                     let color = (tray["tray_color"] as? String ?? "")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let dryingTemperature = number(tray["drying_temp"])
+                    let dryingHours = number(tray["drying_time"])
                     trays.append(BambuAMSTraySnapshot(
                         amsID: amsID,
                         slotID: slotID,
                         material: material,
                         colorHex: color,
                         isPresent: present,
-                        extruderID: boundExtruder
+                        extruderID: boundExtruder,
+                        dryingTemperature: dryingTemperature,
+                        dryingHours: dryingHours
                     ))
                 }
             }

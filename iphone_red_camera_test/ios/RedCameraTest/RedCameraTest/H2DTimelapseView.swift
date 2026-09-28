@@ -47,6 +47,7 @@ struct H2DTimelapseView: View {
     @State private var ledBrightnessSendWorkItem: DispatchWorkItem?
     @State private var showCaptureBrightnessSlider = false
     @State private var captureBrightnessCollapseWorkItem: DispatchWorkItem?
+    @State private var temperatureEditor: DashboardTemperatureEditor?
 
     private var detectedPrinterKind: BambuPrinterKind {
         let fromSerial = BambuPrinterKind.detect(serial: printerSerial)
@@ -168,6 +169,19 @@ struct H2DTimelapseView: View {
     var body: some View {
         observedContent
             .environment(\.locale, Locale(identifier: appLanguageCode))
+            .sheet(item: $temperatureEditor) { editor in
+                DashboardTemperatureEditorSheet(
+                    editor: editor,
+                    languageCode: appLanguageCode,
+                    onCancel: { temperatureEditor = nil },
+                    onSave: { value in
+                        applyDashboardTemperature(value, to: editor.target)
+                        temperatureEditor = nil
+                    }
+                )
+                .presentationDetents([.height(270)])
+                .presentationDragIndicator(.visible)
+            }
             .onChange(of: bluetooth.hardwareControlRevision) { _, _ in
                 scheduleHardwareControls()
             }
@@ -686,7 +700,7 @@ struct H2DTimelapseView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     cinemaSystemHeader
-                    printerDashboardSummary
+                    printerDashboardSummary()
                     printerCameraCard
                     PrinterRemoteControlView(
                         bluetooth: bluetooth,
@@ -773,7 +787,7 @@ struct H2DTimelapseView: View {
                     Text(appLanguageCode == SEAppLanguage.vietnamese.rawValue ? "TV" : "EN")
                         .font(.system(size: 12, weight: .semibold))
                         .frame(width: 34, height: 28)
-                        .background(Color.black.opacity(0.05), in: Capsule())
+                        .background(Color.primary.opacity(0.05), in: Capsule())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(appLanguageCode == "vi" ? "Đổi sang tiếng Anh" : "Switch to Vietnamese")
@@ -782,7 +796,7 @@ struct H2DTimelapseView: View {
         .frame(minHeight: 36)
     }
 
-    private var printerDashboardSummary: some View {
+    private func printerDashboardSummary(darkMode: Bool = false) -> some View {
         VStack(spacing: 22) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
@@ -801,17 +815,20 @@ struct H2DTimelapseView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(cinemaCyan)
-                .background(Color.black.opacity(0.04), in: Circle())
+                .background(
+                    darkMode ? Color.white.opacity(0.07) : Color.black.opacity(0.04),
+                    in: Circle()
+                )
             }
 
             ZStack {
-                LivePrintProgressRing(progress: printerProgress)
+                LivePrintProgressRing(progress: printerProgress, darkMode: darkMode)
 
                 VStack(spacing: 5) {
                     Text("\(displayedPrintPercent)%")
                         .font(.system(size: 52, weight: .light))
                         .monospacedDigit()
-                        .foregroundStyle(Color.black.opacity(0.66))
+                        .foregroundStyle(darkMode ? Color.white.opacity(0.84) : Color.black.opacity(0.66))
                     Text(localizedStatus(displayedLayerText))
                         .font(.system(size: 13, weight: .regular))
                         .foregroundStyle(.secondary)
@@ -821,7 +838,7 @@ struct H2DTimelapseView: View {
 
             dashboardMetrics
 
-            if bluetooth.hasActivePrinterAlert && !bluetooth.printerAlertText.isEmpty {
+            if bluetooth.hasSelectedCriticalPrinterAlert && !bluetooth.printerAlertText.isEmpty {
                 Label(localizedStatus(bluetooth.printerAlertText), systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(bluetooth.hasSelectedCriticalPrinterAlert ? Color.red : cinemaAmber)
@@ -839,7 +856,7 @@ struct H2DTimelapseView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .cardStyle()
+        .cardStyle(dark: darkMode)
     }
 
     @ViewBuilder
@@ -849,37 +866,42 @@ struct H2DTimelapseView: View {
                 dashboardTemperatureMetric(
                     current: displayedTemperature(bluetooth.leftNozzleTemperature, direct: directSnapshot.leftNozzleTemperature),
                     target: displayedTemperature(bluetooth.leftNozzleTargetTemperature, direct: directSnapshot.leftNozzleTargetTemperature),
-                    label: "Đầu trái"
+                    label: "Đầu trái",
+                    targetKind: .nozzle(extruderID: 1)
                 )
                 dashboardTemperatureMetric(
                     current: displayedTemperature(bluetooth.nozzleTemperature, direct: directSnapshot.nozzleTemperature),
                     target: displayedTemperature(bluetooth.nozzleTargetTemperature, direct: directSnapshot.nozzleTargetTemperature),
-                    label: "Đầu phải"
+                    label: "Đầu phải",
+                    targetKind: .nozzle(extruderID: 0)
                 )
             } else {
                 dashboardTemperatureMetric(
                     current: displayedTemperature(bluetooth.nozzleTemperature, direct: directSnapshot.nozzleTemperature),
                     target: displayedTemperature(bluetooth.nozzleTargetTemperature, direct: directSnapshot.nozzleTargetTemperature),
-                    label: "Đầu in"
+                    label: "Đầu in",
+                    targetKind: .nozzle(extruderID: 0)
                 )
                 dashboardTemperatureMetric(
                     current: displayedTemperature(bluetooth.bedTemperature, direct: directSnapshot.bedTemperature),
                     target: displayedTemperature(bluetooth.bedTargetTemperature, direct: directSnapshot.bedTargetTemperature),
-                    label: "Bàn in"
+                    label: "Bàn in",
+                    targetKind: .bed
                 )
             }
             if detectedPrinterKind == .h2d {
                 dashboardTemperatureMetric(
                     current: displayedTemperature(bluetooth.bedTemperature, direct: directSnapshot.bedTemperature),
                     target: displayedTemperature(bluetooth.bedTargetTemperature, direct: directSnapshot.bedTargetTemperature),
-                    label: "Bàn in"
+                    label: "Bàn in",
+                    targetKind: .bed
                 )
             } else {
                 dashboardMetric(value: primaryFanDisplay, label: "Quạt")
             }
             dashboardMetric(
                 value: remainingDashboardText,
-                label: "Còn lại"
+                label: "Hoàn thành"
             )
         }
     }
@@ -887,7 +909,7 @@ struct H2DTimelapseView: View {
     private func dashboardMetric(value: String, label: String, tint: Color = .primary) -> some View {
         VStack(spacing: 5) {
             Text(value)
-                .font(.system(size: 16, weight: .medium))
+                .font(.system(size: 13, weight: .medium))
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.65)
@@ -900,12 +922,45 @@ struct H2DTimelapseView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private func dashboardTemperatureMetric(current: Int?, target: Int?, label: String) -> some View {
-        dashboardMetric(
-            value: temperatureDisplay(current, target: target),
-            label: label,
-            tint: temperatureIsHeating(current: current, target: target) ? .red : .primary
-        )
+    private func dashboardTemperatureMetric(
+        current: Int?,
+        target: Int?,
+        label: String,
+        targetKind: DashboardTemperatureTarget
+    ) -> some View {
+        let tint: Color = temperatureIsHeating(current: current, target: target) ? .red : .primary
+        return Button {
+            temperatureEditor = DashboardTemperatureEditor(
+                target: targetKind,
+                title: localizedStatus(label),
+                current: current,
+                initialTarget: target ?? current ?? (targetKind == .bed ? 60 : 220)
+            )
+        } label: {
+            VStack(spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 1) {
+                    Text(current.map(String.init) ?? "—")
+                        .font(.system(size: 13, weight: .semibold))
+                    if let target, target > 0 {
+                        Text("/\(target)°C")
+                            .font(.system(size: 7, weight: .medium))
+                    } else if current != nil {
+                        Text("°C")
+                            .font(.system(size: 7, weight: .medium))
+                    }
+                }
+                .monospacedDigit()
+                .foregroundStyle(tint)
+                Text(localizedStatus(label))
+                    .font(.system(size: 9, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(localizedStatus("Chạm để chỉnh nhiệt độ"))
     }
 
     private func temperatureIsHeating(current: Int?, target: Int?) -> Bool {
@@ -913,21 +968,31 @@ struct H2DTimelapseView: View {
         return current + 2 < target
     }
 
-    private func temperatureDisplay(_ value: Int?, target: Int?) -> String {
-        guard let value, value >= 0 else { return "—" }
-        guard let target, target > 0 else { return "\(value)°C" }
-        return "\(value)/\(target)°C"
+    private var remainingDashboardText: String {
+        let minutes: Int? = {
+            if bluetooth.isPrintSessionActive && bluetooth.h2dRemainingMinutes >= 0 {
+                return bluetooth.h2dRemainingMinutes
+            }
+            if directSnapshot.isRecent, directSnapshot.hasActivePrintJob,
+               let value = directSnapshot.remainingMinutes, value >= 0 {
+                return value
+            }
+            return nil
+        }()
+        guard let minutes else { return "—" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: Date().addingTimeInterval(TimeInterval(minutes * 60)))
     }
 
-    private var remainingDashboardText: String {
-        if bluetooth.isPrintSessionActive && bluetooth.h2dRemainingMinutes >= 0 {
-            return "\(bluetooth.h2dRemainingMinutes) p"
+    private func applyDashboardTemperature(_ value: Int, to target: DashboardTemperatureTarget) {
+        switch target {
+        case let .nozzle(extruderID):
+            directControl.setNozzleTemperature(value, extruderID: extruderID)
+        case .bed:
+            directControl.setBedTemperature(value)
         }
-        if directSnapshot.isRecent, directSnapshot.hasActivePrintJob,
-           let minutes = directSnapshot.remainingMinutes, minutes >= 0 {
-            return "\(minutes) p"
-        }
-        return "—"
     }
 
     private var primaryFanDisplay: String {
@@ -1435,6 +1500,125 @@ struct H2DTimelapseView: View {
     }
 
     private var activeCaptureView: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    cinemaSystemHeader
+
+                    if hasAnyCriticalPrinterAlert {
+                        printerAlarmSilenceBanner
+                    }
+
+                    printerDashboardSummary(darkMode: true)
+                    activePhoneCameraCard
+
+                    PrinterRemoteControlView(
+                        bluetooth: bluetooth,
+                        printerName: printerName,
+                        profile: activeControlProfile,
+                        accessCode: accessCode,
+                        languageCode: appLanguageCode,
+                        alarmActive: hasAnyCriticalPrinterAlert,
+                        alarmAcknowledged: hasAnyCriticalPrinterAlert &&
+                            acknowledgedAlarmID == currentAlarmID,
+                        onSilenceAlarm: silenceCurrentPrinterAlarm,
+                        lowPowerDarkMode: true,
+                        directControl: directControl
+                    )
+
+                    capturedFramesCard
+
+                    if !timelapse.isRendering {
+                        Button(role: .destructive) {
+                            requestStopCapture()
+                        } label: {
+                            Label(localizedStatus("Dừng chụp"), systemImage: "stop.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .frame(maxWidth: .infinity, minHeight: 46)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                    }
+
+                    Text(localizedStatus(timelapse.statusText))
+                        .font(.system(size: 11, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(16)
+            }
+            .background(Color.black)
+            .scrollIndicators(.hidden)
+            .toolbar(.hidden, for: .navigationBar)
+        }
+    }
+
+    private var activePhoneCameraCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(localizedStatus("Camera iPhone"))
+                        .font(.system(size: 16, weight: .semibold))
+                    Text(localizedStatus("Timelapse tiết kiệm pin"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                captureScreenBrightnessControl
+                Button {
+                    timelapse.setLiveMonitorVisible(!timelapse.isLiveMonitorVisible)
+                } label: {
+                    Image(systemName: timelapse.isLiveMonitorVisible ? "video.fill" : "video.slash.fill")
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.bordered)
+                .tint(timelapse.isLiveMonitorVisible ? cinemaCyan : .gray)
+                .accessibilityLabel(localizedStatus(
+                    timelapse.isLiveMonitorVisible ? "Ẩn hình xem trước" : "Hiện hình xem trước"
+                ))
+            }
+
+            if timelapse.isLiveMonitorVisible && !timelapse.isRendering {
+                HStack {
+                    Spacer(minLength: 0)
+                    H2DCameraPreview(
+                        session: timelapse.previewSession,
+                        rotationAngle: timelapse.cameraRotationAngle
+                    )
+                    .frame(width: 180, height: 320)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(alignment: .topTrailing) {
+                        Button {
+                            timelapse.rotateCamera180()
+                        } label: {
+                            Image(systemName: "rotate.right")
+                                .frame(width: 32, height: 32)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.black.opacity(0.7))
+                        .padding(8)
+                    }
+                    Spacer(minLength: 0)
+                }
+            } else {
+                HStack(spacing: 9) {
+                    Image(systemName: timelapse.isRendering ? "film.stack.fill" : "video.slash")
+                    Text(localizedStatus(
+                        timelapse.isRendering
+                            ? "Đang ghép video"
+                            : "Camera iPhone đang ẩn để tiết kiệm pin"
+                    ))
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 70)
+                .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+            }
+        }
+        .cardStyle(dark: true)
+    }
+
+    private var legacyActiveCaptureView: some View {
         VStack(spacing: 14) {
             Spacer(minLength: 8)
             if hasAnyCriticalPrinterAlert {
@@ -2329,14 +2513,20 @@ private struct PrinterActivityDot: View {
 }
 
 private extension View {
-    func cardStyle() -> some View {
+    func cardStyle(dark: Bool = false) -> some View {
         self
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(
+                dark ? Color(white: 0.055) : Color.white,
+                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+            )
             .overlay {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.black.opacity(0.07), lineWidth: 1)
+                    .stroke(
+                        dark ? Color.white.opacity(0.10) : Color.black.opacity(0.07),
+                        lineWidth: 1
+                    )
             }
     }
 }
@@ -2638,25 +2828,128 @@ private struct ScreenEdgeLEDStrip: View {
     }
 }
 
+private enum DashboardTemperatureTarget: Equatable {
+    case nozzle(extruderID: Int)
+    case bed
+}
+
+private struct DashboardTemperatureEditor: Identifiable {
+    let target: DashboardTemperatureTarget
+    let title: String
+    let current: Int?
+    let initialTarget: Int
+
+    var id: String {
+        switch target {
+        case let .nozzle(extruderID): return "nozzle-\(extruderID)"
+        case .bed: return "bed"
+        }
+    }
+
+    var allowedRange: ClosedRange<Int> {
+        switch target {
+        case .nozzle: return 0...320
+        case .bed: return 0...120
+        }
+    }
+}
+
+private struct DashboardTemperatureEditorSheet: View {
+    let editor: DashboardTemperatureEditor
+    let languageCode: String
+    let onCancel: () -> Void
+    let onSave: (Int) -> Void
+    @State private var targetTemperature: Int
+
+    init(
+        editor: DashboardTemperatureEditor,
+        languageCode: String,
+        onCancel: @escaping () -> Void,
+        onSave: @escaping (Int) -> Void
+    ) {
+        self.editor = editor
+        self.languageCode = languageCode
+        self.onCancel = onCancel
+        self.onSave = onSave
+        _targetTemperature = State(initialValue: editor.initialTarget)
+    }
+
+    private func localized(_ source: String) -> String {
+        SEStatusCopy.render(source, languageCode: languageCode)
+    }
+
+    var body: some View {
+        VStack(spacing: 18) {
+            HStack {
+                Button(localized("Hủy"), action: onCancel)
+                Spacer()
+                Text(editor.title)
+                    .font(.system(size: 16, weight: .semibold))
+                Spacer()
+                Button(localized("Lưu")) { onSave(targetTemperature) }
+                    .fontWeight(.semibold)
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text(editor.current.map(String.init) ?? "—")
+                    .font(.system(size: 32, weight: .light))
+                Text("/ \(targetTemperature)°C")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .monospacedDigit()
+
+            HStack(spacing: 22) {
+                Button {
+                    targetTemperature = max(editor.allowedRange.lowerBound, targetTemperature - 5)
+                } label: {
+                    Image(systemName: "minus")
+                        .frame(width: 48, height: 40)
+                }
+                Button {
+                    targetTemperature = min(editor.allowedRange.upperBound, targetTemperature + 5)
+                } label: {
+                    Image(systemName: "plus")
+                        .frame(width: 48, height: 40)
+                }
+            }
+            .buttonStyle(.bordered)
+
+            Text(localized("Chạm − hoặc + để chỉnh nhiệt độ mục tiêu"))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+    }
+}
+
 private struct LivePrintProgressRing: View {
     let progress: Double
+    var darkMode = false
 
     private var clampedProgress: Double {
         min(1, max(0, progress))
     }
 
-    private let headColor = Color(red: 0.10, green: 0.43, blue: 1.00)
+    private let blue = Color(red: 0.10, green: 0.43, blue: 1.00)
+    private let cyan = Color(red: 0.00, green: 0.79, blue: 0.75)
+    private let green = Color(red: 0.16, green: 0.93, blue: 0.40)
 
     var body: some View {
-        GeometryReader { proxy in
-            let diameter = min(proxy.size.width, proxy.size.height)
+        GeometryReader { _ in
             let gradientSpan = max(0.015, clampedProgress)
             ZStack {
                 Circle()
-                    .stroke(Color.black.opacity(0.055), lineWidth: 12)
+                    .stroke(
+                        darkMode ? Color.white.opacity(0.10) : Color.black.opacity(0.055),
+                        lineWidth: 12
+                    )
 
                 Circle()
-                    .stroke(Color.white.opacity(0.82), lineWidth: 1)
+                    .stroke(
+                        darkMode ? Color.white.opacity(0.08) : Color.white.opacity(0.82),
+                        lineWidth: 1
+                    )
                     .padding(8)
 
                 Circle()
@@ -2664,12 +2957,16 @@ private struct LivePrintProgressRing: View {
                     .stroke(
                         AngularGradient(
                             gradient: Gradient(stops: [
-                                .init(color: Color(red: 0.16, green: 0.93, blue: 0.40), location: 0.00),
-                                .init(color: Color(red: 0.04, green: 0.89, blue: 0.53), location: gradientSpan * 0.24),
-                                .init(color: Color(red: 0.00, green: 0.79, blue: 0.75), location: gradientSpan * 0.52),
-                                .init(color: Color(red: 0.02, green: 0.62, blue: 0.96), location: gradientSpan * 0.78),
-                                .init(color: headColor, location: gradientSpan),
-                                .init(color: headColor, location: 1.00)
+                                // Blend across the 12-o'clock seam instead of
+                                // jumping directly from blue back to green.
+                                .init(color: blue, location: 0.00),
+                                .init(color: cyan, location: min(gradientSpan * 0.055, 0.022)),
+                                .init(color: green, location: min(gradientSpan * 0.12, 0.050)),
+                                .init(color: Color(red: 0.04, green: 0.89, blue: 0.53), location: gradientSpan * 0.31),
+                                .init(color: cyan, location: gradientSpan * 0.61),
+                                .init(color: Color(red: 0.02, green: 0.62, blue: 0.96), location: gradientSpan * 0.84),
+                                .init(color: blue, location: gradientSpan),
+                                .init(color: blue, location: 1.00)
                             ]),
                             center: .center,
                             startAngle: .degrees(0),
@@ -2678,17 +2975,6 @@ private struct LivePrintProgressRing: View {
                         style: StrokeStyle(lineWidth: 11, lineCap: .round, lineJoin: .round)
                     )
                     .rotationEffect(.degrees(-90))
-                    .shadow(color: Color.green.opacity(0.20), radius: 6)
-                    .shadow(color: Color.blue.opacity(0.20), radius: 11)
-
-                if clampedProgress > 0.01 {
-                    Circle()
-                        .fill(headColor)
-                        .frame(width: 13, height: 13)
-                        .shadow(color: headColor.opacity(0.9), radius: 6)
-                        .offset(y: -(diameter / 2 - 8))
-                        .rotationEffect(.degrees(360 * clampedProgress))
-                }
 
             }
             .padding(8)

@@ -13,6 +13,7 @@ struct PrinterRemoteControlView: View {
     let alarmActive: Bool
     let alarmAcknowledged: Bool
     let onSilenceAlarm: () -> Void
+    var lowPowerDarkMode = false
 
     @ObservedObject var directControl: BambuPrinterControlManager
     @State private var filamentTemperature = 220
@@ -22,6 +23,9 @@ struct PrinterRemoteControlView: View {
     @State private var confirmation: RemoteConfirmation?
     @State private var alarmPulse = false
     @State private var showsFilamentHelp = false
+    @State private var selectedExternalExtruderID = 1
+    @State private var amsDryingHours = 8
+    @State private var locallyObservedPrintStart: Date?
 
     private let cyan = Color(red: 0.02, green: 0.43, blue: 0.40)
     private let amber = Color(red: 0.91, green: 0.48, blue: 0.14)
@@ -40,15 +44,27 @@ struct PrinterRemoteControlView: View {
     }
 
     private var externalSpoolExtruderID: Int {
-        directControl.snapshot.externalSpoolExtruderID ?? (profile.kind == .h2d ? 1 : 0)
+        guard directControl.snapshot.extruderCount > 1 || profile.kind == .h2d else { return 0 }
+        return selectedExternalExtruderID
+    }
+
+    private var selectedExternalFilamentPresent: Bool? {
+        let snapshot = directControl.snapshot
+        if let value = snapshot.filamentPresentByExtruder[externalSpoolExtruderID] {
+            return value
+        }
+        if snapshot.externalSpoolExtruderID == externalSpoolExtruderID {
+            return snapshot.externalFilamentPresent
+        }
+        return nil
     }
 
     private var externalLoadUnavailable: Bool {
-        directControl.snapshot.externalFilamentPresent == true
+        selectedExternalFilamentPresent == true
     }
 
     private var externalUnloadUnavailable: Bool {
-        directControl.snapshot.externalFilamentPresent == false
+        selectedExternalFilamentPresent == false
     }
 
     private var printStartedAt: Date? {
@@ -59,13 +75,29 @@ struct PrinterRemoteControlView: View {
         if bluetooth.isPrintSessionActive, let epoch = bluetooth.h2dPrintStartEpoch {
             return Date(timeIntervalSince1970: epoch)
         }
-        return nil
+        return locallyObservedPrintStart
+    }
+
+    private var hasActivePrint: Bool {
+        bluetooth.isPrintSessionActive || directControl.snapshot.hasActivePrintJob
+    }
+
+    private var surfaceColor: Color {
+        lowPowerDarkMode ? Color(white: 0.055) : .white
+    }
+
+    private var subduedSurfaceColor: Color {
+        lowPowerDarkMode ? Color.white.opacity(0.045) : Color.black.opacity(0.025)
+    }
+
+    private var hairlineColor: Color {
+        lowPowerDarkMode ? Color.white.opacity(0.10) : Color.black.opacity(0.08)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             controlHeader
-            Divider().overlay(.black.opacity(0.08))
+            Divider().overlay(hairlineColor)
             if let prompt = directControl.activePrompt {
                 printerPromptCard(prompt)
             }
@@ -77,16 +109,20 @@ struct PrinterRemoteControlView: View {
             utilityControls
         }
         .padding(16)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(surfaceColor, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(.black.opacity(0.08), lineWidth: 1)
+                .stroke(hairlineColor, lineWidth: 1)
         }
         .onAppear {
             startDirectControl()
             updateAlarmPulse()
+            updateObservedPrintStart()
         }
-        .onChange(of: profile.id) { _, _ in startDirectControl() }
+        .onChange(of: profile.id) { _, _ in
+            selectedExternalExtruderID = profile.kind == .h2d ? 1 : 0
+            startDirectControl()
+        }
         .onChange(of: accessCode) { _, _ in startDirectControl() }
         .onChange(of: bluetooth.filamentType) { _, _ in applyAutomaticFilamentTemperature() }
         .onChange(of: bluetooth.nozzleTargetTemperature) { _, _ in applyAutomaticFilamentTemperature() }
@@ -100,6 +136,8 @@ struct PrinterRemoteControlView: View {
         .onChange(of: directControl.activePrompt?.id) { _, _ in
             showsFilamentHelp = false
         }
+        .onChange(of: hasActivePrint) { _, _ in updateObservedPrintStart() }
+        .onChange(of: directControl.snapshot.printStartedAt) { _, _ in updateObservedPrintStart() }
         .onChange(of: alarmNeedsAttention) { _, _ in updateAlarmPulse() }
         .alert(
             localized(confirmation?.title(
@@ -191,7 +229,7 @@ struct PrinterRemoteControlView: View {
                         directControl.pausePrint()
                     }
                 } label: {
-                    compactActionLabel(
+                    iconOnlyActionLabel(
                         bluetooth.isPausedPrint ? "Tiếp tục" : "Tạm dừng",
                         icon: bluetooth.isPausedPrint ? "play.fill" : "pause.fill"
                     )
@@ -202,7 +240,7 @@ struct PrinterRemoteControlView: View {
                 Button {
                     confirmation = .stop
                 } label: {
-                    compactActionLabel("Dừng", icon: "stop.fill")
+                    iconOnlyActionLabel("Dừng", icon: "stop.fill")
                 }
                 .buttonStyle(RemoteActionButtonStyle(tint: .red))
                 .disabled(!controlsReady)
@@ -257,6 +295,19 @@ struct PrinterRemoteControlView: View {
                 }
                 Spacer()
 
+                if directControl.snapshot.extruderCount > 1 || profile.kind == .h2d {
+                    HStack(spacing: 3) {
+                        externalNozzleButton(title: "L", extruderID: 1)
+                        externalNozzleButton(title: "R", extruderID: 0)
+                    }
+                    .padding(3)
+                    .background(
+                        lowPowerDarkMode ? Color.white.opacity(0.06) : Color.black.opacity(0.045),
+                        in: Capsule()
+                    )
+                    .accessibilityLabel(localized("Chọn đầu in cho cuộn ngoài"))
+                }
+
                 HStack(spacing: 0) {
                     temperatureButton(systemName: "minus") {
                         filamentTemperature = max(170, filamentTemperature - 5)
@@ -270,7 +321,10 @@ struct PrinterRemoteControlView: View {
                     }
                 }
                 .padding(3)
-                .background(Color.black.opacity(0.045), in: Capsule())
+                .background(
+                    lowPowerDarkMode ? Color.white.opacity(0.06) : Color.black.opacity(0.045),
+                    in: Capsule()
+                )
             }
 
             HStack(spacing: 8) {
@@ -322,7 +376,7 @@ struct PrinterRemoteControlView: View {
                     : "Rút nhựa ra khỏi cuộn ngoài"))
             }
 
-            if let present = directControl.snapshot.externalFilamentPresent {
+            if let present = selectedExternalFilamentPresent {
                 Label(
                     localized(present ? "Cảm biến: đã có nhựa" : "Cảm biến: chưa có nhựa"),
                     systemImage: present ? "checkmark.circle.fill" : "circle.dashed"
@@ -333,7 +387,9 @@ struct PrinterRemoteControlView: View {
         }
         .padding(12)
         .background(
-            Color(red: 0.965, green: 0.975, blue: 0.973),
+            lowPowerDarkMode
+                ? Color(red: 0.055, green: 0.075, blue: 0.072)
+                : Color(red: 0.965, green: 0.975, blue: 0.973),
             in: RoundedRectangle(cornerRadius: 15, style: .continuous)
         )
         .overlay {
@@ -347,7 +403,54 @@ struct PrinterRemoteControlView: View {
             .filter(\.isPresent)
             .sorted { $0.amsID == $1.amsID ? $0.slotID < $1.slotID : $0.amsID < $1.amsID }
         return VStack(alignment: .leading, spacing: 10) {
-            controlTitle("AMS", icon: "square.grid.2x2.fill")
+            HStack(spacing: 8) {
+                controlTitle("AMS", icon: "square.grid.2x2.fill")
+                Spacer(minLength: 4)
+                if let dryerID = directControl.snapshot.amsDryerUnitID {
+                    HStack(spacing: 2) {
+                        Button {
+                            amsDryingHours = max(1, amsDryingHours - 1)
+                        } label: {
+                            Image(systemName: "minus")
+                                .frame(width: 25, height: 25)
+                        }
+                        Text("\(amsDryingHours) h")
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .frame(minWidth: 31)
+                        Button {
+                            amsDryingHours = min(48, amsDryingHours + 1)
+                        } label: {
+                            Image(systemName: "plus")
+                                .frame(width: 25, height: 25)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .background(subduedSurfaceColor, in: Capsule())
+
+                    Button {
+                        let isDrying = directControl.snapshot.amsDrying
+                        directControl.setAMSDrying(
+                            enabled: !isDrying,
+                            amsID: dryerID,
+                            durationHours: amsDryingHours,
+                            temperature: recommendedAMSDryingTemperature
+                        )
+                    } label: {
+                        Image(systemName: directControl.snapshot.amsDrying
+                            ? "flame.fill" : "flame")
+                            .font(.system(size: 14, weight: .semibold))
+                            .frame(width: 31, height: 31)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(directControl.snapshot.amsDrying ? amber : cyan)
+                    .disabled(!controlsReady)
+                    .accessibilityLabel(localized(
+                        directControl.snapshot.amsDrying ? "Tắt sấy AMS" : "Bật sấy AMS"
+                    ))
+                    .accessibilityHint(localized("Sấy mặc định không xoay khay"))
+                }
+            }
 
             if trays.isEmpty {
                 Text(localized("Đã phát hiện AMS • đang chờ dữ liệu khay nhựa"))
@@ -390,13 +493,15 @@ struct PrinterRemoteControlView: View {
                                 }
                                 .frame(width: 58, height: 70)
                                 .background(
-                                    selected ? Color.blue.opacity(0.09) : Color.white.opacity(0.72),
+                                    selected
+                                        ? Color.blue.opacity(0.09)
+                                        : (lowPowerDarkMode ? Color.white.opacity(0.045) : Color.white.opacity(0.72)),
                                     in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                                 )
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                                         .stroke(
-                                            selected ? Color.blue.opacity(0.8) : Color.black.opacity(0.07),
+                                            selected ? Color.blue.opacity(0.8) : hairlineColor,
                                             lineWidth: selected ? 1.6 : 0.8
                                         )
                                 }
@@ -413,10 +518,10 @@ struct PrinterRemoteControlView: View {
             }
         }
         .padding(12)
-        .background(Color.black.opacity(0.025), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .background(subduedSurfaceColor, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .stroke(Color.black.opacity(0.07), lineWidth: 1)
+                .stroke(hairlineColor, lineWidth: 1)
         }
     }
 
@@ -464,7 +569,7 @@ struct PrinterRemoteControlView: View {
             .frame(maxWidth: .infinity)
         }
         .padding(.vertical, 10)
-        .background(Color.black.opacity(0.025), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(subduedSurfaceColor, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private func printerPromptCard(_ prompt: BambuRemotePrompt) -> some View {
@@ -636,6 +741,32 @@ struct PrinterRemoteControlView: View {
         .foregroundStyle(.primary)
     }
 
+    private func externalNozzleButton(title: String, extruderID: Int) -> some View {
+        Button {
+            selectedExternalExtruderID = extruderID
+            applyAutomaticFilamentTemperature(force: true)
+        } label: {
+            Text(title)
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .frame(width: 25, height: 25)
+                .foregroundStyle(selectedExternalExtruderID == extruderID ? Color.white : Color.secondary)
+                .background(
+                    selectedExternalExtruderID == extruderID ? cyan : Color.clear,
+                    in: Circle()
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(localized(extruderID == 1 ? "Đầu trái" : "Đầu phải"))
+        .accessibilityAddTraits(selectedExternalExtruderID == extruderID ? .isSelected : [])
+    }
+
+    private func iconOnlyActionLabel(_ title: String, icon: String) -> some View {
+        Image(systemName: icon)
+            .font(.system(size: 17, weight: .bold))
+            .frame(maxWidth: .infinity, minHeight: 32)
+            .accessibilityLabel(localized(title))
+    }
+
     private func compactActionLabel(_ title: String, icon: String) -> some View {
         VStack(spacing: 5) {
             Image(systemName: icon)
@@ -658,6 +789,14 @@ struct PrinterRemoteControlView: View {
             printSpeed = knownSpeed
         }
         applyAutomaticFilamentTemperature(force: true)
+    }
+
+    private func updateObservedPrintStart() {
+        if !hasActivePrint {
+            locallyObservedPrintStart = nil
+        } else if printStartedAt == nil {
+            locallyObservedPrintStart = Date()
+        }
     }
 
     private func updateAlarmPulse() {
@@ -694,9 +833,10 @@ struct PrinterRemoteControlView: View {
     }
 
     private func recommendedFilamentTemperature() -> Int {
-        // H2D reports the right nozzle first and the left nozzle second. This
-        // workflow is explicitly tied to the external spool on the left.
-        let preferredTarget = profile.kind == .h2d
+        // H2D reports the right nozzle first and the left nozzle second. Follow
+        // the nozzle explicitly selected by the user instead of letting a
+        // stale AMS route silently move external-filament commands.
+        let preferredTarget = usesLeftNozzlePath
             ? bluetooth.leftNozzleTargetTemperature
             : bluetooth.nozzleTargetTemperature
         if (170...320).contains(preferredTarget) {
@@ -717,6 +857,13 @@ struct PrinterRemoteControlView: View {
         return 220
     }
 
+    private var recommendedAMSDryingTemperature: Int {
+        let snapshot = directControl.snapshot
+        let selected = snapshot.amsTrays.first { $0.id == snapshot.currentAMSTrayID }
+            ?? snapshot.amsTrays.first(where: \.isPresent)
+        return min(90, max(45, selected?.dryingTemperature ?? 55))
+    }
+
     private func controlTitle(_ title: String, icon: String) -> some View {
         Label(localized(title), systemImage: icon)
             .font(.system(size: 13, weight: .semibold))
@@ -735,6 +882,7 @@ private struct PrinterSpeedDial: View {
     let caption: String
     let printStartedAt: Date?
     let onCommit: (Int) -> Void
+    @State private var isDialUnlocked = false
 
     private let startAngle = 195.0
     private let endAngle = 345.0
@@ -785,24 +933,18 @@ private struct PrinterSpeedDial: View {
                             .position(point(center: center, radius: radius - 26, angle: angle))
                     }
 
-                    Text("\(speedPercent)%")
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(tint)
-                        .position(x: center.x, y: center.y - radius * 0.82)
-
                     Text(elapsedHoursText(at: context.date))
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
                         .monospacedDigit()
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 8)
+                        .padding(.horizontal, 7)
                         .padding(.vertical, 3)
                         .background(Color.black.opacity(0.84), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
                         .overlay {
                             RoundedRectangle(cornerRadius: 4, style: .continuous)
                                 .stroke(Color.white.opacity(0.18), lineWidth: 0.7)
                         }
-                        .position(x: center.x, y: center.y - radius * 0.43)
+                        .position(x: center.x - radius * 0.43, y: center.y - radius * 0.50)
 
                     Path { path in
                         path.move(to: center)
@@ -821,14 +963,28 @@ private struct PrinterSpeedDial: View {
                 .opacity(isEnabled ? 1 : 0.42)
                 .contentShape(Rectangle())
                 .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { gesture in
+                    LongPressGesture(minimumDuration: 0.55, maximumDistance: 24)
+                        .sequenced(before: DragGesture(minimumDistance: 0))
+                        .onChanged { value in
                             guard isEnabled else { return }
-                            level = dialLevel(at: gesture.location, size: proxy.size)
+                            switch value {
+                            case .first(true):
+                                isDialUnlocked = true
+                            case .second(true, let drag):
+                                isDialUnlocked = true
+                                if let drag {
+                                    level = dialLevel(at: drag.location, size: proxy.size)
+                                }
+                            default:
+                                break
+                            }
                         }
-                        .onEnded { _ in
-                            guard isEnabled else { return }
-                            onCommit(level)
+                        .onEnded { value in
+                            defer { isDialUnlocked = false }
+                            guard isEnabled, isDialUnlocked else { return }
+                            if case .second(true, _) = value {
+                                onCommit(level)
+                            }
                         }
                 )
                 .animation(.easeOut(duration: 0.14), value: level)
@@ -849,7 +1005,7 @@ private struct PrinterSpeedDial: View {
     }
 
     private func elapsedHoursText(at date: Date) -> String {
-        guard let printStartedAt else { return "— h" }
+        guard let printStartedAt else { return "0.0 h" }
         let hours = max(0, date.timeIntervalSince(printStartedAt)) / 3_600
         return String(format: "%.1f h", hours)
     }
