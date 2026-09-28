@@ -941,10 +941,7 @@ struct H2DTimelapseView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 1) {
                     Text(current.map(String.init) ?? "—")
                         .font(.system(size: 13, weight: .semibold))
-                    if let target, target > 0 {
-                        Text("/\(target)°C")
-                            .font(.system(size: 7, weight: .medium))
-                    } else if current != nil {
+                    if current != nil {
                         Text("°C")
                             .font(.system(size: 7, weight: .medium))
                     }
@@ -1511,20 +1508,6 @@ struct H2DTimelapseView: View {
 
                     printerDashboardSummary(darkMode: true)
                     activePhoneCameraCard
-
-                    PrinterRemoteControlView(
-                        bluetooth: bluetooth,
-                        printerName: printerName,
-                        profile: activeControlProfile,
-                        accessCode: accessCode,
-                        languageCode: appLanguageCode,
-                        alarmActive: hasAnyCriticalPrinterAlert,
-                        alarmAcknowledged: hasAnyCriticalPrinterAlert &&
-                            acknowledgedAlarmID == currentAlarmID,
-                        onSilenceAlarm: silenceCurrentPrinterAlarm,
-                        lowPowerDarkMode: true,
-                        directControl: directControl
-                    )
 
                     capturedFramesCard
 
@@ -2937,45 +2920,21 @@ private struct LivePrintProgressRing: View {
 
     var body: some View {
         GeometryReader { _ in
-            let gradientSpan = max(0.015, clampedProgress)
             ZStack {
-                Circle()
-                    .stroke(
-                        darkMode ? Color.white.opacity(0.10) : Color.black.opacity(0.055),
-                        lineWidth: 12
-                    )
-
-                Circle()
-                    .stroke(
-                        darkMode ? Color.white.opacity(0.08) : Color.white.opacity(0.82),
-                        lineWidth: 1
-                    )
-                    .padding(8)
-
-                Circle()
-                    .trim(from: 0, to: max(0.006, clampedProgress))
-                    .stroke(
-                        AngularGradient(
-                            gradient: Gradient(stops: [
-                                // Blend across the 12-o'clock seam instead of
-                                // jumping directly from blue back to green.
-                                .init(color: blue, location: 0.00),
-                                .init(color: cyan, location: min(gradientSpan * 0.055, 0.022)),
-                                .init(color: green, location: min(gradientSpan * 0.12, 0.050)),
-                                .init(color: Color(red: 0.04, green: 0.89, blue: 0.53), location: gradientSpan * 0.31),
-                                .init(color: cyan, location: gradientSpan * 0.61),
-                                .init(color: Color(red: 0.02, green: 0.62, blue: 0.96), location: gradientSpan * 0.84),
-                                .init(color: blue, location: gradientSpan),
-                                .init(color: blue, location: 1.00)
-                            ]),
-                            center: .center,
-                            startAngle: .degrees(0),
-                            endAngle: .degrees(360)
-                        ),
-                        style: StrokeStyle(lineWidth: 11, lineCap: .round, lineJoin: .round)
-                    )
-                    .rotationEffect(.degrees(-90))
-
+                if clampedProgress > 0 {
+                    Circle()
+                        .trim(from: 0, to: clampedProgress)
+                        .stroke(
+                            AngularGradient(
+                                gradient: Gradient(colors: [green, cyan, blue]),
+                                center: .center,
+                                startAngle: .degrees(0),
+                                endAngle: .degrees(360)
+                            ),
+                            style: StrokeStyle(lineWidth: 11, lineCap: .round, lineJoin: .round)
+                        )
+                        .rotationEffect(.degrees(-90))
+                }
             }
             .padding(8)
             .drawingGroup(opaque: false, colorMode: .linear)

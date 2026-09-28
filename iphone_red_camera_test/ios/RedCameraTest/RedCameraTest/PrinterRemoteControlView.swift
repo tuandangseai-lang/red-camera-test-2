@@ -25,7 +25,6 @@ struct PrinterRemoteControlView: View {
     @State private var showsFilamentHelp = false
     @State private var selectedExternalExtruderID = 1
     @State private var amsDryingHours = 8
-    @State private var locallyObservedPrintStart: Date?
 
     private let cyan = Color(red: 0.02, green: 0.43, blue: 0.40)
     private let amber = Color(red: 0.91, green: 0.48, blue: 0.14)
@@ -75,11 +74,7 @@ struct PrinterRemoteControlView: View {
         if bluetooth.isPrintSessionActive, let epoch = bluetooth.h2dPrintStartEpoch {
             return Date(timeIntervalSince1970: epoch)
         }
-        return locallyObservedPrintStart
-    }
-
-    private var hasActivePrint: Bool {
-        bluetooth.isPrintSessionActive || directControl.snapshot.hasActivePrintJob
+        return nil
     }
 
     private var surfaceColor: Color {
@@ -117,7 +112,6 @@ struct PrinterRemoteControlView: View {
         .onAppear {
             startDirectControl()
             updateAlarmPulse()
-            updateObservedPrintStart()
         }
         .onChange(of: profile.id) { _, _ in
             selectedExternalExtruderID = profile.kind == .h2d ? 1 : 0
@@ -136,8 +130,6 @@ struct PrinterRemoteControlView: View {
         .onChange(of: directControl.activePrompt?.id) { _, _ in
             showsFilamentHelp = false
         }
-        .onChange(of: hasActivePrint) { _, _ in updateObservedPrintStart() }
-        .onChange(of: directControl.snapshot.printStartedAt) { _, _ in updateObservedPrintStart() }
         .onChange(of: alarmNeedsAttention) { _, _ in updateAlarmPulse() }
         .alert(
             localized(confirmation?.title(
@@ -191,7 +183,7 @@ struct PrinterRemoteControlView: View {
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(.primary)
 
-            TimelineView(.periodic(from: .now, by: 30)) { context in
+            TimelineView(.periodic(from: .now, by: 60)) { context in
                 HStack(spacing: 4) {
                     Image(systemName: "clock")
                         .font(.system(size: 10, weight: .semibold))
@@ -263,18 +255,18 @@ struct PrinterRemoteControlView: View {
                 Button {
                     onSilenceAlarm()
                 } label: {
-                    compactActionLabel(
+                    iconOnlyActionLabel(
                         alarmAcknowledged ? "Đã tắt" : "Tắt cảnh báo",
                         icon: alarmAcknowledged ? "speaker.slash.fill" : "bell.slash.fill"
                     )
                 }
                 .buttonStyle(RemoteActionButtonStyle(
-                    tint: alarmNeedsAttention ? .red : .white.opacity(0.58)
+                    tint: alarmNeedsAttention ? .red : Color.gray.opacity(0.72)
                 ))
-                .disabled(!alarmNeedsAttention)
+                .allowsHitTesting(alarmNeedsAttention)
                 // Blink only the button opacity. Scaling/shadow animation made
                 // the surrounding red screen edge appear to judder on iPhone.
-                .opacity(alarmNeedsAttention ? (alarmPulse ? 1 : 0.60) : 0.58)
+                .opacity(alarmNeedsAttention ? (alarmPulse ? 1 : 0.60) : 1)
                 .animation(
                     alarmNeedsAttention
                         ? .easeInOut(duration: 0.62).repeatForever(autoreverses: true)
@@ -298,9 +290,6 @@ struct PrinterRemoteControlView: View {
                     .background(amber.opacity(0.10), in: Circle())
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(localized(usesLeftNozzlePath ? "Đầu trái" : "Đầu in"))
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
                     Text(liveNozzleTemperatureText)
                         .font(.system(size: 19, weight: .semibold, design: .rounded))
                         .monospacedDigit()
@@ -449,11 +438,12 @@ struct PrinterRemoteControlView: View {
                             enabled: !isDrying,
                             amsID: dryerID,
                             durationHours: amsDryingHours,
-                            temperature: recommendedAMSDryingTemperature
+                            temperature: recommendedAMSDryingTemperature,
+                            filament: recommendedAMSDryingFilament
                         )
                     } label: {
                         Image(systemName: directControl.snapshot.amsDrying
-                            ? "flame.fill" : "flame")
+                            ? "drop.fill" : "drop")
                             .font(.system(size: 14, weight: .semibold))
                             .frame(width: 31, height: 31)
                     }
@@ -527,6 +517,21 @@ struct PrinterRemoteControlView: View {
                                 localized(selected ? "Rút nhựa AMS" : "Nạp nhựa AMS")
                                     + " \(tray.slotID + 1)"
                             )
+
+                            if tray.slotID == 3,
+                               let humidity = directControl.snapshot.amsHumidityPercentByUnit[tray.amsID] {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "drop.fill")
+                                    Text("\(humidity)%")
+                                        .monospacedDigit()
+                                }
+                                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                .foregroundStyle(humidity > 55 ? amber : cyan)
+                                .padding(.horizontal, 7)
+                                .frame(height: 70)
+                                .background(subduedSurfaceColor, in: Capsule())
+                                .accessibilityLabel(localized("Độ ẩm AMS \(humidity) phần trăm"))
+                            }
                         }
                     }
                 }
@@ -708,15 +713,10 @@ struct PrinterRemoteControlView: View {
     private var liveNozzleTemperatureText: String {
         let snapshot = directControl.snapshot
         let directCurrent = usesLeftNozzlePath ? snapshot.leftNozzleTemperature : snapshot.nozzleTemperature
-        let directTarget = usesLeftNozzlePath ? snapshot.leftNozzleTargetTemperature : snapshot.nozzleTargetTemperature
         let bridgeCurrent = usesLeftNozzlePath ? bluetooth.leftNozzleTemperature : bluetooth.nozzleTemperature
-        let bridgeTarget = usesLeftNozzlePath ? bluetooth.leftNozzleTargetTemperature : bluetooth.nozzleTargetTemperature
         let current = (snapshot.isRecent ? directCurrent : nil).flatMap { $0 >= 0 ? $0 : nil }
             ?? (bridgeCurrent >= 0 ? bridgeCurrent : nil)
-        let target = (snapshot.isRecent ? directTarget : nil).flatMap { $0 > 0 ? $0 : nil }
-            ?? (bridgeTarget > 0 ? bridgeTarget : nil)
-            ?? filamentTemperature
-        return "\(current.map { String($0) } ?? "—")/\(target)°C"
+        return "\(current.map { String($0) } ?? "—")°C"
     }
 
     private var liveNozzleIsHeating: Bool {
@@ -781,18 +781,6 @@ struct PrinterRemoteControlView: View {
             .accessibilityLabel(localized(title))
     }
 
-    private func compactActionLabel(_ title: String, icon: String) -> some View {
-        VStack(spacing: 5) {
-            Image(systemName: icon)
-                .font(.system(size: 15, weight: .bold))
-            Text(localized(title))
-                .font(.system(size: 11, weight: .semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.68)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
     private func startDirectControl() {
         directControl.start(profile: profile, accessCode: accessCode)
         if let knownLightState = directControl.snapshot.chamberLightOn {
@@ -803,14 +791,6 @@ struct PrinterRemoteControlView: View {
             printSpeed = knownSpeed
         }
         applyAutomaticFilamentTemperature(force: true)
-    }
-
-    private func updateObservedPrintStart() {
-        if !hasActivePrint {
-            locallyObservedPrintStart = nil
-        } else if printStartedAt == nil {
-            locallyObservedPrintStart = Date()
-        }
     }
 
     private func updateAlarmPulse() {
@@ -878,6 +858,13 @@ struct PrinterRemoteControlView: View {
         return min(90, max(45, selected?.dryingTemperature ?? 55))
     }
 
+    private var recommendedAMSDryingFilament: String {
+        let snapshot = directControl.snapshot
+        let selected = snapshot.amsTrays.first { $0.id == snapshot.currentAMSTrayID }
+            ?? snapshot.amsTrays.first(where: \.isPresent)
+        return selected?.material ?? ""
+    }
+
     private func controlTitle(_ title: String, icon: String) -> some View {
         Label(localized(title), systemImage: icon)
             .font(.system(size: 13, weight: .semibold))
@@ -889,7 +876,7 @@ struct PrinterRemoteControlView: View {
     }
 
     private func elapsedPrintHoursText(at date: Date) -> String {
-        guard let printStartedAt else { return "0.0 h" }
+        guard let printStartedAt else { return "— h" }
         let hours = max(0, date.timeIntervalSince(printStartedAt)) / 3_600
         return String(format: "%.1f h", hours)
     }

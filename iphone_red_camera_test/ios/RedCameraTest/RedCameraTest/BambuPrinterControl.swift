@@ -48,6 +48,7 @@ struct BambuDirectSnapshot: Equatable {
     var amsDrying = false
     var amsDryingRemainingMinutes: Int?
     var amsDryingTemperature: Int?
+    var amsHumidityPercentByUnit: [Int: Int] = [:]
     var amsTrays: [BambuAMSTraySnapshot] = []
     var receivedAt: Date?
 
@@ -238,7 +239,8 @@ final class BambuPrinterControlManager: ObservableObject {
         enabled: Bool,
         amsID: Int,
         durationHours: Int,
-        temperature: Int
+        temperature: Int,
+        filament: String
     ) {
         guard amsID >= 0, (1...48).contains(durationHours), (45...90).contains(temperature) else {
             publishFailure("Thông số sấy AMS không hợp lệ")
@@ -250,11 +252,14 @@ final class BambuPrinterControlManager: ObservableObject {
             fields: [
                 "ams_id": amsID,
                 "cooling_temp": enabled ? 45 : 40,
-                "duration": enabled ? durationHours : 0,
-                "humidity": 0,
+                // The printer protocol expects minutes, not hours.
+                "duration": enabled ? durationHours * 60 : 0,
+                "humidity": enabled ? 20 : 0,
                 "mode": enabled ? 1 : 0,
                 "rotate_tray": false,
-                "temp": enabled ? temperature : 0
+                "temp": enabled ? temperature : 0,
+                "filament": enabled ? filament : "",
+                "close_power_conflict": false
             ],
             actionName: enabled ? "Bật sấy AMS" : "Tắt sấy AMS"
         )
@@ -864,14 +869,27 @@ final class BambuPrinterControlManager: ObservableObject {
             var trays: [BambuAMSTraySnapshot] = []
             for unit in units {
                 guard let amsID = number(unit["id"]) else { continue }
-                if unit["dry_time"] != nil {
+                let humidityPercent = number(unit["humidity_raw"])
+                    ?? number(unit["humidity_percent"])
+                    ?? number(unit["humidity_pct"])
+                if let humidityPercent, (0...100).contains(humidityPercent) {
+                    next.amsHumidityPercentByUnit[amsID] = humidityPercent
+                }
+                let supportsDrying = unit["dry_time"] != nil ||
+                    unit["dry_status"] != nil || humidityPercent != nil
+                if supportsDrying {
                     next.amsDryerUnitID = next.amsDryerUnitID ?? amsID
                     let dryMinutes = number(unit["dry_time"])
                     if let dryMinutes {
                         next.amsDryingRemainingMinutes = max(0, dryMinutes)
                         next.amsDrying = dryMinutes > 0
                     }
-                    if let temperature = number(unit["temp"]), temperature >= 40 {
+                    if let dryStatus = number(unit["dry_status"]), dryStatus >= 2 {
+                        next.amsDrying = true
+                    }
+                    if let temperature = number(unit["temp"])
+                        ?? number(unit["dry_temp"])
+                        ?? number(unit["dryer_temp"]), temperature >= 30 {
                         next.amsDryingTemperature = temperature
                     }
                 }
@@ -959,6 +977,8 @@ final class BambuPrinterControlManager: ObservableObject {
             next.currentAMSTrayID != previous.currentAMSTrayID ||
             next.externalFilamentPresent != previous.externalFilamentPresent ||
             next.chamberLightOn != previous.chamberLightOn ||
+            next.amsDrying != previous.amsDrying ||
+            next.amsHumidityPercentByUnit != previous.amsHumidityPercentByUnit ||
             next.amsTrays != previous.amsTrays
         let minimumPublishInterval: TimeInterval = 1.25
         let elapsed = now.timeIntervalSince(lastSnapshotPublishedAt)
