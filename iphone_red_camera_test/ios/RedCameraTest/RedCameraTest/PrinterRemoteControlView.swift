@@ -191,6 +191,21 @@ struct PrinterRemoteControlView: View {
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(.primary)
 
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                HStack(spacing: 4) {
+                    Image(systemName: "clock")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text(elapsedPrintHoursText(at: context.date))
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .monospacedDigit()
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(subduedSurfaceColor, in: Capsule())
+                .accessibilityLabel(localized("Thời gian đã in"))
+            }
+
             Spacer(minLength: 6)
 
             if directControl.isPending {
@@ -533,7 +548,6 @@ struct PrinterRemoteControlView: View {
                     isEnabled: controlsReady,
                     tint: cyan,
                     caption: localized("Tốc độ in"),
-                    printStartedAt: printStartedAt,
                     onCommit: { directControl.setPrintSpeed($0) }
                 )
                 .frame(width: 150, height: 104)
@@ -873,6 +887,12 @@ struct PrinterRemoteControlView: View {
     private func localized(_ source: String) -> String {
         SEStatusCopy.render(source, languageCode: languageCode)
     }
+
+    private func elapsedPrintHoursText(at date: Date) -> String {
+        guard let printStartedAt else { return "0.0 h" }
+        let hours = max(0, date.timeIntervalSince(printStartedAt)) / 3_600
+        return String(format: "%.1f h", hours)
+    }
 }
 
 private struct PrinterSpeedDial: View {
@@ -880,7 +900,6 @@ private struct PrinterSpeedDial: View {
     let isEnabled: Bool
     let tint: Color
     let caption: String
-    let printStartedAt: Date?
     let onCommit: (Int) -> Void
     @State private var isDialUnlocked = false
 
@@ -898,10 +917,9 @@ private struct PrinterSpeedDial: View {
 
     var body: some View {
         GeometryReader { proxy in
-            TimelineView(.periodic(from: .now, by: 30)) { context in
-                let center = CGPoint(x: proxy.size.width / 2, y: proxy.size.height - 8)
-                let radius = min(proxy.size.width * 0.46, proxy.size.height - 13)
-                ZStack {
+            let center = CGPoint(x: proxy.size.width / 2, y: proxy.size.height - 8)
+            let radius = min(proxy.size.width * 0.46, proxy.size.height - 13)
+            ZStack {
                     gaugeArc(center: center, radius: radius)
                         .stroke(Color.primary.opacity(0.13), style: StrokeStyle(lineWidth: 2, lineCap: .round))
 
@@ -933,19 +951,6 @@ private struct PrinterSpeedDial: View {
                             .position(point(center: center, radius: radius - 26, angle: angle))
                     }
 
-                    Text(elapsedHoursText(at: context.date))
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .monospacedDigit()
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Color.black.opacity(0.84), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .stroke(Color.white.opacity(0.18), lineWidth: 0.7)
-                        }
-                        .position(x: center.x - radius * 0.43, y: center.y - radius * 0.50)
-
                     Path { path in
                         path.move(to: center)
                         path.addLine(to: point(center: center, radius: radius * 0.73, angle: needleAngle))
@@ -959,10 +964,10 @@ private struct PrinterSpeedDial: View {
                         .overlay(Circle().fill(tint).frame(width: 7, height: 7))
                         .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
                         .position(center)
-                }
-                .opacity(isEnabled ? 1 : 0.42)
-                .contentShape(Rectangle())
-                .gesture(
+            }
+            .opacity(isEnabled ? 1 : 0.42)
+            .contentShape(Rectangle())
+            .gesture(
                     LongPressGesture(minimumDuration: 0.55, maximumDistance: 24)
                         .sequenced(before: DragGesture(minimumDistance: 0))
                         .onChanged { value in
@@ -986,9 +991,8 @@ private struct PrinterSpeedDial: View {
                                 onCommit(level)
                             }
                         }
-                )
-                .animation(.easeOut(duration: 0.14), value: level)
-            }
+            )
+            .animation(.easeOut(duration: 0.14), value: level)
         }
         .accessibilityElement()
         .accessibilityLabel(caption)
@@ -1002,12 +1006,6 @@ private struct PrinterSpeedDial: View {
             }
             onCommit(level)
         }
-    }
-
-    private func elapsedHoursText(at date: Date) -> String {
-        guard let printStartedAt else { return "0.0 h" }
-        let hours = max(0, date.timeIntervalSince(printStartedAt)) / 3_600
-        return String(format: "%.1f h", hours)
     }
 
     private func dialLevel(at location: CGPoint, size: CGSize) -> Int {

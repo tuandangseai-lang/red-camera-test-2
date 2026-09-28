@@ -116,6 +116,7 @@ enum SEStatusCopy {
         ("Đã rút xong • Tiếp tục", "Finished • Continue"),
         ("Trợ giúp xử lý", "Troubleshooting assistant"),
         ("Tăng tốc", "Speed boost"),
+        ("Thời gian đã in", "Elapsed print time"),
         ("Theo nhiệt độ máy in", "Use printer temperature"),
         ("Cảm biến: đã có nhựa", "Sensor: filament detected"),
         ("Cảm biến: chưa có nhựa", "Sensor: no filament"),
