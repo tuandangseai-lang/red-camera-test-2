@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.81 build160 - du lieu in va camera timelapse
+name: Tao IPA SE v9.82 build161 - dieu khien thong minh va xac nhan tu xa
 
 on:
   workflow_dispatch:
@@ -184,8 +184,17 @@ jobs:
           grep -q 'compactActionLabel("Dừng", icon: "stop.fill")' "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q "alarmNeedsAttention" "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q "Tắt cảnh báo" "RedCameraTest/PrinterRemoteControlView.swift"
-          grep -q "Nhựa cuộn ngoài • đầu trái" "RedCameraTest/PrinterRemoteControlView.swift"
+          grep -q "liveNozzleTemperatureText" "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q 'usesLeftNozzlePath ? "Rút đầu trái" : "Rút nhựa"' "RedCameraTest/PrinterRemoteControlView.swift"
+          grep -q "PrinterSpeedDial" "RedCameraTest/PrinterRemoteControlView.swift"
+          grep -q "activePrompt" "RedCameraTest/PrinterRemoteControlView.swift"
+          grep -q 'command: "ams_control"' "RedCameraTest/BambuPrinterControl.swift"
+          grep -q 'command: "ignore"' "RedCameraTest/BambuPrinterControl.swift"
+          grep -q "lights_report" "RedCameraTest/BambuPrinterControl.swift"
+          grep -q "LivePrintProgressRing" "RedCameraTest/H2DTimelapseView.swift"
+          grep -Fq 'return "\(value)/\(target)°C"' "RedCameraTest/H2DTimelapseView.swift"
+          ! grep -q "pickerStyle(.segmented)" "RedCameraTest/PrinterRemoteControlView.swift"
+          ! grep -q 'Button(localized("Bật đèn"))\|Button(localized("Tắt đèn"))' "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q 'languageCode: appLanguageCode' "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'Preparing direct controls' "RedCameraTest/SELanguage.swift"
           ! grep -q "CAMERA MÁY IN\|CHẠM VẬT THỂ CẦN BỎ QUA" "RedCameraTest/PrinterRemoteControlView.swift"
@@ -246,19 +255,19 @@ jobs:
           test -f "$APP_PATH/en.lproj/Localizable.strings"
           test -f "$APP_PATH/vi.lproj/Localizable.strings"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.81"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "160"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.82"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "161"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.81-build160-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.82-build161-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.81-build160-unsigned-ipa
-          path: SE-v9.81-build160-unsigned.ipa
+          name: SE-v9.82-build161-unsigned-ipa
+          path: SE-v9.82-build161-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 

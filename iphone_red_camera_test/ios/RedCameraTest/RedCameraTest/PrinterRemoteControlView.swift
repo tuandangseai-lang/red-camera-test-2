@@ -18,9 +18,8 @@ struct PrinterRemoteControlView: View {
     @State private var filamentTemperature = 220
     @State private var automaticTemperatureSignature = ""
     @State private var printSpeed = 2
+    @State private var chamberLightEnabled = false
     @State private var confirmation: RemoteConfirmation?
-    @State private var showsFilamentControls = false
-    @State private var showsUtilityControls = false
     @State private var alarmPulse = false
 
     private let cyan = Color(red: 0.12, green: 0.48, blue: 0.46)
@@ -47,6 +46,9 @@ struct PrinterRemoteControlView: View {
         VStack(alignment: .leading, spacing: 14) {
             controlHeader
             Divider().overlay(.black.opacity(0.08))
+            if let prompt = directControl.activePrompt {
+                printerPromptCard(prompt)
+            }
             quickActions
             filamentControls
             utilityControls
@@ -66,6 +68,12 @@ struct PrinterRemoteControlView: View {
         .onChange(of: bluetooth.filamentType) { _, _ in applyAutomaticFilamentTemperature() }
         .onChange(of: bluetooth.nozzleTargetTemperature) { _, _ in applyAutomaticFilamentTemperature() }
         .onChange(of: bluetooth.leftNozzleTargetTemperature) { _, _ in applyAutomaticFilamentTemperature() }
+        .onChange(of: directControl.snapshot.chamberLightOn) { _, value in
+            if let value { chamberLightEnabled = value }
+        }
+        .onChange(of: directControl.snapshot.printSpeedLevel) { _, value in
+            if let value, (1...4).contains(value) { printSpeed = value }
+        }
         .onChange(of: alarmNeedsAttention) { _, _ in updateAlarmPulse() }
         .alert(
             localized(confirmation?.title(
@@ -202,110 +210,218 @@ struct PrinterRemoteControlView: View {
     }
 
     private var filamentControls: some View {
-        DisclosureGroup(isExpanded: $showsFilamentControls) {
-            VStack(spacing: 12) {
-                Stepper(value: $filamentTemperature, in: 170...320, step: 5) {
-                    HStack {
-                        Text(localized(usesLeftNozzlePath ? "Nhiệt đầu trái" : "Nhiệt đầu in"))
-                        Spacer()
-                        Text("\(filamentTemperature)°C")
-                            .monospacedDigit()
-                            .foregroundStyle(amber)
-                    }
-                }
+        VStack(spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "thermometer.medium")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(amber)
+                    .frame(width: 38, height: 38)
+                    .background(amber.opacity(0.10), in: Circle())
 
-                HStack(spacing: 8) {
-                    Image(systemName: "thermometer.medium")
-                        .foregroundStyle(amber)
-                    Text(localized(filamentTemperatureDescription))
-                        .font(.system(size: 11, weight: .medium))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(localized(usesLeftNozzlePath ? "Đầu trái" : "Đầu in"))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
-                    Spacer(minLength: 4)
-                    Button(localized("Theo máy")) { applyAutomaticFilamentTemperature(force: true) }
-                        .font(.system(size: 10, weight: .bold, design: .rounded))
-                        .buttonStyle(.bordered)
-                        .tint(cyan)
+                    Text(liveNozzleTemperatureText)
+                        .font(.system(size: 24, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.primary)
                 }
+                Spacer()
 
-                HStack(spacing: 10) {
-                    Button {
-                        confirmation = .load(temperature: filamentTemperature)
-                    } label: {
-                        Label(localized(usesLeftNozzlePath ? "Nạp đầu trái" : "Nạp nhựa"), systemImage: "arrow.down.to.line.compact")
-                            .frame(maxWidth: .infinity)
+                HStack(spacing: 0) {
+                    temperatureButton(systemName: "minus") {
+                        filamentTemperature = max(170, filamentTemperature - 5)
                     }
-                    .buttonStyle(RemoteActionButtonStyle(tint: green))
-                    .disabled(!controlsReady)
-
-                    Button {
-                        confirmation = .unload(
-                            temperature: filamentTemperature,
-                            material: currentFilamentName
-                        )
-                    } label: {
-                        Label(localized(usesLeftNozzlePath ? "Rút đầu trái" : "Rút nhựa"), systemImage: "arrow.up.from.line.compact")
-                            .frame(maxWidth: .infinity)
+                    Text("\(filamentTemperature)°C")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .frame(minWidth: 64)
+                    temperatureButton(systemName: "plus") {
+                        filamentTemperature = min(320, filamentTemperature + 5)
                     }
-                    .buttonStyle(RemoteActionButtonStyle(tint: amber))
-                    .disabled(!controlsReady)
                 }
-
-                Text(localized(usesLeftNozzlePath
-                    ? "Chỉ dùng cuộn ngoài bên trái của H2D; không chọn và không chạy motor AMS."
-                    : "Chỉ dùng cuộn ngoài; không chọn và không chạy motor AMS."))
-                    .font(.system(size: 11, weight: .regular))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(3)
+                .background(Color.black.opacity(0.045), in: Capsule())
             }
-            .padding(.top, 10)
-        } label: {
-            controlTitle(
-                usesLeftNozzlePath ? "Nhựa cuộn ngoài • đầu trái" : "Nhựa cuộn ngoài",
-                icon: "arrow.triangle.2.circlepath"
-            )
+
+            HStack(spacing: 8) {
+                Text(localized(filamentTemperatureDescription))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Spacer(minLength: 4)
+                Button {
+                    applyAutomaticFilamentTemperature(force: true)
+                } label: {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 30, height: 26)
+                }
+                .buttonStyle(.bordered)
+                .tint(cyan)
+                .accessibilityLabel(localized("Theo nhiệt độ máy in"))
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    confirmation = .load(temperature: filamentTemperature)
+                } label: {
+                    Label(localized(usesLeftNozzlePath ? "Nạp đầu trái" : "Nạp nhựa"), systemImage: "arrow.down.to.line.compact")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(RemoteActionButtonStyle(tint: green))
+                .disabled(!controlsReady)
+
+                Button {
+                    confirmation = .unload(
+                        temperature: filamentTemperature,
+                        material: currentFilamentName
+                    )
+                } label: {
+                    Label(localized(usesLeftNozzlePath ? "Rút đầu trái" : "Rút nhựa"), systemImage: "arrow.up.from.line.compact")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(RemoteActionButtonStyle(tint: amber))
+                .disabled(!controlsReady)
+            }
         }
-        .tint(cyan)
+        .padding(12)
+        .background(Color.black.opacity(0.025), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private var utilityControls: some View {
-        DisclosureGroup(isExpanded: $showsUtilityControls) {
-            VStack(spacing: 12) {
-                Picker(localized("Tốc độ"), selection: $printSpeed) {
-                    Text(localized("Im lặng")).tag(1)
-                    Text(localized("Chuẩn")).tag(2)
-                    Text(localized("Nhanh")).tag(3)
-                    Text(localized("Siêu tốc")).tag(4)
-                }
-                .pickerStyle(.segmented)
+        HStack(spacing: 0) {
+            VStack(spacing: 6) {
+                PrinterSpeedDial(
+                    level: $printSpeed,
+                    isEnabled: controlsReady,
+                    tint: cyan,
+                    onCommit: { directControl.setPrintSpeed($0) }
+                )
+                .frame(width: 112, height: 112)
+                Text(localized("Tốc độ"))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
 
-                HStack(spacing: 10) {
-                    Button {
-                        directControl.setPrintSpeed(printSpeed)
-                    } label: {
-                        Label(localized("Áp dụng tốc độ"), systemImage: "speedometer")
-                            .frame(maxWidth: .infinity)
+            Divider().frame(height: 92)
+
+            VStack(spacing: 12) {
+                Image(systemName: chamberLightEnabled ? "lightbulb.fill" : "lightbulb")
+                    .font(.system(size: 28, weight: .medium))
+                    .foregroundStyle(chamberLightEnabled ? amber : Color.secondary)
+                    .symbolEffect(.bounce, value: chamberLightEnabled)
+
+                Toggle("", isOn: Binding(
+                    get: { chamberLightEnabled },
+                    set: { value in
+                        chamberLightEnabled = value
+                        directControl.setChamberLight(enabled: value)
                     }
-                    .buttonStyle(RemoteActionButtonStyle(tint: cyan))
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(amber)
+                .disabled(!controlsReady)
+                .accessibilityLabel(localized("Đèn buồng in"))
+                .accessibilityValue(
+                    languageCode == SEAppLanguage.english.rawValue
+                        ? (chamberLightEnabled ? "On" : "Off")
+                        : (chamberLightEnabled ? "Bật" : "Tắt")
+                )
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.025), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func printerPromptCard(_ prompt: BambuRemotePrompt) -> some View {
+        let isError = prompt.kind == .printerError
+        let tint: Color = isError ? .red : amber
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: isError ? "exclamationmark.triangle.fill" : "arrow.triangle.2.circlepath.circle.fill")
+                    .foregroundStyle(tint)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(localized(isError ? "Máy in cần xử lý" : "Máy in đang chờ xác nhận"))
+                        .font(.system(size: 13, weight: .bold))
+                    Text(localized(promptDescription(prompt)))
+                        .font(.system(size: 11, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button(localized("Tiếp tục")) { directControl.continueActivePrompt() }
+                    .buttonStyle(RemoteActionButtonStyle(tint: isError ? .red : green))
                     .disabled(!controlsReady)
 
-                    Button(localized("Bật đèn")) { directControl.setChamberLight(enabled: true) }
-                        .frame(maxWidth: .infinity)
-                        .buttonStyle(.bordered)
-                        .tint(amber)
+                if isError {
+                    Button(localized("Bỏ qua")) { directControl.ignoreActiveError() }
+                        .buttonStyle(RemoteActionButtonStyle(tint: amber))
                         .disabled(!controlsReady)
-
-                    Button(localized("Tắt đèn")) { directControl.setChamberLight(enabled: false) }
-                        .frame(maxWidth: .infinity)
-                        .buttonStyle(.bordered)
-                        .tint(.secondary)
+                    Button(localized("Dừng")) { directControl.stopFromActivePrompt() }
+                        .buttonStyle(RemoteActionButtonStyle(tint: .red))
+                        .disabled(!controlsReady)
+                } else {
+                    Button(localized("Hoàn tất")) { directControl.finishFilamentOperation() }
+                        .buttonStyle(RemoteActionButtonStyle(tint: cyan))
                         .disabled(!controlsReady)
                 }
             }
-            .padding(.top, 10)
-        } label: {
-            controlTitle("Tốc độ và đèn buồng in", icon: "slider.horizontal.3")
         }
-        .tint(cyan)
+        .padding(12)
+        .background(tint.opacity(0.075), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(tint.opacity(0.25), lineWidth: 1)
+        }
+    }
+
+    private func promptDescription(_ prompt: BambuRemotePrompt) -> String {
+        switch prompt.kind {
+        case .filamentLoad:
+            return languageCode == SEAppLanguage.english.rawValue
+                ? "Follow the printer instruction, then continue or finish here."
+                : "Làm theo hướng dẫn nạp nhựa, rồi xác nhận ngay tại đây."
+        case .filamentUnload:
+            return languageCode == SEAppLanguage.english.rawValue
+                ? "Remove the filament when prompted, then continue or finish here."
+                : "Rút nhựa khi máy yêu cầu, rồi xác nhận ngay tại đây."
+        case .printerError:
+            let code = prompt.errorCode.map { String(format: "%08X", $0) } ?? "—"
+            return languageCode == SEAppLanguage.english.rawValue
+                ? "Printer error \(code). Fix the cause, then continue, ignore, or stop."
+                : "Lỗi máy in \(code). Khắc phục nguyên nhân rồi tiếp tục, bỏ qua hoặc dừng."
+        }
+    }
+
+    private var liveNozzleTemperatureText: String {
+        let snapshot = directControl.snapshot
+        let directCurrent = usesLeftNozzlePath ? snapshot.leftNozzleTemperature : snapshot.nozzleTemperature
+        let directTarget = usesLeftNozzlePath ? snapshot.leftNozzleTargetTemperature : snapshot.nozzleTargetTemperature
+        let bridgeCurrent = usesLeftNozzlePath ? bluetooth.leftNozzleTemperature : bluetooth.nozzleTemperature
+        let bridgeTarget = usesLeftNozzlePath ? bluetooth.leftNozzleTargetTemperature : bluetooth.nozzleTargetTemperature
+        let current = (snapshot.isRecent ? directCurrent : nil).flatMap { $0 >= 0 ? $0 : nil }
+            ?? (bridgeCurrent >= 0 ? bridgeCurrent : nil)
+        let target = (snapshot.isRecent ? directTarget : nil).flatMap { $0 > 0 ? $0 : nil }
+            ?? (bridgeTarget > 0 ? bridgeTarget : nil)
+            ?? filamentTemperature
+        return "\(current.map { String($0) } ?? "—")/\(target)°C"
+    }
+
+    private func temperatureButton(systemName: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 12, weight: .bold))
+                .frame(width: 30, height: 28)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
     }
 
     private func compactActionLabel(_ title: String, icon: String) -> some View {
@@ -322,6 +438,13 @@ struct PrinterRemoteControlView: View {
 
     private func startDirectControl() {
         directControl.start(profile: profile, accessCode: accessCode)
+        if let knownLightState = directControl.snapshot.chamberLightOn {
+            chamberLightEnabled = knownLightState
+        }
+        if let knownSpeed = directControl.snapshot.printSpeedLevel,
+           (1...4).contains(knownSpeed) {
+            printSpeed = knownSpeed
+        }
         applyAutomaticFilamentTemperature(force: true)
     }
 
@@ -390,6 +513,93 @@ struct PrinterRemoteControlView: View {
 
     private func localized(_ source: String) -> String {
         SEStatusCopy.render(source, languageCode: languageCode)
+    }
+}
+
+private struct PrinterSpeedDial: View {
+    @Binding var level: Int
+    let isEnabled: Bool
+    let tint: Color
+    let onCommit: (Int) -> Void
+
+    private var needleAngle: Double {
+        -120 + (Double(min(4, max(1, level))) - 1) * 80
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let diameter = min(proxy.size.width, proxy.size.height)
+            ZStack {
+                Circle()
+                    .fill(Color.white)
+                    .shadow(color: .black.opacity(0.07), radius: 8, y: 3)
+                Circle()
+                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
+
+                ForEach(0..<4, id: \.self) { index in
+                    Capsule()
+                        .fill(index + 1 == level ? tint : Color.black.opacity(0.18))
+                        .frame(width: 3, height: index + 1 == level ? 11 : 7)
+                        .offset(y: -(diameter / 2) + 14)
+                        .rotationEffect(.degrees(-120 + Double(index) * 80))
+                }
+
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [tint.opacity(0.3), tint],
+                            startPoint: .bottom,
+                            endPoint: .top
+                        )
+                    )
+                    .frame(width: 4, height: diameter * 0.28)
+                    .offset(y: -diameter * 0.14)
+                    .rotationEffect(.degrees(needleAngle))
+                    .shadow(color: tint.opacity(0.35), radius: 4)
+
+                Circle()
+                    .fill(tint)
+                    .frame(width: 13, height: 13)
+                Image(systemName: "speedometer")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .offset(y: diameter * 0.25)
+            }
+            .opacity(isEnabled ? 1 : 0.42)
+            .contentShape(Circle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        guard isEnabled else { return }
+                        level = dialLevel(at: gesture.location, size: proxy.size)
+                    }
+                    .onEnded { _ in
+                        guard isEnabled else { return }
+                        onCommit(level)
+                    }
+            )
+            .animation(.easeOut(duration: 0.14), value: level)
+        }
+        .accessibilityElement()
+        .accessibilityLabel("Print speed")
+        .accessibilityValue("\(level) of 4")
+        .accessibilityAdjustableAction { direction in
+            guard isEnabled else { return }
+            switch direction {
+            case .increment: level = min(4, level + 1)
+            case .decrement: level = max(1, level - 1)
+            @unknown default: return
+            }
+            onCommit(level)
+        }
+    }
+
+    private func dialLevel(at location: CGPoint, size: CGSize) -> Int {
+        let dx = location.x - size.width / 2
+        let dy = location.y - size.height / 2
+        let degrees = atan2(dx, -dy) * 180 / .pi
+        let clamped = min(120, max(-120, degrees))
+        return min(4, max(1, Int(((clamped + 120) / 80).rounded()) + 1))
     }
 }
 

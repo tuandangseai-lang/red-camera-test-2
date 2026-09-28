@@ -15,7 +15,12 @@ struct BambuDirectSnapshot: Equatable {
     var leftNozzleTargetTemperature: Int?
     var bedTemperature: Int?
     var bedTargetTemperature: Int?
+    var printSpeedLevel: Int?
+    var printStage: Int?
     var printErrorCode: UInt32?
+    var jobID = ""
+    var subtaskID = ""
+    var chamberLightOn: Bool?
     var receivedAt: Date?
 
     var isRecent: Bool {
@@ -34,6 +39,18 @@ struct BambuDirectSnapshot: Equatable {
     }
 }
 
+enum BambuRemotePromptKind: Equatable {
+    case filamentLoad
+    case filamentUnload
+    case printerError
+}
+
+struct BambuRemotePrompt: Identifiable, Equatable {
+    let id: String
+    let kind: BambuRemotePromptKind
+    let errorCode: UInt32?
+}
+
 /// Direct LAN MQTT control for the selected printer. Control no longer depends
 /// on the ESP32's MQTT session, so a BLE reconnect or fleet scan cannot swallow
 /// a user command. The ESP32 remains responsible for telemetry and timelapse.
@@ -43,6 +60,7 @@ final class BambuPrinterControlManager: ObservableObject {
     @Published private(set) var lastSucceeded: Bool?
     @Published private(set) var statusText = "Đang chuẩn bị điều khiển trực tiếp…"
     @Published private(set) var snapshot = BambuDirectSnapshot()
+    @Published private(set) var activePrompt: BambuRemotePrompt?
 
     private struct Configuration: Equatable {
         let profileID: String
@@ -69,6 +87,10 @@ final class BambuPrinterControlManager: ObservableObject {
     private var pending: PendingCommand?
     private var pingTimer: DispatchSourceTimer?
     private var snapshotStorage = BambuDirectSnapshot()
+    private var activePromptStorage: BambuRemotePrompt?
+    private var activeFilamentOperation: BambuRemotePromptKind?
+    private var filamentOperationNumber = 0
+    private var dismissedPromptID: String?
     private var lastFullStatusRequest = Date.distantPast
 
     func start(profile: BambuPrinterProfile, accessCode: String) {
@@ -87,8 +109,12 @@ final class BambuPrinterControlManager: ObservableObject {
             guard let self else { return }
             if self.configuration == next, self.connection != nil { return }
             self.snapshotStorage = BambuDirectSnapshot()
+            self.activePromptStorage = nil
+            self.activeFilamentOperation = nil
+            self.dismissedPromptID = nil
             DispatchQueue.main.async { [weak self] in
                 self?.snapshot = BambuDirectSnapshot()
+                self?.activePrompt = nil
             }
             self.configuration = next
             self.connect()
@@ -118,6 +144,80 @@ final class BambuPrinterControlManager: ObservableObject {
 
     func stopPrint() {
         send(section: "print", command: "stop", fields: [:], actionName: "Dừng")
+    }
+
+    func continueActivePrompt() {
+        queue.async { [weak self] in
+            guard let self, let prompt = self.activePromptStorage else { return }
+            switch prompt.kind {
+            case .filamentLoad, .filamentUnload:
+                self.send(
+                    section: "print",
+                    command: "ams_control",
+                    fields: ["param": "resume"],
+                    actionName: "Tiếp tục thao tác nhựa"
+                )
+            case .printerError:
+                self.send(
+                    section: "print",
+                    command: "resume",
+                    fields: self.errorActionFields(for: prompt),
+                    actionName: "Khắc phục và tiếp tục",
+                    onSuccess: { [weak self] in self?.dismissCurrentPrompt() }
+                )
+            }
+        }
+    }
+
+    func ignoreActiveError() {
+        queue.async { [weak self] in
+            guard let self, let prompt = self.activePromptStorage,
+                  prompt.kind == .printerError else { return }
+            self.send(
+                section: "print",
+                command: "ignore",
+                fields: self.errorActionFields(for: prompt),
+                actionName: "Bỏ qua cảnh báo và tiếp tục",
+                onSuccess: { [weak self] in self?.dismissCurrentPrompt() }
+            )
+        }
+    }
+
+    func finishFilamentOperation() {
+        queue.async { [weak self] in
+            guard let self, let prompt = self.activePromptStorage,
+                  prompt.kind != .printerError else { return }
+            self.send(
+                section: "print",
+                command: "ams_control",
+                fields: ["param": "done"],
+                actionName: "Hoàn tất thao tác nhựa",
+                onSuccess: { [weak self] in
+                    self?.activeFilamentOperation = nil
+                    self?.dismissCurrentPrompt()
+                }
+            )
+        }
+    }
+
+    func stopFromActivePrompt() {
+        queue.async { [weak self] in
+            guard let self, let prompt = self.activePromptStorage else { return }
+            var fields: [String: Any] = [:]
+            if prompt.kind == .printerError {
+                fields = self.errorActionFields(for: prompt)
+            }
+            self.send(
+                section: "print",
+                command: "stop",
+                fields: fields,
+                actionName: "Dừng",
+                onSuccess: { [weak self] in
+                    self?.activeFilamentOperation = nil
+                    self?.dismissCurrentPrompt()
+                }
+            )
+        }
     }
 
     /// H2D uses extruder 1 for its left external-spool path. Single-nozzle
@@ -191,6 +291,9 @@ final class BambuPrinterControlManager: ObservableObject {
     }
 
     private func sendExternalFilamentCommand(load: Bool, temperature: Int, extruderID: Int) {
+        filamentOperationNumber &+= 1
+        activeFilamentOperation = load ? .filamentLoad : .filamentUnload
+        dismissedPromptID = nil
         send(
             section: "print",
             command: "ams_change_filament",
@@ -206,7 +309,8 @@ final class BambuPrinterControlManager: ObservableObject {
             ],
             actionName: load
                 ? (extruderID == 1 ? "Nạp nhựa cuộn ngoài vào đầu trái" : "Nạp nhựa cuộn ngoài")
-                : (extruderID == 1 ? "Rút nhựa cuộn ngoài khỏi đầu trái" : "Rút nhựa cuộn ngoài")
+                : (extruderID == 1 ? "Rút nhựa cuộn ngoài khỏi đầu trái" : "Rút nhựa cuộn ngoài"),
+            onSuccess: { [weak self] in self?.publishFilamentPrompt() }
         )
     }
 
@@ -425,6 +529,27 @@ final class BambuPrinterControlManager: ObservableObject {
         update("mc_remaining_time", \.remainingMinutes)
         update("bed_temper", \.bedTemperature)
         update("bed_target_temper", \.bedTargetTemperature)
+        update("spd_lvl", \.printSpeedLevel)
+        update("stg_cur", \.printStage)
+
+        if let jobID = report["job_id"] as? String {
+            next.jobID = jobID
+            changed = true
+        }
+        if let subtaskID = report["subtask_id"] as? String {
+            next.subtaskID = subtaskID
+            changed = true
+        } else if let subtaskID = number(report["subtask_id"]) {
+            next.subtaskID = String(subtaskID)
+            changed = true
+        }
+
+        if let lights = report["lights_report"] as? [[String: Any]],
+           let chamber = lights.first(where: { ($0["node"] as? String) == "chamber_light" }),
+           let mode = chamber["mode"] as? String {
+            next.chamberLightOn = mode.lowercased() == "on"
+            changed = true
+        }
 
         if configuration?.isDualNozzle == true,
            let extruder = report["extruder"] as? [String: Any],
@@ -458,7 +583,59 @@ final class BambuPrinterControlManager: ObservableObject {
         guard next != snapshotStorage else { return }
         snapshotStorage = next
         let publishedSnapshot = next
+        refreshActivePrompt(for: next)
         DispatchQueue.main.async { [weak self] in self?.snapshot = publishedSnapshot }
+    }
+
+    private func refreshActivePrompt(for snapshot: BambuDirectSnapshot) {
+        if let code = snapshot.printErrorCode, code != 0 {
+            let id = "error-\(String(format: "%08X", code))-\(snapshot.jobID)-\(snapshot.subtaskID)"
+            publishPrompt(BambuRemotePrompt(id: id, kind: .printerError, errorCode: code))
+            return
+        }
+
+        if activePromptStorage?.kind == .printerError {
+            dismissedPromptID = nil
+            publishPrompt(nil)
+        }
+
+        if snapshot.printStage == 22 {
+            activeFilamentOperation = .filamentUnload
+            publishFilamentPrompt()
+        } else if snapshot.printStage == 24 {
+            activeFilamentOperation = .filamentLoad
+            publishFilamentPrompt()
+        }
+    }
+
+    private func publishFilamentPrompt() {
+        guard let kind = activeFilamentOperation else { return }
+        let id = "filament-\(filamentOperationNumber)-\(kind == .filamentLoad ? "load" : "unload")"
+        publishPrompt(BambuRemotePrompt(id: id, kind: kind, errorCode: nil))
+    }
+
+    private func publishPrompt(_ prompt: BambuRemotePrompt?) {
+        if let prompt, prompt.id == dismissedPromptID { return }
+        guard prompt != activePromptStorage else { return }
+        activePromptStorage = prompt
+        DispatchQueue.main.async { [weak self] in self?.activePrompt = prompt }
+    }
+
+    private func dismissCurrentPrompt() {
+        guard let prompt = activePromptStorage else { return }
+        dismissedPromptID = prompt.id
+        publishPrompt(nil)
+    }
+
+    private func errorActionFields(for prompt: BambuRemotePrompt) -> [String: Any] {
+        var fields: [String: Any] = ["param": "reserve"]
+        if let code = prompt.errorCode {
+            fields["err"] = String(format: "%08X", code)
+        }
+        if !snapshotStorage.jobID.isEmpty {
+            fields["job_id"] = snapshotStorage.jobID
+        }
+        return fields
     }
 
     private func confirmPendingIfMatched(section: [String: Any]) {

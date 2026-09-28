@@ -433,7 +433,7 @@ struct H2DTimelapseView: View {
 
         var color: Color {
             switch self {
-            case .idle: return .yellow
+            case .idle: return .red
             case .connecting: return .blue
             case .preparing, .printing: return .green
             case .capturing: return .blue
@@ -776,22 +776,7 @@ struct H2DTimelapseView: View {
             }
 
             ZStack {
-                Circle()
-                    .stroke(Color.black.opacity(0.08), lineWidth: 2)
-                Circle()
-                    .trim(from: 0, to: max(0.008, printerProgress))
-                    .stroke(
-                        cinemaCyan,
-                        style: StrokeStyle(lineWidth: 3, lineCap: .round)
-                    )
-                    .rotationEffect(.degrees(135))
-                Circle()
-                    .trim(from: 0.04, to: 0.96)
-                    .stroke(
-                        Color.black.opacity(0.10),
-                        style: StrokeStyle(lineWidth: 1, dash: [5, 6])
-                    )
-                    .padding(9)
+                LivePrintProgressRing(progress: printerProgress)
 
                 VStack(spacing: 5) {
                     Text("\(displayedPrintPercent)%")
@@ -871,8 +856,8 @@ struct H2DTimelapseView: View {
 
     private func temperatureDisplay(_ value: Int?, target: Int?) -> String {
         guard let value, value >= 0 else { return "—" }
-        guard let target, target > 0 else { return "\(value)°" }
-        return "\(value)/\(target)°"
+        guard let target, target > 0 else { return "\(value)°C" }
+        return "\(value)/\(target)°C"
     }
 
     private var remainingDashboardText: String {
@@ -2573,6 +2558,70 @@ private struct ScreenEdgeLEDStrip: View {
         reportedProgress = max(transitionStartProgress, target)
         progressAnchorDate = now
         remainingSecondsAtAnchor = remainingSeconds
+    }
+}
+
+private struct LivePrintProgressRing: View {
+    let progress: Double
+
+    private var clampedProgress: Double {
+        min(1, max(0, progress))
+    }
+
+    private var headColor: Color {
+        Color(
+            hue: 0.36 + 0.22 * clampedProgress,
+            saturation: 0.82,
+            brightness: 0.92
+        )
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let diameter = min(proxy.size.width, proxy.size.height)
+            ZStack {
+                Circle()
+                    .stroke(Color.black.opacity(0.065), lineWidth: 10)
+
+                Circle()
+                    .trim(from: 0, to: max(0.006, clampedProgress))
+                    .stroke(
+                        AngularGradient(
+                            colors: [
+                                Color(red: 0.18, green: 0.92, blue: 0.40),
+                                Color(red: 0.05, green: 0.79, blue: 0.80),
+                                Color(red: 0.08, green: 0.43, blue: 1.0)
+                            ],
+                            center: .center,
+                            startAngle: .degrees(-90),
+                            endAngle: .degrees(270)
+                        ),
+                        style: StrokeStyle(lineWidth: 10, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+                    .shadow(color: Color.green.opacity(0.25), radius: 7)
+                    .shadow(color: Color.blue.opacity(0.22), radius: 12)
+
+                if clampedProgress > 0.01 {
+                    Circle()
+                        .fill(headColor)
+                        .frame(width: 13, height: 13)
+                        .shadow(color: headColor.opacity(0.9), radius: 6)
+                        .offset(y: -(diameter / 2 - 8))
+                        .rotationEffect(.degrees(360 * clampedProgress))
+                }
+
+                Circle()
+                    .stroke(
+                        Color.white.opacity(0.72),
+                        style: StrokeStyle(lineWidth: 1, dash: [2, 8])
+                    )
+                    .padding(5)
+            }
+            .padding(8)
+            .animation(.easeOut(duration: 0.45), value: clampedProgress)
+        }
+        .accessibilityHidden(true)
     }
 }
 
