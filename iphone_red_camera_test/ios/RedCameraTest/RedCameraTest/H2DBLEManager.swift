@@ -40,6 +40,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     @Published private(set) var h2dPrintPercent = 0
     @Published private(set) var h2dStageCode = -1
     @Published private(set) var h2dRemainingMinutes = -1
+    @Published private(set) var h2dPrintStartEpoch: TimeInterval?
     @Published private(set) var h2dTimelapseEvent: H2DTimelapseEvent?
     @Published private(set) var isConfiguring = false
     @Published private(set) var configurationProgress = 0
@@ -195,6 +196,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         h2dPrintPercent = 0
         h2dStageCode = -1
         h2dRemainingMinutes = -1
+        h2dPrintStartEpoch = nil
         isH2DReady = false
         hasPrinterAlert = false
         hasCriticalPrinterAlert = false
@@ -1401,6 +1403,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
             }
             if fields.count >= 8 {
                 h2dRemainingMinutes = Int(fields[7]) ?? h2dRemainingMinutes
+            }
+            if fields.count >= 10, let epoch = TimeInterval(fields[9]), epoch > 1_500_000_000 {
+                h2dPrintStartEpoch = epoch
             }
             hasBridgeError = false
             if !isPrintSessionActive {

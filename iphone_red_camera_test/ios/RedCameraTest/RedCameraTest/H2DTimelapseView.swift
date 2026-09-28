@@ -194,6 +194,27 @@ struct H2DTimelapseView: View {
     }
 
     private var observedContent: some View {
+        peripheralObservedContent
+            .onChange(of: printerCameraEnabled) { _, _ in
+                refreshPrinterCamera()
+            }
+            .onChange(of: timelapse.isArmed) { _, _ in
+                refreshPrinterCamera()
+            }
+            .onChange(of: selectedProfileID) { _, _ in
+                refreshPrinterCamera()
+                startDirectPrinterTelemetry()
+            }
+            .onChange(of: accessCode) { _, _ in
+                refreshPrinterCamera()
+                startDirectPrinterTelemetry()
+            }
+            .onChange(of: configurationSaved) { _, saved in
+                if saved { startDirectPrinterTelemetry() }
+            }
+    }
+
+    private var peripheralObservedContent: some View {
         alarmObservedContent
             .onChange(of: bluetooth.hasActiveCriticalPrinterAlert) { _, _ in
                 synchronizePrinterAlarm()
@@ -233,23 +254,6 @@ struct H2DTimelapseView: View {
                 if showCaptureBrightnessSlider {
                     scheduleCaptureBrightnessAutoCollapse()
                 }
-            }
-            .onChange(of: printerCameraEnabled) { _, _ in
-                refreshPrinterCamera()
-            }
-            .onChange(of: timelapse.isArmed) { _, _ in
-                refreshPrinterCamera()
-            }
-            .onChange(of: selectedProfileID) { _, _ in
-                refreshPrinterCamera()
-                startDirectPrinterTelemetry()
-            }
-            .onChange(of: accessCode) { _, _ in
-                refreshPrinterCamera()
-                startDirectPrinterTelemetry()
-            }
-            .onChange(of: configurationSaved) { _, saved in
-                if saved { startDirectPrinterTelemetry() }
             }
     }
 

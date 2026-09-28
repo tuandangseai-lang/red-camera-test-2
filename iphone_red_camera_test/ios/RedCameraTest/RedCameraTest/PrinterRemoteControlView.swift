@@ -51,6 +51,17 @@ struct PrinterRemoteControlView: View {
         directControl.snapshot.externalFilamentPresent == false
     }
 
+    private var printStartedAt: Date? {
+        let snapshot = directControl.snapshot
+        if snapshot.isRecent, snapshot.hasActivePrintJob, let startedAt = snapshot.printStartedAt {
+            return startedAt
+        }
+        if bluetooth.isPrintSessionActive, let epoch = bluetooth.h2dPrintStartEpoch {
+            return Date(timeIntervalSince1970: epoch)
+        }
+        return nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             controlHeader
@@ -415,9 +426,10 @@ struct PrinterRemoteControlView: View {
                     isEnabled: controlsReady,
                     tint: cyan,
                     caption: localized("Tăng tốc"),
+                    printStartedAt: printStartedAt,
                     onCommit: { directControl.setPrintSpeed($0) }
                 )
-                .frame(width: 176, height: 108)
+                .frame(width: 184, height: 126)
             }
             .frame(maxWidth: .infinity)
 
@@ -719,10 +731,11 @@ private struct PrinterSpeedDial: View {
     let isEnabled: Bool
     let tint: Color
     let caption: String
+    let printStartedAt: Date?
     let onCommit: (Int) -> Void
 
-    private let startAngle = 200.0
-    private let endAngle = 340.0
+    private let startAngle = 195.0
+    private let endAngle = 345.0
     private let speedPercents = [50, 100, 124, 166]
 
     private var needleAngle: Double {
@@ -735,88 +748,95 @@ private struct PrinterSpeedDial: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let center = CGPoint(x: proxy.size.width / 2, y: proxy.size.height - 9)
-            let radius = min(proxy.size.width * 0.45, proxy.size.height - 14)
-            ZStack {
-                gaugeArc(center: center, radius: radius)
-                    .stroke(Color.black.opacity(0.07), style: StrokeStyle(lineWidth: 11, lineCap: .round))
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                let center = CGPoint(x: proxy.size.width / 2, y: proxy.size.height - 8)
+                let radius = min(proxy.size.width * 0.46, proxy.size.height - 13)
+                ZStack {
+                    gaugeArc(center: center, radius: radius)
+                        .stroke(Color.primary.opacity(0.13), style: StrokeStyle(lineWidth: 2, lineCap: .round))
 
-                gaugeArc(center: center, radius: radius)
-                    .stroke(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.02, green: 0.62, blue: 0.46),
-                                Color(red: 0.02, green: 0.49, blue: 0.65),
-                                Color(red: 0.11, green: 0.35, blue: 0.83)
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        ),
-                        style: StrokeStyle(lineWidth: 7, lineCap: .round)
-                    )
-                    .shadow(color: tint.opacity(0.18), radius: 5)
-
-                ForEach(0..<13, id: \.self) { index in
-                    let fraction = Double(index) / 12
+                    ForEach(0..<31, id: \.self) { index in
+                    let fraction = Double(index) / 30
                     let angle = startAngle + (endAngle - startAngle) * fraction
-                    let isMajor = index % 4 == 0
+                    let isMajor = index % 10 == 0
+                    let isMedium = index % 5 == 0
                     Path { path in
-                        path.move(to: point(center: center, radius: radius - (isMajor ? 15 : 10), angle: angle))
-                        path.addLine(to: point(center: center, radius: radius - 4, angle: angle))
+                        path.move(to: point(
+                            center: center,
+                            radius: radius - (isMajor ? 15 : (isMedium ? 11 : 7)),
+                            angle: angle
+                        ))
+                        path.addLine(to: point(center: center, radius: radius - 2, angle: angle))
                     }
                     .stroke(
-                        isMajor ? Color.primary.opacity(0.60) : Color.primary.opacity(0.24),
-                        style: StrokeStyle(lineWidth: isMajor ? 2 : 1, lineCap: .round)
+                        isMajor ? Color.primary.opacity(0.78) : Color.primary.opacity(isMedium ? 0.48 : 0.25),
+                        style: StrokeStyle(lineWidth: isMajor ? 3.4 : (isMedium ? 2 : 1.15), lineCap: .round)
                     )
-                }
+                    }
 
-                ForEach(0..<4, id: \.self) { index in
-                    let angle = startAngle + (endAngle - startAngle) * (Double(index) / 3)
-                    Text("\(speedPercents[index])")
-                        .font(.system(size: 8, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .position(point(center: center, radius: radius - 26, angle: angle))
-                }
+                    ForEach(0..<4, id: \.self) { index in
+                        let angle = startAngle + (endAngle - startAngle) * (Double(index) / 3)
+                        Text("\(speedPercents[index])")
+                            .font(.system(size: 9, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .position(point(center: center, radius: radius - 26, angle: angle))
+                    }
 
-                Path { path in
-                    path.move(to: center)
-                    path.addLine(to: point(center: center, radius: radius * 0.68, angle: needleAngle))
-                }
-                .stroke(tint, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                .shadow(color: tint.opacity(0.38), radius: 4)
-
-                Circle()
-                    .fill(tint)
-                    .frame(width: 12, height: 12)
-                    .position(center)
-
-                VStack(spacing: 0) {
                     Text("\(speedPercent)%")
-                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(.primary)
-                    Text(caption.uppercased())
-                        .font(.system(size: 8, weight: .semibold))
-                        .tracking(0.6)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(tint)
+                        .position(x: center.x, y: center.y - radius * 0.82)
+
+                    VStack(spacing: 1) {
+                        Text(elapsedHoursText(at: context.date))
+                            .font(.system(size: 14, weight: .bold, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundStyle(.white)
+                        Text(caption.uppercased())
+                            .font(.system(size: 6.5, weight: .semibold))
+                            .tracking(0.7)
+                            .foregroundStyle(.white.opacity(0.68))
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.84), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 0.7)
+                    }
+                    .position(x: center.x, y: center.y - radius * 0.43)
+
+                    Path { path in
+                        path.move(to: center)
+                        path.addLine(to: point(center: center, radius: radius * 0.73, angle: needleAngle))
+                    }
+                    .stroke(tint, style: StrokeStyle(lineWidth: 3.2, lineCap: .round))
+                    .shadow(color: tint.opacity(0.34), radius: 3)
+
+                    Circle()
+                        .fill(Color.primary.opacity(0.92))
+                        .frame(width: 17, height: 17)
+                        .overlay(Circle().fill(tint).frame(width: 7, height: 7))
+                        .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+                        .position(center)
                 }
-                .position(x: center.x, y: center.y - radius * 0.36)
+                .opacity(isEnabled ? 1 : 0.42)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { gesture in
+                            guard isEnabled else { return }
+                            level = dialLevel(at: gesture.location, size: proxy.size)
+                        }
+                        .onEnded { _ in
+                            guard isEnabled else { return }
+                            onCommit(level)
+                        }
+                )
+                .animation(.easeOut(duration: 0.14), value: level)
             }
-            .opacity(isEnabled ? 1 : 0.42)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { gesture in
-                        guard isEnabled else { return }
-                        level = dialLevel(at: gesture.location, size: proxy.size)
-                    }
-                    .onEnded { _ in
-                        guard isEnabled else { return }
-                        onCommit(level)
-                    }
-            )
-            .animation(.easeOut(duration: 0.14), value: level)
         }
         .accessibilityElement()
         .accessibilityLabel(caption)
@@ -830,6 +850,12 @@ private struct PrinterSpeedDial: View {
             }
             onCommit(level)
         }
+    }
+
+    private func elapsedHoursText(at date: Date) -> String {
+        guard let printStartedAt else { return "— h" }
+        let hours = max(0, date.timeIntervalSince(printStartedAt)) / 3_600
+        return String(format: "%.1f h", hours)
     }
 
     private func dialLevel(at location: CGPoint, size: CGSize) -> Int {

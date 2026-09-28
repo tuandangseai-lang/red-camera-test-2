@@ -329,6 +329,7 @@ int currentLayer = 0;
 int totalLayers = 0;
 int printPercent = 0;
 int remainingMinutes = -1;
+uint32_t gcodeStartEpoch = 0;
 // Bambu print.stg_cur: 0 means real layer printing, >0 is a preparation or
 // maintenance stage, and -1/255 means idle or unavailable.
 int currentStage = -1;
@@ -477,7 +478,8 @@ void reportPrintStatus(bool force = false) {
   lastStatusNotifyAt = now;
   queuePhoneEvent(String("H2D,PRINT,") + printState + "," + currentLayer +
                   "," + totalLayers + "," + printPercent + "," + currentStage +
-                  "," + remainingMinutes + "," + settings.printerSerial);
+                  "," + remainingMinutes + "," + settings.printerSerial + "," +
+                  gcodeStartEpoch);
 }
 
 String printerModelFromSerial(const String &serial) {
@@ -750,6 +752,7 @@ void resetPrinterRuntimeForProfileSwitch() {
   totalLayers = 0;
   printPercent = 0;
   remainingMinutes = -1;
+  gcodeStartEpoch = 0;
   currentStage = -1;
   lastObservedLayer = 0;
   lastSnapLayer = 0;
@@ -1815,6 +1818,9 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   const bool hasStage = extractLastJsonInt(payload, length, "stg_cur", stage);
   const bool hasRemaining =
       extractLastJsonInt(payload, length, "mc_remaining_time", remaining);
+  uint32_t incomingStartEpoch = 0;
+  const bool hasStartEpoch = extractLastJsonUInt32(
+      payload, length, "gcode_start_time", incomingStartEpoch);
   const bool hasPrintError =
       extractLastJsonUInt32(payload, length, "print_error", incomingPrintError);
   const bool hasHms =
@@ -1834,7 +1840,7 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
       jobToken != announcedPrintJob;
 
   if (hasLayer || hasTotal || hasPercent || hasStage || hasRemaining || hasState ||
-      hasPrintError || hasHms) {
+      hasPrintError || hasHms || hasStartEpoch) {
     statusDataSeen = true;
     lastPrintDataAt = millis();
     if (firstStatusPacket) {
@@ -1844,6 +1850,7 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
                     hasTotal ? total : -1, hasPercent ? percent : -1);
     }
   }
+  if (hasStartEpoch) gcodeStartEpoch = incomingStartEpoch;
   if (hasLayer || hasTotal || hasPercent || hasStage || hasRemaining || hasState ||
       newPrintSubmission) {
     String effectiveState = hasState ? state : "";

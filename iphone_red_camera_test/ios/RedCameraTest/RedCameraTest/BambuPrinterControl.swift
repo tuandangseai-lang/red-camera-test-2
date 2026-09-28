@@ -31,6 +31,7 @@ struct BambuDirectSnapshot: Equatable {
     var printStage: Int?
     var printErrorCode: UInt32?
     var printerErrorText = ""
+    var printStartedAt: Date?
     var jobID = ""
     var subtaskID = ""
     var chamberLightOn: Bool?
@@ -649,6 +650,13 @@ final class BambuPrinterControlManager: ObservableObject {
         update("bed_target_temper", \.bedTargetTemperature)
         update("spd_lvl", \.printSpeedLevel)
         update("stg_cur", \.printStage)
+
+        if let epoch = number(report["gcode_start_time"]) {
+            next.printStartedAt = epoch > 1_500_000_000
+                ? Date(timeIntervalSince1970: TimeInterval(epoch))
+                : nil
+            changed = true
+        }
 
         if let jobID = report["job_id"] as? String {
             next.jobID = jobID
