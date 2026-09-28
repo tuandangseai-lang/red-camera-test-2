@@ -2581,26 +2581,33 @@ private struct LivePrintProgressRing: View {
             let diameter = min(proxy.size.width, proxy.size.height)
             ZStack {
                 Circle()
-                    .stroke(Color.black.opacity(0.065), lineWidth: 10)
+                    .stroke(Color.black.opacity(0.055), lineWidth: 12)
+
+                Circle()
+                    .stroke(Color.white.opacity(0.82), lineWidth: 1)
+                    .padding(8)
 
                 Circle()
                     .trim(from: 0, to: max(0.006, clampedProgress))
                     .stroke(
                         AngularGradient(
-                            colors: [
-                                Color(red: 0.18, green: 0.92, blue: 0.40),
-                                Color(red: 0.05, green: 0.79, blue: 0.80),
-                                Color(red: 0.08, green: 0.43, blue: 1.0)
-                            ],
+                            gradient: Gradient(stops: [
+                                .init(color: Color(red: 0.16, green: 0.93, blue: 0.40), location: 0.00),
+                                .init(color: Color(red: 0.06, green: 0.88, blue: 0.52), location: 0.18),
+                                .init(color: Color(red: 0.02, green: 0.82, blue: 0.66), location: 0.36),
+                                .init(color: Color(red: 0.00, green: 0.73, blue: 0.82), location: 0.56),
+                                .init(color: Color(red: 0.03, green: 0.59, blue: 0.96), location: 0.76),
+                                .init(color: Color(red: 0.12, green: 0.38, blue: 1.00), location: 1.00)
+                            ]),
                             center: .center,
                             startAngle: .degrees(-90),
                             endAngle: .degrees(270)
                         ),
-                        style: StrokeStyle(lineWidth: 10, lineCap: .round)
+                        style: StrokeStyle(lineWidth: 11, lineCap: .round, lineJoin: .round)
                     )
                     .rotationEffect(.degrees(-90))
-                    .shadow(color: Color.green.opacity(0.25), radius: 7)
-                    .shadow(color: Color.blue.opacity(0.22), radius: 12)
+                    .shadow(color: Color.green.opacity(0.20), radius: 6)
+                    .shadow(color: Color.blue.opacity(0.20), radius: 11)
 
                 if clampedProgress > 0.01 {
                     Circle()
@@ -2611,15 +2618,10 @@ private struct LivePrintProgressRing: View {
                         .rotationEffect(.degrees(360 * clampedProgress))
                 }
 
-                Circle()
-                    .stroke(
-                        Color.white.opacity(0.72),
-                        style: StrokeStyle(lineWidth: 1, dash: [2, 8])
-                    )
-                    .padding(5)
             }
             .padding(8)
-            .animation(.easeOut(duration: 0.45), value: clampedProgress)
+            .drawingGroup(opaque: false, colorMode: .linear)
+            .animation(.easeInOut(duration: 0.55), value: clampedProgress)
         }
         .accessibilityHidden(true)
     }

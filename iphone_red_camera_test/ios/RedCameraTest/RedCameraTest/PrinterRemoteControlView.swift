@@ -21,10 +21,11 @@ struct PrinterRemoteControlView: View {
     @State private var chamberLightEnabled = false
     @State private var confirmation: RemoteConfirmation?
     @State private var alarmPulse = false
+    @State private var showsFilamentHelp = false
 
-    private let cyan = Color(red: 0.12, green: 0.48, blue: 0.46)
-    private let amber = Color(red: 0.78, green: 0.48, blue: 0.10)
-    private let green = Color(red: 0.16, green: 0.58, blue: 0.38)
+    private let cyan = Color(red: 0.02, green: 0.43, blue: 0.40)
+    private let amber = Color(red: 0.91, green: 0.48, blue: 0.14)
+    private let green = Color(red: 0.03, green: 0.61, blue: 0.43)
 
     private var controlsReady: Bool {
         directControl.isReady && !directControl.isPending
@@ -73,6 +74,9 @@ struct PrinterRemoteControlView: View {
         }
         .onChange(of: directControl.snapshot.printSpeedLevel) { _, value in
             if let value, (1...4).contains(value) { printSpeed = value }
+        }
+        .onChange(of: directControl.activePrompt?.id) { _, _ in
+            showsFilamentHelp = false
         }
         .onChange(of: alarmNeedsAttention) { _, _ in updateAlarmPulse() }
         .alert(
@@ -213,9 +217,9 @@ struct PrinterRemoteControlView: View {
         VStack(spacing: 12) {
             HStack(spacing: 10) {
                 Image(systemName: "thermometer.medium")
-                    .font(.system(size: 18, weight: .medium))
+                    .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(amber)
-                    .frame(width: 38, height: 38)
+                    .frame(width: 34, height: 34)
                     .background(amber.opacity(0.10), in: Circle())
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -223,9 +227,11 @@ struct PrinterRemoteControlView: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
                     Text(liveNozzleTemperatureText)
-                        .font(.system(size: 24, weight: .semibold, design: .rounded))
+                        .font(.system(size: 19, weight: .semibold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
                 }
                 Spacer()
 
@@ -287,7 +293,14 @@ struct PrinterRemoteControlView: View {
             }
         }
         .padding(12)
-        .background(Color.black.opacity(0.025), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(
+            Color(red: 0.965, green: 0.975, blue: 0.973),
+            in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .stroke(cyan.opacity(0.10), lineWidth: 1)
+        }
     }
 
     private var utilityControls: some View {
@@ -297,16 +310,14 @@ struct PrinterRemoteControlView: View {
                     level: $printSpeed,
                     isEnabled: controlsReady,
                     tint: cyan,
+                    caption: localized("Tăng tốc"),
                     onCommit: { directControl.setPrintSpeed($0) }
                 )
-                .frame(width: 112, height: 112)
-                Text(localized("Tốc độ"))
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
+                .frame(width: 176, height: 108)
             }
             .frame(maxWidth: .infinity)
 
-            Divider().frame(height: 92)
+            Divider().frame(height: 82)
 
             VStack(spacing: 12) {
                 Image(systemName: chamberLightEnabled ? "lightbulb.fill" : "lightbulb")
@@ -355,22 +366,59 @@ struct PrinterRemoteControlView: View {
                 }
             }
 
-            HStack(spacing: 8) {
-                Button(localized("Tiếp tục")) { directControl.continueActivePrompt() }
-                    .buttonStyle(RemoteActionButtonStyle(tint: isError ? .red : green))
-                    .disabled(!controlsReady)
-
-                if isError {
+            if isError {
+                HStack(spacing: 8) {
+                    Button(localized("Tiếp tục")) { directControl.continueActivePrompt() }
+                        .buttonStyle(RemoteActionButtonStyle(tint: .red))
+                        .disabled(!controlsReady)
                     Button(localized("Bỏ qua")) { directControl.ignoreActiveError() }
                         .buttonStyle(RemoteActionButtonStyle(tint: amber))
                         .disabled(!controlsReady)
                     Button(localized("Dừng")) { directControl.stopFromActivePrompt() }
                         .buttonStyle(RemoteActionButtonStyle(tint: .red))
                         .disabled(!controlsReady)
-                } else {
-                    Button(localized("Hoàn tất")) { directControl.finishFilamentOperation() }
+                }
+            } else if prompt.kind == .filamentLoad {
+                VStack(spacing: 8) {
+                    Button(localized("Đã đùn nhựa • Tiếp tục")) {
+                        directControl.finishFilamentOperation()
+                    }
                         .buttonStyle(RemoteActionButtonStyle(tint: cyan))
                         .disabled(!controlsReady)
+                        .frame(maxWidth: .infinity)
+                    Button(localized("Chưa ra nhựa • Thử lại")) {
+                        directControl.continueActivePrompt()
+                    }
+                        .buttonStyle(RemoteActionButtonStyle(tint: amber))
+                        .disabled(!controlsReady)
+                        .frame(maxWidth: .infinity)
+                }
+            } else {
+                VStack(spacing: 8) {
+                    Button(localized("Đã rút xong • Tiếp tục")) {
+                        directControl.continueActivePrompt()
+                    }
+                    .buttonStyle(RemoteActionButtonStyle(tint: cyan))
+                    .disabled(!controlsReady)
+                    .frame(maxWidth: .infinity)
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            showsFilamentHelp.toggle()
+                        }
+                    } label: {
+                        Label(localized("Trợ giúp xử lý"), systemImage: "wrench.and.screwdriver")
+                    }
+                    .buttonStyle(RemoteActionButtonStyle(tint: amber))
+                    .frame(maxWidth: .infinity)
+
+                    if showsFilamentHelp {
+                        Text(localized(unloadHelpText))
+                            .font(.system(size: 11, weight: .regular))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
                 }
             }
         }
@@ -385,19 +433,36 @@ struct PrinterRemoteControlView: View {
     private func promptDescription(_ prompt: BambuRemotePrompt) -> String {
         switch prompt.kind {
         case .filamentLoad:
-            return languageCode == SEAppLanguage.english.rawValue
-                ? "Follow the printer instruction, then continue or finish here."
-                : "Làm theo hướng dẫn nạp nhựa, rồi xác nhận ngay tại đây."
+            if languageCode == SEAppLanguage.english.rawValue {
+                return usesLeftNozzlePath
+                    ? "Check whether filament is flowing from the left nozzle."
+                    : "Check whether filament is flowing from the nozzle."
+            }
+            return usesLeftNozzlePath
+                ? "Kiểm tra nhựa đã chảy ra từ đầu phun trái hay chưa."
+                : "Kiểm tra nhựa đã chảy ra từ đầu phun hay chưa."
         case .filamentUnload:
-            return languageCode == SEAppLanguage.english.rawValue
-                ? "Remove the filament when prompted, then continue or finish here."
-                : "Rút nhựa khi máy yêu cầu, rồi xác nhận ngay tại đây."
+            if languageCode == SEAppLanguage.english.rawValue {
+                return usesLeftNozzlePath
+                    ? "Pull the filament out from the left external spool path."
+                    : "Pull the filament out from the external spool path."
+            }
+            return usesLeftNozzlePath
+                ? "Rút sợi nhựa ra khỏi đường cuộn ngoài bên trái."
+                : "Rút sợi nhựa ra khỏi đường cuộn ngoài."
         case .printerError:
             let code = prompt.errorCode.map { String(format: "%08X", $0) } ?? "—"
             return languageCode == SEAppLanguage.english.rawValue
                 ? "Printer error \(code). Fix the cause, then continue, ignore, or stop."
                 : "Lỗi máy in \(code). Khắc phục nguyên nhân rồi tiếp tục, bỏ qua hoặc dừng."
         }
+    }
+
+    private var unloadHelpText: String {
+        if languageCode == SEAppLanguage.english.rawValue {
+            return "If the prompt remains, check for broken filament in the extruder or PTFE tube, then remove or straighten it before continuing."
+        }
+        return "Nếu thông báo vẫn còn, kiểm tra nhựa gãy trong bộ đùn hoặc ống PTFE; lấy đoạn gãy ra hoặc nắn thẳng rồi mới tiếp tục."
     }
 
     private var liveNozzleTemperatureText: String {
@@ -520,53 +585,93 @@ private struct PrinterSpeedDial: View {
     @Binding var level: Int
     let isEnabled: Bool
     let tint: Color
+    let caption: String
     let onCommit: (Int) -> Void
 
+    private let startAngle = 200.0
+    private let endAngle = 340.0
+    private let speedPercents = [50, 100, 124, 166]
+
     private var needleAngle: Double {
-        -120 + (Double(min(4, max(1, level))) - 1) * 80
+        startAngle + (Double(min(4, max(1, level))) - 1) * ((endAngle - startAngle) / 3)
+    }
+
+    private var speedPercent: Int {
+        speedPercents[min(3, max(0, level - 1))]
     }
 
     var body: some View {
         GeometryReader { proxy in
-            let diameter = min(proxy.size.width, proxy.size.height)
+            let center = CGPoint(x: proxy.size.width / 2, y: proxy.size.height - 9)
+            let radius = min(proxy.size.width * 0.45, proxy.size.height - 14)
             ZStack {
-                Circle()
-                    .fill(Color.white)
-                    .shadow(color: .black.opacity(0.07), radius: 8, y: 3)
-                Circle()
-                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                gaugeArc(center: center, radius: radius)
+                    .stroke(Color.black.opacity(0.07), style: StrokeStyle(lineWidth: 11, lineCap: .round))
 
-                ForEach(0..<4, id: \.self) { index in
-                    Capsule()
-                        .fill(index + 1 == level ? tint : Color.black.opacity(0.18))
-                        .frame(width: 3, height: index + 1 == level ? 11 : 7)
-                        .offset(y: -(diameter / 2) + 14)
-                        .rotationEffect(.degrees(-120 + Double(index) * 80))
+                gaugeArc(center: center, radius: radius)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.02, green: 0.62, blue: 0.46),
+                                Color(red: 0.02, green: 0.49, blue: 0.65),
+                                Color(red: 0.11, green: 0.35, blue: 0.83)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        ),
+                        style: StrokeStyle(lineWidth: 7, lineCap: .round)
+                    )
+                    .shadow(color: tint.opacity(0.18), radius: 5)
+
+                ForEach(0..<13, id: \.self) { index in
+                    let fraction = Double(index) / 12
+                    let angle = startAngle + (endAngle - startAngle) * fraction
+                    let isMajor = index % 4 == 0
+                    Path { path in
+                        path.move(to: point(center: center, radius: radius - (isMajor ? 15 : 10), angle: angle))
+                        path.addLine(to: point(center: center, radius: radius - 4, angle: angle))
+                    }
+                    .stroke(
+                        isMajor ? Color.primary.opacity(0.60) : Color.primary.opacity(0.24),
+                        style: StrokeStyle(lineWidth: isMajor ? 2 : 1, lineCap: .round)
+                    )
                 }
 
-                Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [tint.opacity(0.3), tint],
-                            startPoint: .bottom,
-                            endPoint: .top
-                        )
-                    )
-                    .frame(width: 4, height: diameter * 0.28)
-                    .offset(y: -diameter * 0.14)
-                    .rotationEffect(.degrees(needleAngle))
-                    .shadow(color: tint.opacity(0.35), radius: 4)
+                ForEach(0..<4, id: \.self) { index in
+                    let angle = startAngle + (endAngle - startAngle) * (Double(index) / 3)
+                    Text("\(speedPercents[index])")
+                        .font(.system(size: 8, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .position(point(center: center, radius: radius - 26, angle: angle))
+                }
+
+                Path { path in
+                    path.move(to: center)
+                    path.addLine(to: point(center: center, radius: radius * 0.68, angle: needleAngle))
+                }
+                .stroke(tint, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                .shadow(color: tint.opacity(0.38), radius: 4)
 
                 Circle()
                     .fill(tint)
-                    .frame(width: 13, height: 13)
-                Image(systemName: "speedometer")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(tint)
-                    .offset(y: diameter * 0.25)
+                    .frame(width: 12, height: 12)
+                    .position(center)
+
+                VStack(spacing: 0) {
+                    Text("\(speedPercent)%")
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.primary)
+                    Text(caption.uppercased())
+                        .font(.system(size: 8, weight: .semibold))
+                        .tracking(0.6)
+                        .foregroundStyle(.secondary)
+                }
+                .position(x: center.x, y: center.y - radius * 0.36)
             }
             .opacity(isEnabled ? 1 : 0.42)
-            .contentShape(Circle())
+            .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { gesture in
@@ -581,8 +686,8 @@ private struct PrinterSpeedDial: View {
             .animation(.easeOut(duration: 0.14), value: level)
         }
         .accessibilityElement()
-        .accessibilityLabel("Print speed")
-        .accessibilityValue("\(level) of 4")
+        .accessibilityLabel(caption)
+        .accessibilityValue("\(speedPercent)%")
         .accessibilityAdjustableAction { direction in
             guard isEnabled else { return }
             switch direction {
@@ -595,11 +700,33 @@ private struct PrinterSpeedDial: View {
     }
 
     private func dialLevel(at location: CGPoint, size: CGSize) -> Int {
-        let dx = location.x - size.width / 2
-        let dy = location.y - size.height / 2
-        let degrees = atan2(dx, -dy) * 180 / .pi
-        let clamped = min(120, max(-120, degrees))
-        return min(4, max(1, Int(((clamped + 120) / 80).rounded()) + 1))
+        let center = CGPoint(x: size.width / 2, y: size.height - 9)
+        let dx = location.x - center.x
+        let dy = location.y - center.y
+        var degrees = Double(atan2(dy, dx)) * 180 / .pi
+        if degrees < 0 { degrees += 360 }
+        let clamped = min(endAngle, max(startAngle, degrees))
+        let fraction = (clamped - startAngle) / (endAngle - startAngle)
+        return min(4, max(1, Int((fraction * 3).rounded()) + 1))
+    }
+
+    private func gaugeArc(center: CGPoint, radius: CGFloat) -> Path {
+        var path = Path()
+        for step in 0...60 {
+            let fraction = Double(step) / 60
+            let angle = startAngle + (endAngle - startAngle) * fraction
+            let next = point(center: center, radius: radius, angle: angle)
+            if step == 0 { path.move(to: next) } else { path.addLine(to: next) }
+        }
+        return path
+    }
+
+    private func point(center: CGPoint, radius: CGFloat, angle: Double) -> CGPoint {
+        let radians = angle * .pi / 180
+        return CGPoint(
+            x: center.x + radius * CGFloat(cos(radians)),
+            y: center.y + radius * CGFloat(sin(radians))
+        )
     }
 }
 
@@ -674,13 +801,14 @@ private struct RemoteActionButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .padding(.horizontal, 7)
-            .frame(minHeight: 48)
+            .font(.system(size: 12, weight: .semibold))
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, minHeight: 44)
             .foregroundStyle(tint)
             .background(tint.opacity(configuration.isPressed ? 0.16 : 0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(tint.opacity(0.18), lineWidth: 1)
             }
             .scaleEffect(configuration.isPressed ? 0.98 : 1)

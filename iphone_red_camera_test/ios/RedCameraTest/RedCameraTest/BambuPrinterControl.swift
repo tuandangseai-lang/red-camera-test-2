@@ -150,12 +150,23 @@ final class BambuPrinterControlManager: ObservableObject {
         queue.async { [weak self] in
             guard let self, let prompt = self.activePromptStorage else { return }
             switch prompt.kind {
-            case .filamentLoad, .filamentUnload:
+            case .filamentLoad:
                 self.send(
                     section: "print",
                     command: "ams_control",
                     fields: ["param": "resume"],
-                    actionName: "Tiếp tục thao tác nhựa"
+                    actionName: "Chưa ra nhựa • thử đùn lại"
+                )
+            case .filamentUnload:
+                self.send(
+                    section: "print",
+                    command: "ams_control",
+                    fields: ["param": "resume"],
+                    actionName: "Đã rút nhựa • tiếp tục",
+                    onSuccess: { [weak self] in
+                        self?.activeFilamentOperation = nil
+                        self?.dismissCurrentPrompt()
+                    }
                 )
             case .printerError:
                 self.send(
@@ -186,12 +197,12 @@ final class BambuPrinterControlManager: ObservableObject {
     func finishFilamentOperation() {
         queue.async { [weak self] in
             guard let self, let prompt = self.activePromptStorage,
-                  prompt.kind != .printerError else { return }
+                  prompt.kind == .filamentLoad else { return }
             self.send(
                 section: "print",
                 command: "ams_control",
                 fields: ["param": "done"],
-                actionName: "Hoàn tất thao tác nhựa",
+                actionName: "Đã đùn nhựa • tiếp tục",
                 onSuccess: { [weak self] in
                     self?.activeFilamentOperation = nil
                     self?.dismissCurrentPrompt()
@@ -588,6 +599,36 @@ final class BambuPrinterControlManager: ObservableObject {
     }
 
     private func refreshActivePrompt(for snapshot: BambuDirectSnapshot) {
+        if snapshot.printStage != 22, snapshot.printStage != 24,
+           snapshot.printErrorCode == 0,
+           dismissedPromptID?.hasPrefix("filament-") == true {
+            activeFilamentOperation = nil
+            dismissedPromptID = nil
+        }
+
+        if snapshot.printStage == 22 {
+            activeFilamentOperation = .filamentUnload
+        } else if snapshot.printStage == 24 {
+            activeFilamentOperation = .filamentLoad
+        }
+
+        // 07FEC003 is Bambu's interactive external-filament dialog. If SE is
+        // reopened mid-operation, the current stage/command may be gone; the
+        // official action table identifies it as Continue + Assistant.
+        if activeFilamentOperation == nil,
+           snapshot.printErrorCode == 0x07FEC003 {
+            activeFilamentOperation = .filamentUnload
+        }
+
+        // During manual load/unload the printer reports a print_error as the
+        // backing code for its interactive dialog (for example 07FEC003).
+        // It is not a generic print failure. Preserve the operation type so
+        // the iPhone exposes the same `done`/`resume` actions as Bambu Studio.
+        if activeFilamentOperation != nil {
+            publishFilamentPrompt()
+            return
+        }
+
         if let code = snapshot.printErrorCode, code != 0 {
             let id = "error-\(String(format: "%08X", code))-\(snapshot.jobID)-\(snapshot.subtaskID)"
             publishPrompt(BambuRemotePrompt(id: id, kind: .printerError, errorCode: code))
@@ -597,14 +638,6 @@ final class BambuPrinterControlManager: ObservableObject {
         if activePromptStorage?.kind == .printerError {
             dismissedPromptID = nil
             publishPrompt(nil)
-        }
-
-        if snapshot.printStage == 22 {
-            activeFilamentOperation = .filamentUnload
-            publishFilamentPrompt()
-        } else if snapshot.printStage == 24 {
-            activeFilamentOperation = .filamentLoad
-            publishFilamentPrompt()
         }
     }
 
@@ -630,7 +663,9 @@ final class BambuPrinterControlManager: ObservableObject {
     private func errorActionFields(for prompt: BambuRemotePrompt) -> [String: Any] {
         var fields: [String: Any] = ["param": "reserve"]
         if let code = prompt.errorCode {
-            fields["err"] = String(format: "%08X", code)
+            // Bambu Studio calls std::to_string(error_code) for HMS actions;
+            // the protocol expects the decimal value, not the UI's hex label.
+            fields["err"] = String(code)
         }
         if !snapshotStorage.jobID.isEmpty {
             fields["job_id"] = snapshotStorage.jobID
