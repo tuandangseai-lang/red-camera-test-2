@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.84 build163 - cam bien nhua AMS va canh bao truc tiep
+name: Tao IPA SE v9.85 build164 - AMS ngang va toi uu realtime
 
 on:
   workflow_dispatch:
@@ -265,13 +265,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.84-build163-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.85-build164-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.84-build163-unsigned-ipa
-          path: SE-v9.84-build163-unsigned.ipa
+          name: SE-v9.85-build164-unsigned-ipa
+          path: SE-v9.85-build164-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -388,7 +388,7 @@ jobs:
           grep -q 'Flash mode should show only the clean lightning artwork' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DTimelapseView.swift
           ! grep -q 'đang đồng bộ nhựa\|đang đồng bộ loại nhựa' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DTimelapseView.swift
           ! grep -q 'safeAreaInset(edge: .top' iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/H2DTimelapseView.swift
-          grep -q 'A background printer may be discovered' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'Prefer the persistent job key' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'MODE_INPUT_DEBOUNCE_MS = 220' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'currentLayer > 0' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'H2D,CONTROL' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
@@ -401,7 +401,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.25.0
+          name: SE-Bambu-ESP32-v1.26.0
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

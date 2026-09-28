@@ -343,7 +343,9 @@ struct PrinterRemoteControlView: View {
     }
 
     private var amsControls: some View {
-        let trays = directControl.snapshot.amsTrays.filter(\.isPresent)
+        let trays = directControl.snapshot.amsTrays
+            .filter(\.isPresent)
+            .sorted { $0.amsID == $1.amsID ? $0.slotID < $1.slotID : $0.amsID < $1.amsID }
         return VStack(alignment: .leading, spacing: 10) {
             controlTitle("AMS", icon: "square.grid.2x2.fill")
 
@@ -352,61 +354,61 @@ struct PrinterRemoteControlView: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(trays) { tray in
-                    let selected = directControl.snapshot.currentAMSTrayID == tray.id
-                    let extruderID = tray.extruderID
-                        ?? directControl.snapshot.currentExtruderID
-                        ?? 0
-                    HStack(spacing: 9) {
-                        Circle()
-                            .fill(amsColor(tray.colorHex))
-                            .frame(width: 15, height: 15)
-                            .overlay(Circle().stroke(.black.opacity(0.14), lineWidth: 1))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("AMS \(tray.amsID + 1) • \(tray.slotID + 1)")
-                                .font(.system(size: 11, weight: .semibold))
-                            HStack(spacing: 4) {
-                                Text(tray.material.isEmpty ? localized("Chưa đặt loại nhựa") : tray.material)
-                                if directControl.snapshot.extruderCount > 1 {
-                                    Text("• \(localized(extruderID == 1 ? "Đầu trái" : "Đầu phải"))")
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(trays) { tray in
+                            let selected = directControl.snapshot.currentAMSTrayID == tray.id
+                            let extruderID = tray.extruderID
+                                ?? directControl.snapshot.currentExtruderID
+                                ?? 0
+                            Button {
+                                if selected {
+                                    directControl.unloadAMSFilament(
+                                        temperature: filamentTemperature,
+                                        extruderID: extruderID
+                                    )
+                                } else {
+                                    directControl.loadAMSFilament(
+                                        tray,
+                                        temperature: filamentTemperature,
+                                        extruderID: extruderID
+                                    )
+                                }
+                            } label: {
+                                VStack(spacing: 4) {
+                                    AMSSpoolGlyph(
+                                        color: selected ? Color.blue : amsColor(tray.colorHex),
+                                        isActive: selected
+                                    )
+                                    Text("\(tray.slotID + 1)")
+                                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                                        .foregroundStyle(selected ? Color.blue : .primary)
+                                    Text(tray.material.isEmpty ? "—" : tray.material)
+                                        .font(.system(size: 8, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                .frame(width: 58, height: 70)
+                                .background(
+                                    selected ? Color.blue.opacity(0.09) : Color.white.opacity(0.72),
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                )
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .stroke(
+                                            selected ? Color.blue.opacity(0.8) : Color.black.opacity(0.07),
+                                            lineWidth: selected ? 1.6 : 0.8
+                                        )
                                 }
                             }
-                            .font(.system(size: 10, weight: .regular))
-                            .foregroundStyle(.secondary)
-                        }
-                        Spacer(minLength: 5)
-                        if selected {
-                            Button {
-                                directControl.unloadAMSFilament(
-                                    temperature: filamentTemperature,
-                                    extruderID: extruderID
-                                )
-                            } label: {
-                                Image(systemName: "arrow.up.from.line.compact")
-                                    .frame(width: 30, height: 30)
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(amber)
+                            .buttonStyle(.plain)
                             .disabled(!controlsReady)
-                            .accessibilityLabel(localized("Rút nhựa AMS"))
-                        } else {
-                            Button {
-                                directControl.loadAMSFilament(
-                                    tray,
-                                    temperature: filamentTemperature,
-                                    extruderID: extruderID
-                                )
-                            } label: {
-                                Image(systemName: "arrow.down.to.line.compact")
-                                    .frame(width: 30, height: 30)
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(green)
-                            .disabled(!controlsReady)
-                            .accessibilityLabel(localized("Nạp nhựa AMS"))
+                            .accessibilityLabel(
+                                localized(selected ? "Rút nhựa AMS" : "Nạp nhựa AMS")
+                                    + " \(tray.slotID + 1)"
+                            )
                         }
                     }
-                    .padding(.vertical, 2)
                 }
             }
         }
@@ -425,11 +427,11 @@ struct PrinterRemoteControlView: View {
                     level: $printSpeed,
                     isEnabled: controlsReady,
                     tint: cyan,
-                    caption: localized("Tăng tốc"),
+                    caption: localized("Tốc độ in"),
                     printStartedAt: printStartedAt,
                     onCommit: { directControl.setPrintSpeed($0) }
                 )
-                .frame(width: 184, height: 126)
+                .frame(width: 150, height: 104)
             }
             .frame(maxWidth: .infinity)
 
@@ -789,24 +791,18 @@ private struct PrinterSpeedDial: View {
                         .foregroundStyle(tint)
                         .position(x: center.x, y: center.y - radius * 0.82)
 
-                    VStack(spacing: 1) {
-                        Text(elapsedHoursText(at: context.date))
-                            .font(.system(size: 14, weight: .bold, design: .monospaced))
-                            .monospacedDigit()
-                            .foregroundStyle(.white)
-                        Text(caption.uppercased())
-                            .font(.system(size: 6.5, weight: .semibold))
-                            .tracking(0.7)
-                            .foregroundStyle(.white.opacity(0.68))
-                    }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(Color.black.opacity(0.84), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .stroke(Color.white.opacity(0.18), lineWidth: 0.7)
-                    }
-                    .position(x: center.x, y: center.y - radius * 0.43)
+                    Text(elapsedHoursText(at: context.date))
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.black.opacity(0.84), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .stroke(Color.white.opacity(0.18), lineWidth: 0.7)
+                        }
+                        .position(x: center.x, y: center.y - radius * 0.43)
 
                     Path { path in
                         path.move(to: center)
@@ -886,6 +882,28 @@ private struct PrinterSpeedDial: View {
             x: center.x + radius * CGFloat(cos(radians)),
             y: center.y + radius * CGFloat(sin(radians))
         )
+    }
+}
+
+private struct AMSSpoolGlyph: View {
+    let color: Color
+    let isActive: Bool
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(color.opacity(isActive ? 1 : 0.88))
+            Circle()
+                .stroke(Color.black.opacity(0.12), lineWidth: 0.7)
+            Circle()
+                .fill(Color.white.opacity(0.92))
+                .frame(width: 12, height: 12)
+            Circle()
+                .stroke(color.opacity(0.72), lineWidth: 2)
+                .frame(width: 7, height: 7)
+        }
+        .frame(width: 30, height: 30)
+        .shadow(color: isActive ? Color.blue.opacity(0.34) : Color.clear, radius: 4)
     }
 }
 

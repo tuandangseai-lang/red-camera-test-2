@@ -227,15 +227,14 @@ struct H2DTimelapseView: View {
             }
             .onChange(of: directCriticalAlert) { _, _ in
                 synchronizePrinterAlarm()
+                relayDirectPrinterFaultIfNeeded()
             }
             .onChange(of: directSnapshot.printErrorCode) { _, _ in
                 synchronizePrinterAlarm()
+                relayDirectPrinterFaultIfNeeded()
             }
             .onChange(of: manualFilamentActionID) { _, value in
                 synchronizeManualFilamentBeep(value)
-            }
-            .onChange(of: directSnapshot) { _, _ in
-                relayDirectPrinterFaultIfNeeded()
             }
             .onChange(of: bluetooth.isConnected) { _, connected in
                 if connected { relayDirectPrinterFaultIfNeeded(force: true) }
@@ -2646,17 +2645,12 @@ private struct LivePrintProgressRing: View {
         min(1, max(0, progress))
     }
 
-    private var headColor: Color {
-        Color(
-            hue: 0.36 + 0.22 * clampedProgress,
-            saturation: 0.82,
-            brightness: 0.92
-        )
-    }
+    private let headColor = Color(red: 0.10, green: 0.43, blue: 1.00)
 
     var body: some View {
         GeometryReader { proxy in
             let diameter = min(proxy.size.width, proxy.size.height)
+            let gradientSpan = max(0.015, clampedProgress)
             ZStack {
                 Circle()
                     .stroke(Color.black.opacity(0.055), lineWidth: 12)
@@ -2671,15 +2665,15 @@ private struct LivePrintProgressRing: View {
                         AngularGradient(
                             gradient: Gradient(stops: [
                                 .init(color: Color(red: 0.16, green: 0.93, blue: 0.40), location: 0.00),
-                                .init(color: Color(red: 0.06, green: 0.88, blue: 0.52), location: 0.18),
-                                .init(color: Color(red: 0.02, green: 0.82, blue: 0.66), location: 0.36),
-                                .init(color: Color(red: 0.00, green: 0.73, blue: 0.82), location: 0.56),
-                                .init(color: Color(red: 0.03, green: 0.59, blue: 0.96), location: 0.76),
-                                .init(color: Color(red: 0.12, green: 0.38, blue: 1.00), location: 1.00)
+                                .init(color: Color(red: 0.04, green: 0.89, blue: 0.53), location: gradientSpan * 0.24),
+                                .init(color: Color(red: 0.00, green: 0.79, blue: 0.75), location: gradientSpan * 0.52),
+                                .init(color: Color(red: 0.02, green: 0.62, blue: 0.96), location: gradientSpan * 0.78),
+                                .init(color: headColor, location: gradientSpan),
+                                .init(color: headColor, location: 1.00)
                             ]),
                             center: .center,
-                            startAngle: .degrees(-90),
-                            endAngle: .degrees(270)
+                            startAngle: .degrees(0),
+                            endAngle: .degrees(360)
                         ),
                         style: StrokeStyle(lineWidth: 11, lineCap: .round, lineJoin: .round)
                     )

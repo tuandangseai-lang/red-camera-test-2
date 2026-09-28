@@ -130,6 +130,8 @@ final class BambuPrinterControlManager: ObservableObject {
     private var filamentOperationNumber = 0
     private var dismissedPromptID: String?
     private var lastFullStatusRequest = Date.distantPast
+    private var lastSnapshotPublishedAt = Date.distantPast
+    private var pendingSnapshotPublication: DispatchWorkItem?
 
     func start(profile: BambuPrinterProfile, accessCode: String) {
         let next = Configuration(
@@ -147,6 +149,9 @@ final class BambuPrinterControlManager: ObservableObject {
             guard let self else { return }
             if self.configuration == next, self.connection != nil { return }
             self.snapshotStorage = BambuDirectSnapshot()
+            self.pendingSnapshotPublication?.cancel()
+            self.pendingSnapshotPublication = nil
+            self.lastSnapshotPublishedAt = .distantPast
             self.activePromptStorage = nil
             self.activeFilamentOperation = nil
             self.dismissedPromptID = nil
@@ -615,6 +620,7 @@ final class BambuPrinterControlManager: ObservableObject {
     private func updateSnapshot(from report: [String: Any]) {
         var next = snapshotStorage
         var changed = false
+        var externalRouteInReport = false
         func number(_ value: Any?) -> Int? {
             if let value = value as? NSNumber { return value.intValue }
             if let value = value as? String { return Int(value) }
@@ -698,6 +704,7 @@ final class BambuPrinterControlManager: ObservableObject {
                     let slotID = packedSlot & 0xFF
                     if amsID == 253 || amsID == 254 {
                         detectedExternalExtruder = id
+                        externalRouteInReport = true
                     } else if amsID < 253, slotID < 255 {
                         detectedCurrentTray = "\(amsID)-\(slotID)"
                     }
@@ -718,6 +725,7 @@ final class BambuPrinterControlManager: ObservableObject {
             if let detectedExternalExtruder {
                 next.externalSpoolExtruderID = detectedExternalExtruder
                 next.externalFilamentPresent = filamentByExtruder[detectedExternalExtruder]
+                if externalRouteInReport { next.currentAMSTrayID = nil }
                 changed = true
             } else if let configured = next.externalSpoolExtruderID,
                       let present = filamentByExtruder[configured] {
@@ -736,6 +744,12 @@ final class BambuPrinterControlManager: ObservableObject {
             next.externalSpoolExtruderID = 0
             next.externalFilamentPresent = switchState == 1
             changed = true
+        }
+
+        if externalRouteInReport {
+            // extruder.info[].snow is the authoritative H2D route and can be
+            // newer than the legacy ams.tray_now value in the same packet.
+            next.currentAMSTrayID = nil
         }
 
         let virtualTrays: [[String: Any]] = {
@@ -760,12 +774,15 @@ final class BambuPrinterControlManager: ObservableObject {
             let hasReportedAMS = (existenceBits ?? 0) != 0 || !units.isEmpty
             next.hasAMS = hasReportedAMS
 
-            if let trayNow = number(ams["tray_now"]), trayNow >= 0, trayNow < 253 {
-                if next.extruderCount == 1 {
+            if let trayNow = number(ams["tray_now"]) {
+                if trayNow >= 0, trayNow < 253, next.extruderCount == 1 {
                     next.currentAMSTrayID = "\(trayNow >> 2)-\(trayNow & 0x3)"
+                } else if trayNow >= 253 {
+                    // 253/254 are virtual external spools; 255 means no AMS
+                    // tray is feeding the nozzle. Never leave a stale AMS
+                    // selection visible when the route has moved outside.
+                    next.currentAMSTrayID = nil
                 }
-            } else if number(ams["tray_now"]) == 255 {
-                next.currentAMSTrayID = nil
             }
 
             var trays: [BambuAMSTraySnapshot] = []
@@ -802,6 +819,17 @@ final class BambuPrinterControlManager: ObservableObject {
             changed = true
         }
 
+        if next.hasActivePrintJob,
+           next.currentAMSTrayID == nil,
+           next.externalSpoolExtruderID != nil {
+            // The active route is authoritative while material is physically
+            // being consumed. Some firmwares briefly publish a zero sensor bit
+            // in an incremental packet even though the external spool is the
+            // source of the running job.
+            next.externalFilamentPresent = true
+            changed = true
+        }
+
         if let lights = report["lights_report"] as? [[String: Any]],
            let chamber = lights.first(where: { ($0["node"] as? String) == "chamber_light" }),
            let mode = chamber["mode"] as? String {
@@ -825,12 +853,45 @@ final class BambuPrinterControlManager: ObservableObject {
             changed = true
         }
         guard changed else { return }
-        next.receivedAt = Date()
-        guard next != snapshotStorage else { return }
+        let previous = snapshotStorage
+        let now = Date()
+        let contentChanged = next != previous
+        let freshnessDue = now.timeIntervalSince(previous.receivedAt ?? .distantPast) >= 10
+        guard contentChanged || freshnessDue else { return }
+        next.receivedAt = now
         snapshotStorage = next
-        let publishedSnapshot = next
         refreshActivePrompt(for: next)
-        DispatchQueue.main.async { [weak self] in self?.snapshot = publishedSnapshot }
+
+        let urgent = next.printState != previous.printState ||
+            next.printErrorCode != previous.printErrorCode ||
+            next.printStage != previous.printStage ||
+            next.currentAMSTrayID != previous.currentAMSTrayID ||
+            next.externalFilamentPresent != previous.externalFilamentPresent ||
+            next.chamberLightOn != previous.chamberLightOn ||
+            next.amsTrays != previous.amsTrays
+        let minimumPublishInterval: TimeInterval = 1.25
+        let elapsed = now.timeIntervalSince(lastSnapshotPublishedAt)
+        if urgent || elapsed >= minimumPublishInterval {
+            pendingSnapshotPublication?.cancel()
+            pendingSnapshotPublication = nil
+            lastSnapshotPublishedAt = now
+            let publishedSnapshot = next
+            DispatchQueue.main.async { [weak self] in self?.snapshot = publishedSnapshot }
+        } else if pendingSnapshotPublication == nil {
+            let expectedGeneration = generation
+            let item = DispatchWorkItem { [weak self] in
+                guard let self, self.generation == expectedGeneration else { return }
+                self.pendingSnapshotPublication = nil
+                self.lastSnapshotPublishedAt = Date()
+                let publishedSnapshot = self.snapshotStorage
+                DispatchQueue.main.async { [weak self] in self?.snapshot = publishedSnapshot }
+            }
+            pendingSnapshotPublication = item
+            queue.asyncAfter(
+                deadline: .now() + max(0.05, minimumPublishInterval - elapsed),
+                execute: item
+            )
+        }
     }
 
     private func refreshActivePrompt(for snapshot: BambuDirectSnapshot) {

@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.25.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.26.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -79,8 +79,8 @@ constexpr uint32_t FLEET_MONITOR_DWELL_MS = 3000;
 constexpr uint32_t FLEET_MONITOR_RETRY_GAP_MS = 250;
 constexpr uint32_t PRINT_COMPLETE_BLUE_MS = 3UL * 60UL * 60UL * 1000UL;
 constexpr uint32_t PRINT_COMPLETE_PULSE_MS = 4000;
-constexpr uint32_t STATUS_PERIOD_MS = 2000;
-constexpr uint32_t TELEMETRY_PERIOD_MS = 1000;
+constexpr uint32_t STATUS_PERIOD_MS = 3000;
+constexpr uint32_t TELEMETRY_PERIOD_MS = 2000;
 constexpr uint32_t STATUS_REQUEST_RETRY_MS = 3500;
 constexpr uint32_t PRINT_DATA_STALE_MS = 10000;
 // A user-initiated unload/load briefly raises a non-zero print_error on some
@@ -198,6 +198,8 @@ struct FleetRuntime {
   uint32_t lastMessageAt = 0;
   uint32_t lastReachableAt = 0;
   uint8_t consecutiveProbeFailures = 0;
+  bool hasPrintBaseline = false;
+  String announcedPrintJob = "";
   bool lastReportedConfigured = false;
   bool lastReportedOnline = false;
   bool lastReportedActive = false;
@@ -304,6 +306,8 @@ uint32_t filamentChangeGraceUntil = 0;
 String printState = "IDLE";
 String activeJob = "0";
 String announcedPrintJob = "0";
+uint32_t lastManualFilamentBeepCode = 0;
+String lastManualFilamentBeepKind = "";
 String activeFilamentType = "";
 int activeFilamentSlot = -1;
 uint8_t materialSyncRequests = 0;
@@ -323,6 +327,7 @@ int printerExtruderCount = 1;
 int currentPrinterExtruderID = 0;
 int externalSpoolExtruderID = 0;
 int externalFilamentSensorState = -1;
+bool externalSpoolRouteActive = false;
 String printerErrorDetail = "";
 bool telemetryDirty = false;
 int currentLayer = 0;
@@ -775,6 +780,7 @@ void resetPrinterRuntimeForProfileSwitch() {
   externalSpoolExtruderID =
       printerModelFromSerial(settings.printerSerial) == "H2D" ? 1 : 0;
   externalFilamentSensorState = -1;
+  externalSpoolRouteActive = false;
   printerErrorDetail = "";
   telemetryDirty = false;
   lastTelemetryNotifyAt = 0;
@@ -1089,6 +1095,8 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
 
   bool changed = false;
   int sensorByExtruder[2] = {-1, -1};
+  bool currentRouteReported = false;
+  bool currentRouteUsesExternalSpool = false;
   uint8_t entryIndex = 0;
   ++cursor;
   while (cursor < extruderLength && extruder[cursor] != ']') {
@@ -1139,13 +1147,18 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
         extractLastJsonInt(object, objectLength, "snow", slotNow);
     const bool hasSlotTarget =
         extractLastJsonInt(object, objectLength, "star", slotTarget);
-    const auto noteExternalRoute = [&](int packedSlot) {
+    const auto noteExternalRoute = [&](int packedSlot, bool isCurrentRoute) {
       if (id < 0 || id >= 2 || packedSlot < 0) return;
       const int amsID = (packedSlot >> 8) & 0xFF;
-      if (amsID == 253 || amsID == 254) externalSpoolExtruderID = id;
+      const bool external = amsID == 253 || amsID == 254;
+      if (external) externalSpoolExtruderID = id;
+      if (isCurrentRoute) {
+        currentRouteReported = true;
+        currentRouteUsesExternalSpool |= external;
+      }
     };
-    if (hasSlotNow) noteExternalRoute(slotNow);
-    if (hasSlotTarget) noteExternalRoute(slotTarget);
+    if (hasSlotNow) noteExternalRoute(slotNow, true);
+    if (hasSlotTarget) noteExternalRoute(slotTarget, false);
     if (extractLastJsonUInt32(object, objectLength, "temp", packed) &&
         (id == 0 || id == 1)) {
       foundPackedNozzles = true;
@@ -1167,6 +1180,9 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
       sensorByExtruder[externalSpoolExtruderID] >= 0) {
     externalFilamentSensorState =
         sensorByExtruder[externalSpoolExtruderID];
+  }
+  if (currentRouteReported) {
+    externalSpoolRouteActive = currentRouteUsesExternalSpool;
   }
   if (nozzleTemperature >= 0 && leftNozzleTemperature >= 0) {
     nozzleSyncRequests = Config::NOZZLE_SYNC_RETRY_LIMIT;
@@ -1195,6 +1211,18 @@ void updatePrinterTelemetry(const uint8_t *payload, size_t length) {
       externalSpoolExtruderID = 0;
       externalFilamentSensorState = switchState == 1 ? 1 : 0;
     }
+  }
+  int trayNow = -1;
+  if (extractLastJsonInt(payload, length, "tray_now", trayNow)) {
+    externalSpoolRouteActive = trayNow == 253 || trayNow == 254;
+  }
+  if (isActivePrintState(printState) && externalSpoolRouteActive &&
+      externalFilamentSensorState != 1) {
+    // If the printer is actively consuming the virtual external spool, that
+    // route is stronger evidence than a transient zero in an incremental
+    // sensor packet. Keep the UI from claiming the loaded spool is empty.
+    externalFilamentSensorState = 1;
+    changed = true;
   }
   changed |= updateIntIfPresent(payload, length, "bed_temper", bedTemperature);
   changed |= updateIntIfPresent(payload, length, "bed_target_temper",
@@ -1578,7 +1606,20 @@ void setManualFilamentAction(bool active, const String &kind,
   manualFilamentActionKind = active ? kind : "";
   manualFilamentActionText = active ? text : "";
   manualFilamentActionCode = active ? code : 0;
-  if (newIncident) requestBuzzerBeep(170);
+  if (newIncident &&
+      (code != lastManualFilamentBeepCode ||
+       kind != lastManualFilamentBeepKind)) {
+    lastManualFilamentBeepCode = code;
+    lastManualFilamentBeepKind = kind;
+    requestBuzzerBeep(170);
+  }
+  if (!active) {
+    // A printer clear/acknowledgement arms the same error code for a future
+    // physical filament operation. Runtime reconnects never call this path,
+    // so they cannot replay the one-shot beep.
+    lastManualFilamentBeepCode = 0;
+    lastManualFilamentBeepKind = "";
+  }
   reportManualFilamentAction(newIncident);
 }
 
@@ -1674,7 +1715,6 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
                         int newPercent, int newStage, int newRemainingMinutes,
                         const String &jobToken) {
   const String previousState = printState;
-  const bool wasActiveSession = isActivePrintState(previousState);
   const bool wasRunning = printWasRunning;
   if (!newState.isEmpty()) {
     printState = newState;
@@ -1690,11 +1730,6 @@ void processPrintUpdate(const String &newState, int newLayer, int newTotal,
   // so the previous job's three-hour blue completion indication ends now.
   if (isActivePrintState(printState)) {
     printCompleteBlueUntil = 0;
-    // Beep only at a genuine new-job start. Transient RUNNING/PAUSE/PREPARE
-    // packets during a layer transition must never produce a standby beep.
-    if (!wasActiveSession && !wasRunning) {
-      requestBuzzerBeep(80);
-    }
   }
 
   // PREPARE may already report layer 0/1 while the bed is heating. Baseline
@@ -1830,14 +1865,40 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   bool hasJob = extractJsonString(payload, length, "job_id", job);
   if (!hasJob) hasJob = extractJsonString(payload, length, "subtask_id", job);
   const String jobToken = hasJob ? safeJobID(job) : activeJob;
-  if (firstStatusPacket && hasJob && jobToken != "0") {
-    // Establish a baseline for a bridge restart so an old idle subtask does
-    // not masquerade as a newly submitted print on the second pushall.
-    announcedPrintJob = jobToken;
+  FleetRuntime *selectedRuntime =
+      selectedFleetIndex >= 0 && selectedFleetIndex < FLEET_PRINTER_COUNT
+          ? &fleetRuntimes[selectedFleetIndex]
+          : nullptr;
+  bool newPrintSubmission = false;
+  if (hasJob && jobToken != "0") {
+    if (selectedRuntime != nullptr) {
+      if (!selectedRuntime->hasPrintBaseline) {
+        // Booting or adding a profile during an existing print establishes a
+        // baseline silently. The job key then survives every rotating fleet
+        // scan and selected-MQTT reconnect.
+        selectedRuntime->hasPrintBaseline = true;
+        selectedRuntime->announcedPrintJob = jobToken;
+      } else if (selectedRuntime->announcedPrintJob.isEmpty()) {
+        newPrintSubmission = selectedRuntime->state != "OFFLINE" &&
+            !isActivePrintState(selectedRuntime->state);
+        selectedRuntime->announcedPrintJob = jobToken;
+      } else if (jobToken != selectedRuntime->announcedPrintJob) {
+        newPrintSubmission = true;
+        selectedRuntime->announcedPrintJob = jobToken;
+      }
+      announcedPrintJob = selectedRuntime->announcedPrintJob;
+    } else {
+      if (firstStatusPacket) {
+        announcedPrintJob = jobToken;
+      } else if (jobToken != announcedPrintJob) {
+        newPrintSubmission = true;
+        announcedPrintJob = jobToken;
+      }
+    }
+  } else if (selectedRuntime != nullptr && !selectedRuntime->hasPrintBaseline &&
+             (hasState || hasPercent || hasLayer)) {
+    selectedRuntime->hasPrintBaseline = true;
   }
-  const bool newPrintSubmission = !firstStatusPacket && hasJob &&
-      jobToken != "0" && jobToken != activeJob &&
-      jobToken != announcedPrintJob;
 
   if (hasLayer || hasTotal || hasPercent || hasStage || hasRemaining || hasState ||
       hasPrintError || hasHms || hasStartEpoch) {
@@ -1856,11 +1917,16 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
     String effectiveState = hasState ? state : "";
     String normalizedState = effectiveState;
     normalizedState.toUpperCase();
+    if (newPrintSubmission) {
+      // This is the only automatic start beep. A state-only reconnect cannot
+      // enter this path, so printing never beeps again on the 15-second fleet
+      // scan cycle.
+      requestBuzzerBeep(80);
+    }
     if (newPrintSubmission && !isActivePrintState(normalizedState)) {
       // job_id/subtask_id changes before Bambu finishes upload/setup. Announce
       // PREPARE now so the buzzer and green LEDs react to Send immediately.
       effectiveState = "PREPARE";
-      announcedPrintJob = jobToken;
     } else if (announcedPrintJob == jobToken && jobToken != "0" &&
                !isActivePrintState(normalizedState) &&
                !isCompletedPrintState(normalizedState) &&
@@ -1976,6 +2042,7 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
   String state;
   int percent = -1;
   uint32_t incomingError = 0;
+  String job;
   const bool hasState = extractLastJsonString(payload, length, "gcode_state", state);
   const bool hasPercent =
       extractLastJsonInt(payload, length, "mc_percent", percent);
@@ -1983,7 +2050,26 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
   const bool hasStage = extractLastJsonInt(payload, length, "stg_cur", stage);
   const bool hasPrintError =
       extractLastJsonUInt32(payload, length, "print_error", incomingError);
-  if (!hasState && !hasPercent && !hasPrintError && !hasStage) return;
+  bool hasJob = extractJsonString(payload, length, "job_id", job);
+  if (!hasJob) hasJob = extractJsonString(payload, length, "subtask_id", job);
+  const String jobToken = hasJob ? safeJobID(job) : "0";
+  if (!hasState && !hasPercent && !hasPrintError && !hasStage && !hasJob) return;
+
+  bool newPrintSubmission = false;
+  if (hasJob && jobToken != "0") {
+    if (!runtime.hasPrintBaseline) {
+      runtime.hasPrintBaseline = true;
+      runtime.announcedPrintJob = jobToken;
+    } else if (runtime.announcedPrintJob.isEmpty()) {
+      newPrintSubmission = previousState != "OFFLINE" && !wasActiveSession;
+      runtime.announcedPrintJob = jobToken;
+    } else if (jobToken != runtime.announcedPrintJob) {
+      newPrintSubmission = true;
+      runtime.announcedPrintJob = jobToken;
+    }
+  } else if (!runtime.hasPrintBaseline) {
+    runtime.hasPrintBaseline = true;
+  }
 
   runtime.online = true;
   runtime.lastMessageAt = millis();
@@ -2036,11 +2122,12 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
       }
     }
   }
-  if (hasState && isActivePrintState(runtime.state) && !wasActiveSession) {
-    // A background printer may be discovered a few seconds after it started,
-    // so its first observed percentage is sometimes already above 1%.
-    // The IDLE -> active edge is the reliable one-shot signal; do not require
-    // an early percentage or non-selected printers can begin silently.
+  if (newPrintSubmission ||
+      (!hasJob && hasState && isActivePrintState(runtime.state) &&
+       !wasActiveSession && previousState != "OFFLINE")) {
+    // Prefer the persistent job key. Older firmware without a job field falls
+    // back to a real IDLE -> active edge, never OFFLINE -> active after a
+    // failed TCP probe.
     requestBuzzerBeep(80);
   }
   if (hasState && isCompletedPrintState(runtime.state) && wasActiveSession) {
@@ -3674,7 +3761,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.25.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.26.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
