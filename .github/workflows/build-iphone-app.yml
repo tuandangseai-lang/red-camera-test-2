@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.91 build170 - giao dien 80 phan tram va toi uu camera
+name: Tao IPA SE v9.92 build171 - can lai phong cho va camera
 
 on:
   workflow_dispatch:
@@ -62,7 +62,11 @@ jobs:
           grep -q 'case "FLEET"' "RedCameraTest/H2DBLEManager.swift"
           grep -q "syncFleetProfiles" "RedCameraTest/H2DBLEManager.swift"
           grep -q "requestStopCapture" "RedCameraTest/H2DTimelapseView.swift"
-          grep -q "printerDashboardSummary(compact: true)" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "printerDashboardSummary()" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "frame(maxWidth: 430)" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "aspectRatio(2.05" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "scaledToFill()" "RedCameraTest/H2DTimelapseView.swift"
+          grep -q "filamentTargetStepper" "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q "minimumFramePublishInterval: TimeInterval = 0.125" "RedCameraTest/BambuPrinterCamera.swift"
           test "$(grep -c 'captureScreenBrightnessControl' "RedCameraTest/H2DTimelapseView.swift")" -eq 2
           ! grep -q "flashAndDisplayCard" "RedCameraTest/H2DTimelapseView.swift"
@@ -276,19 +280,19 @@ jobs:
           test -f "$APP_PATH/en.lproj/Localizable.strings"
           test -f "$APP_PATH/vi.lproj/Localizable.strings"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.91"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "170"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.92"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "171"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.91-build170-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.92-build171-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.91-build170-unsigned-ipa
-          path: SE-v9.91-build170-unsigned.ipa
+          name: SE-v9.92-build171-unsigned-ipa
+          path: SE-v9.92-build171-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 

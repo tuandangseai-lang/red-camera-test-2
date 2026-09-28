@@ -697,69 +697,82 @@ struct H2DTimelapseView: View {
 
     private var setupView: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 13) {
-                    cinemaSystemHeader
-                    printerDashboardSummary(compact: true)
-                    printerCameraCard
-                    PrinterRemoteControlView(
-                        bluetooth: bluetooth,
-                        printerName: printerName,
-                        profile: activeControlProfile,
-                        accessCode: accessCode,
-                        languageCode: appLanguageCode,
-                        alarmActive: hasAnyCriticalPrinterAlert,
-                        alarmAcknowledged: hasAnyCriticalPrinterAlert &&
-                            acknowledgedAlarmID == currentAlarmID,
-                        onSilenceAlarm: silenceCurrentPrinterAlarm,
-                        directControl: directControl,
-                        compactLayout: true
-                    )
-                    configurationCard
+            VStack(spacing: 0) {
+                // Keep the waiting-room header outside the scroll surface. This
+                // mirrors the calm framing of the capture screen and prevents
+                // cards from sliding under the iPhone status bar while scrolling.
+                cinemaSystemHeader
+                    .padding(.horizontal, 24)
+                    .padding(.top, 6)
+                    .padding(.bottom, 10)
+                    .background(.ultraThinMaterial)
+                    .zIndex(1)
 
-                    Button {
-                        // Position 0 is neutral. A session started from this
-                        // on-screen button must not be stopped when ESP32 later
-                        // repeats MODE,0 as part of a status response.
-                        hardwareStartedCapture = false
-                        if bluetooth.hardwareMode == 1 {
-                            hardwareModeOneLatched = true
-                        }
-                        timelapse.arm(startingAtLayer: bluetooth.h2dCurrentLayer)
-                    } label: {
-                        HStack(spacing: 10) {
-                            ZStack {
-                                Circle()
-                                    .fill(.white.opacity(0.18))
-                                    .frame(width: 30, height: 30)
-                                Image(systemName: "record.circle.fill")
-                                    .font(.system(size: 17, weight: .semibold))
-                                    .foregroundStyle(.white)
+                ScrollView {
+                    VStack(spacing: 16) {
+                        printerDashboardSummary()
+                        printerCameraCard
+                        PrinterRemoteControlView(
+                            bluetooth: bluetooth,
+                            printerName: printerName,
+                            profile: activeControlProfile,
+                            accessCode: accessCode,
+                            languageCode: appLanguageCode,
+                            alarmActive: hasAnyCriticalPrinterAlert,
+                            alarmAcknowledged: hasAnyCriticalPrinterAlert &&
+                                acknowledgedAlarmID == currentAlarmID,
+                            onSilenceAlarm: silenceCurrentPrinterAlarm,
+                            directControl: directControl,
+                            compactLayout: true
+                        )
+                        configurationCard
+
+                        Button {
+                            // Position 0 is neutral. A session started from this
+                            // on-screen button must not be stopped when ESP32 later
+                            // repeats MODE,0 as part of a status response.
+                            hardwareStartedCapture = false
+                            if bluetooth.hardwareMode == 1 {
+                                hardwareModeOneLatched = true
                             }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(localizedStatus("Bắt đầu timelapse"))
-                                    .font(.system(size: 12, weight: .semibold))
-                                Text("Theo dõi \(printerName) • tự chụp từng lớp")
-                                    .font(.system(size: 9, weight: .regular))
-                                    .opacity(0.72)
+                            timelapse.arm(startingAtLayer: bluetooth.h2dCurrentLayer)
+                        } label: {
+                            HStack(spacing: 10) {
+                                ZStack {
+                                    Circle()
+                                        .fill(.white.opacity(0.18))
+                                        .frame(width: 30, height: 30)
+                                    Image(systemName: "record.circle.fill")
+                                        .font(.system(size: 17, weight: .semibold))
+                                        .foregroundStyle(.white)
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(localizedStatus("Bắt đầu timelapse"))
+                                        .font(.system(size: 12, weight: .semibold))
+                                    Text("Theo dõi \(printerName) • tự chụp từng lớp")
+                                        .font(.system(size: 9, weight: .regular))
+                                        .opacity(0.72)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .black))
                             }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 11, weight: .black))
+                            .padding(.horizontal, 12)
+                            .frame(maxWidth: .infinity, minHeight: 48)
                         }
-                        .padding(.horizontal, 12)
-                        .frame(maxWidth: .infinity, minHeight: 48)
+                        .buttonStyle(CinemaLaunchButtonStyle())
+                        .disabled(!bluetooth.isH2DReady)
+                        .opacity(bluetooth.isH2DReady ? 1 : 0.42)
                     }
-                    .buttonStyle(CinemaLaunchButtonStyle())
-                    .disabled(!bluetooth.isH2DReady)
-                    .opacity(bluetooth.isH2DReady ? 1 : 0.42)
-
+                    .frame(maxWidth: 430)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 6)
+                    .padding(.bottom, 24)
+                    .frame(maxWidth: .infinity)
                 }
-                .padding(.horizontal, 13)
-                .padding(.vertical, 10)
+                .scrollIndicators(.hidden)
             }
             .background(Color.clear)
-            .scrollIndicators(.hidden)
             .toolbar(.hidden, for: .navigationBar)
         }
     }
@@ -1018,13 +1031,13 @@ struct H2DTimelapseView: View {
     }
 
     private var printerCameraCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(localizedStatus("Camera máy in"))
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 16, weight: .semibold))
                     Text("\(printerName) • \(printerCamera.transportText)")
-                        .font(.system(size: 9, weight: .regular))
+                        .font(.system(size: 11, weight: .regular))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -1038,17 +1051,17 @@ struct H2DTimelapseView: View {
                             : printerCamera.isConnecting ? "Đang kết nối" : "Chờ"
                     ))
                 }
-                .font(.system(size: 8, weight: .medium))
+                .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(printerCameraStatusColor)
-                .padding(.horizontal, 8)
-                .frame(height: 22)
+                .padding(.horizontal, 9)
+                .frame(height: 28)
                 .background(printerCameraStatusColor.opacity(0.08), in: Capsule())
 
                 Button {
                     printerCameraEnabled.toggle()
                 } label: {
                     Image(systemName: printerCameraEnabled ? "video.slash.fill" : "video.fill")
-                        .frame(width: 24, height: 24)
+                        .frame(width: 30, height: 30)
                 }
                 .buttonStyle(CinemaIconButtonStyle(
                     tint: printerCameraEnabled ? .white.opacity(0.68) : cinemaCyan
@@ -1058,15 +1071,15 @@ struct H2DTimelapseView: View {
 
             printerCameraViewport
                 .frame(maxWidth: .infinity)
-                .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .aspectRatio(2.05, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(Color.black.opacity(0.08), lineWidth: 1)
                 }
 
         }
-        .cardStyle(compact: true)
+        .cardStyle()
     }
 
     private var printerCameraViewport: some View {
@@ -1080,7 +1093,9 @@ struct H2DTimelapseView: View {
             if printerCameraEnabled, let frame = printerCamera.frame {
                 Image(decorative: frame, scale: 1, orientation: .up)
                     .resizable()
-                    .scaledToFit()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
             } else {
                 VStack(spacing: 9) {
                     if printerCameraEnabled && printerCamera.isConnecting {
@@ -2519,6 +2534,12 @@ private extension View {
                         lineWidth: 1
                     )
             }
+            .shadow(
+                color: dark ? .clear : Color.black.opacity(0.045),
+                radius: dark ? 0 : 8,
+                x: 0,
+                y: dark ? 0 : 3
+            )
     }
 }
 

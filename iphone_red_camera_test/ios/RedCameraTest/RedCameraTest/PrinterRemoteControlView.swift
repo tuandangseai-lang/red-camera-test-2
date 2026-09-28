@@ -215,16 +215,19 @@ struct PrinterRemoteControlView: View {
     }
 
     private var controlHeader: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: compactLayout ? 7 : 10) {
             Image(systemName: "slider.horizontal.3")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: compactLayout ? 14 : 15, weight: .semibold))
                 .foregroundStyle(cyan)
-                .frame(width: 32, height: 32)
+                .frame(width: compactLayout ? 28 : 32, height: compactLayout ? 28 : 32)
                 .background(cyan.opacity(0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
 
             Text("\(localized("Điều khiển")) \(printerName)")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: compactLayout ? 14 : 15, weight: .semibold))
                 .foregroundStyle(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+                .layoutPriority(1)
 
             Button {
                 lifetimeHoursDraft = hasLifetimePrintHours
@@ -246,10 +249,11 @@ struct PrinterRemoteControlView: View {
                 .padding(.vertical, 5)
                 .background(subduedSurfaceColor, in: Capsule())
                 .accessibilityLabel(localized("Tổng giờ đã in của máy"))
+                .fixedSize(horizontal: true, vertical: false)
             }
             .buttonStyle(.plain)
 
-            Spacer(minLength: 6)
+            Spacer(minLength: compactLayout ? 2 : 6)
 
             if directControl.isPending {
                 ProgressView().tint(amber)
@@ -332,64 +336,28 @@ struct PrinterRemoteControlView: View {
     }
 
     private var filamentControls: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "thermometer.medium")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(amber)
-                    .frame(width: 34, height: 34)
-                    .background(amber.opacity(0.10), in: Circle())
-
-                Text(liveNozzleTemperatureText)
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(liveNozzleIsHeating ? Color.red : Color.primary)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .layoutPriority(2)
-
-                Spacer(minLength: 4)
-
-                if directControl.snapshot.extruderCount > 1 || profile.kind == .h2d {
-                    HStack(spacing: 3) {
-                        externalNozzleButton(title: "L", extruderID: 1)
-                        externalNozzleButton(title: "R", extruderID: 0)
+        VStack(spacing: compactLayout ? 10 : 12) {
+            if compactLayout {
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        filamentLiveTemperature
+                        Spacer(minLength: 8)
+                        externalNozzlePicker
                     }
-                    .padding(3)
-                    .background(
-                        lowPowerDarkMode ? Color.white.opacity(0.06) : Color.black.opacity(0.045),
-                        in: Capsule()
-                    )
-                    .accessibilityLabel(localized("Chọn đầu in cho cuộn ngoài"))
-                }
-
-                HStack(spacing: 0) {
-                    temperatureButton(systemName: "minus") {
-                        filamentTemperature = max(170, filamentTemperature - 5)
-                    }
-                    Text("\(filamentTemperature)°C")
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                        .frame(minWidth: 64)
-                    temperatureButton(systemName: "plus") {
-                        filamentTemperature = min(320, filamentTemperature + 5)
+                    HStack(spacing: 8) {
+                        filamentTargetStepper
+                        Spacer(minLength: 8)
+                        filamentTemperatureSyncButton
                     }
                 }
-                .padding(3)
-                .background(
-                    lowPowerDarkMode ? Color.white.opacity(0.06) : Color.black.opacity(0.045),
-                    in: Capsule()
-                )
-
-                Button {
-                    applyAutomaticFilamentTemperature(force: true)
-                } label: {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(width: 30, height: 26)
+            } else {
+                HStack(spacing: 10) {
+                    filamentLiveTemperature
+                    Spacer(minLength: 4)
+                    externalNozzlePicker
+                    filamentTargetStepper
+                    filamentTemperatureSyncButton
                 }
-                .buttonStyle(.bordered)
-                .tint(cyan)
-                .accessibilityLabel(localized("Theo nhiệt độ máy in"))
             }
 
             HStack(spacing: 10) {
@@ -432,7 +400,7 @@ struct PrinterRemoteControlView: View {
                 .foregroundStyle(present ? green : .secondary)
             }
         }
-        .padding(12)
+        .padding(compactLayout ? 10 : 12)
         .background(
             lowPowerDarkMode
                 ? Color(red: 0.055, green: 0.075, blue: 0.072)
@@ -443,6 +411,72 @@ struct PrinterRemoteControlView: View {
             RoundedRectangle(cornerRadius: 15, style: .continuous)
                 .stroke(cyan.opacity(0.10), lineWidth: 1)
         }
+    }
+
+    private var filamentLiveTemperature: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "thermometer.medium")
+                .font(.system(size: compactLayout ? 15 : 16, weight: .medium))
+                .foregroundStyle(amber)
+                .frame(width: compactLayout ? 30 : 34, height: compactLayout ? 30 : 34)
+                .background(amber.opacity(0.10), in: Circle())
+
+            Text(liveNozzleTemperatureText)
+                .font(.system(size: compactLayout ? 14 : 15, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(liveNozzleIsHeating ? Color.red : Color.primary)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .layoutPriority(2)
+    }
+
+    @ViewBuilder
+    private var externalNozzlePicker: some View {
+        if directControl.snapshot.extruderCount > 1 || profile.kind == .h2d {
+            HStack(spacing: 3) {
+                externalNozzleButton(title: "L", extruderID: 1)
+                externalNozzleButton(title: "R", extruderID: 0)
+            }
+            .padding(3)
+            .background(
+                lowPowerDarkMode ? Color.white.opacity(0.06) : Color.black.opacity(0.045),
+                in: Capsule()
+            )
+            .accessibilityLabel(localized("Chọn đầu in cho cuộn ngoài"))
+        }
+    }
+
+    private var filamentTargetStepper: some View {
+        HStack(spacing: 0) {
+            temperatureButton(systemName: "minus") {
+                filamentTemperature = max(170, filamentTemperature - 5)
+            }
+            Text("\(filamentTemperature)°C")
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .frame(minWidth: compactLayout ? 58 : 64)
+            temperatureButton(systemName: "plus") {
+                filamentTemperature = min(320, filamentTemperature + 5)
+            }
+        }
+        .padding(3)
+        .background(
+            lowPowerDarkMode ? Color.white.opacity(0.06) : Color.black.opacity(0.045),
+            in: Capsule()
+        )
+    }
+
+    private var filamentTemperatureSyncButton: some View {
+        Button {
+            applyAutomaticFilamentTemperature(force: true)
+        } label: {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 30, height: 26)
+        }
+        .buttonStyle(.bordered)
+        .tint(cyan)
+        .accessibilityLabel(localized("Theo nhiệt độ máy in"))
     }
 
     private var amsControls: some View {
@@ -624,15 +658,18 @@ struct PrinterRemoteControlView: View {
                     caption: localized("Tốc độ in"),
                     onCommit: { directControl.setPrintSpeed($0) }
                 )
-                .frame(width: 150, height: 104)
+                .frame(
+                    width: compactLayout ? 132 : 150,
+                    height: compactLayout ? 92 : 104
+                )
             }
             .frame(maxWidth: .infinity)
 
-            Divider().frame(height: 82)
+            Divider().frame(height: compactLayout ? 72 : 82)
 
             VStack(spacing: 12) {
                 Image(systemName: chamberLightEnabled ? "lightbulb.fill" : "lightbulb")
-                    .font(.system(size: 28, weight: .medium))
+                    .font(.system(size: compactLayout ? 24 : 28, weight: .medium))
                     .foregroundStyle(chamberLightEnabled ? amber : Color.secondary)
                     .symbolEffect(.bounce, value: chamberLightEnabled)
 
