@@ -1033,30 +1033,9 @@ struct H2DTimelapseView: View {
     private var printerCameraCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(localizedStatus("Camera máy in"))
-                        .font(.system(size: 16, weight: .semibold))
-                    Text("\(printerName) • \(printerCamera.transportText)")
-                        .font(.system(size: 11, weight: .regular))
-                        .foregroundStyle(.secondary)
-                }
+                Text(localizedStatus("Camera máy in"))
+                    .font(.system(size: 16, weight: .semibold))
                 Spacer()
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(printerCameraStatusColor)
-                        .frame(width: 6, height: 6)
-                    Text(localizedStatus(
-                        printerCamera.isStreaming
-                            ? "Trực tiếp"
-                            : printerCamera.isConnecting ? "Đang kết nối" : "Chờ"
-                    ))
-                }
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(printerCameraStatusColor)
-                .padding(.horizontal, 9)
-                .frame(height: 28)
-                .background(printerCameraStatusColor.opacity(0.08), in: Capsule())
-
                 Button {
                     printerCameraEnabled.toggle()
                 } label: {
@@ -1142,12 +1121,6 @@ struct H2DTimelapseView: View {
                 .padding(10)
             }
         }
-    }
-
-    private var printerCameraStatusColor: Color {
-        guard printerCameraEnabled else { return .white.opacity(0.42) }
-        if printerCamera.isStreaming { return cinemaGreen }
-        return printerCamera.isConnecting ? cinemaAmber : .red
     }
 
     private var isFlashArtworkActive: Bool {

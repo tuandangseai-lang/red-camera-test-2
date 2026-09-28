@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.26.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.27.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -200,6 +200,7 @@ struct FleetRuntime {
   uint8_t consecutiveProbeFailures = 0;
   bool hasPrintBaseline = false;
   String announcedPrintJob = "";
+  bool startBeepIssuedForActiveSession = false;
   bool lastReportedConfigured = false;
   bool lastReportedOnline = false;
   bool lastReportedActive = false;
@@ -306,6 +307,7 @@ uint32_t filamentChangeGraceUntil = 0;
 String printState = "IDLE";
 String activeJob = "0";
 String announcedPrintJob = "0";
+bool selectedStartBeepIssuedForActiveSession = false;
 uint32_t lastManualFilamentBeepCode = 0;
 String lastManualFilamentBeepKind = "";
 String activeFilamentType = "";
@@ -537,6 +539,11 @@ bool isCompletedPrintState(const String &state) {
   return state == "FINISH" || state == "COMPLETE" || state == "COMPLETED";
 }
 
+bool resetsPrintStartBeep(const String &state) {
+  return state == "IDLE" || state == "FAILED" ||
+         isStoppedPrintState(state) || isCompletedPrintState(state);
+}
+
 bool fleetRuntimeCritical(const FleetRuntime &runtime) {
   return !isStoppedPrintState(runtime.state) && runtime.criticalLatched;
 }
@@ -753,6 +760,7 @@ void resetPrinterRuntimeForProfileSwitch() {
   printState = "IDLE";
   activeJob = "0";
   announcedPrintJob = "0";
+  selectedStartBeepIssuedForActiveSession = false;
   currentLayer = 0;
   totalLayers = 0;
   printPercent = 0;
@@ -1869,6 +1877,9 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
       selectedFleetIndex >= 0 && selectedFleetIndex < FLEET_PRINTER_COUNT
           ? &fleetRuntimes[selectedFleetIndex]
           : nullptr;
+  const bool hadReliablePrintBaseline = selectedRuntime != nullptr
+      ? selectedRuntime->hasPrintBaseline
+      : !firstStatusPacket;
   bool newPrintSubmission = false;
   if (hasJob && jobToken != "0") {
     if (selectedRuntime != nullptr) {
@@ -1917,11 +1928,42 @@ void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
     String effectiveState = hasState ? state : "";
     String normalizedState = effectiveState;
     normalizedState.toUpperCase();
-    if (newPrintSubmission) {
-      // This is the only automatic start beep. A state-only reconnect cannot
-      // enter this path, so printing never beeps again on the 15-second fleet
-      // scan cycle.
-      requestBuzzerBeep(80);
+    const String knownPreviousState = selectedRuntime != nullptr
+        ? selectedRuntime->state
+        : previousStateForAlarm;
+    const bool reliableStateStartEdge = hasState &&
+        isActivePrintState(normalizedState) &&
+        !isActivePrintState(knownPreviousState) &&
+        knownPreviousState != "OFFLINE" &&
+        hadReliablePrintBaseline;
+    if (hasState && resetsPrintStartBeep(normalizedState)) {
+      selectedStartBeepIssuedForActiveSession = false;
+      if (selectedRuntime != nullptr) {
+        selectedRuntime->startBeepIssuedForActiveSession = false;
+      }
+    }
+    const bool startBeepAlreadyIssued = selectedRuntime != nullptr
+        ? selectedRuntime->startBeepIssuedForActiveSession
+        : selectedStartBeepIssuedForActiveSession;
+    const bool announcePrintStart =
+        (newPrintSubmission || reliableStateStartEdge) &&
+        !startBeepAlreadyIssued;
+    if (announcePrintStart) {
+      // P2S can enter PREPARE before publishing a fresh job_id. Accept that
+      // real IDLE -> active edge as the start, but compare against the cached
+      // per-printer state so a rotating fleet reconnect cannot replay it.
+      requestBuzzerBeep(180);
+      selectedStartBeepIssuedForActiveSession = true;
+      if (selectedRuntime != nullptr) {
+        selectedRuntime->startBeepIssuedForActiveSession = true;
+      }
+    } else if (hasState && isActivePrintState(normalizedState) &&
+               !hadReliablePrintBaseline) {
+      // Booting in the middle of a print is a silent baseline, not a start.
+      selectedStartBeepIssuedForActiveSession = true;
+      if (selectedRuntime != nullptr) {
+        selectedRuntime->startBeepIssuedForActiveSession = true;
+      }
     }
     if (newPrintSubmission && !isActivePrintState(normalizedState)) {
       // job_id/subtask_id changes before Bambu finishes upload/setup. Announce
@@ -2037,6 +2079,7 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
   FleetRuntime &runtime = fleetRuntimes[profileIndex];
   const String previousState = runtime.state;
   const bool wasActiveSession = isActivePrintState(previousState);
+  const bool hadPrintBaseline = runtime.hasPrintBaseline;
   const bool wasCritical = runtime.criticalLatched;
   const uint32_t previousError = runtime.printErrorCode;
   String state;
@@ -2079,6 +2122,9 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
     state.trim();
     state.toUpperCase();
     runtime.state = state;
+    if (resetsPrintStartBeep(runtime.state)) {
+      runtime.startBeepIssuedForActiveSession = false;
+    }
     if (state == "ERROR") {
       runtime.criticalLatched = true;
       // Preserve a physical acknowledgement while the same incident remains
@@ -2122,13 +2168,21 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
       }
     }
   }
-  if (newPrintSubmission ||
-      (!hasJob && hasState && isActivePrintState(runtime.state) &&
-       !wasActiveSession && previousState != "OFFLINE")) {
+  const bool reliableFleetStartEdge = hasState &&
+      isActivePrintState(runtime.state) && !wasActiveSession &&
+      previousState != "OFFLINE" && hadPrintBaseline;
+  if ((newPrintSubmission || reliableFleetStartEdge) &&
+      !runtime.startBeepIssuedForActiveSession) {
     // Prefer the persistent job key. Older firmware without a job field falls
     // back to a real IDLE -> active edge, never OFFLINE -> active after a
     // failed TCP probe.
-    requestBuzzerBeep(80);
+    requestBuzzerBeep(180);
+    runtime.startBeepIssuedForActiveSession = true;
+  } else if (hasState && isActivePrintState(runtime.state) &&
+             !hadPrintBaseline) {
+    // A bridge boot/profile addition during a live job establishes a silent
+    // baseline and suppresses a later duplicate when job_id arrives.
+    runtime.startBeepIssuedForActiveSession = true;
   }
   if (hasState && isCompletedPrintState(runtime.state) && wasActiveSession) {
     requestBuzzerBeep(240);
@@ -3761,7 +3815,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.26.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.27.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

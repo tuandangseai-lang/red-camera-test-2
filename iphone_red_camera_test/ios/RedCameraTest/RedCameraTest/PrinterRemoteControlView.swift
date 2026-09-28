@@ -625,13 +625,16 @@ struct PrinterRemoteControlView: View {
 
                             if tray.slotID == 3,
                                let humidity = directControl.snapshot.amsHumidityPercentByUnit[tray.amsID] {
-                                VStack(spacing: 2) {
+                                VStack(spacing: 3) {
                                     Image(systemName: "drop.fill")
+                                        .font(.system(size: 13, weight: .semibold))
                                     Text("\(humidity)%")
+                                        .font(.system(size: 14, weight: .bold, design: .rounded))
                                         .monospacedDigit()
                                 }
-                                .font(.system(size: 10, weight: .semibold, design: .rounded))
                                 .foregroundStyle(humidity > 55 ? amber : cyan)
+                                .frame(minWidth: 42)
+                                .offset(x: -5)
                                 .fixedSize()
                                 .accessibilityLabel(localized("Độ ẩm AMS \(humidity) phần trăm"))
                             }
