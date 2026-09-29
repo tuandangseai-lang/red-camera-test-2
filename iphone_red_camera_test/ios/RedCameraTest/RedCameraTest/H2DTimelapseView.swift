@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 struct H2DTimelapseView: View {
     @ObservedObject var bluetooth: H2DBLEManager
@@ -784,13 +785,9 @@ struct H2DTimelapseView: View {
                 .foregroundStyle(.primary)
 
             HStack {
-                HStack(spacing: 7) {
-                    Image(systemName: "printer.fill")
-                        .foregroundStyle(cinemaCyan)
-                    Circle()
-                        .fill(bluetooth.isConnected ? cinemaGreen : Color.gray.opacity(0.45))
-                        .frame(width: 7, height: 7)
-                }
+                Circle()
+                    .fill(bluetooth.isConnected ? cinemaGreen : Color.gray.opacity(0.45))
+                    .frame(width: 7, height: 7)
                 Spacer()
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) {
@@ -2453,23 +2450,41 @@ struct H2DTimelapseView: View {
     }
 }
 
-/// Isolates high-frequency live-view updates from H2DTimelapseView. Only this
-/// lightweight layer redraws when a new CGImage arrives.
-private struct PrinterCameraFrameLayer: View {
+/// Isolates high-frequency live-view updates from H2DTimelapseView. A CALayer
+/// swaps camera frames without rebuilding SwiftUI's image/layout hierarchy.
+private struct PrinterCameraFrameLayer: UIViewRepresentable {
     @ObservedObject var store: BambuPrinterCameraFrameStore
 
-    var body: some View {
-        Group {
-            if let frame = store.frame {
-                Image(decorative: frame, scale: 1, orientation: .up)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Color.clear
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .clipped()
+    func makeUIView(context: Context) -> PrinterCameraFrameView {
+        PrinterCameraFrameView()
+    }
+
+    func updateUIView(_ view: PrinterCameraFrameView, context: Context) {
+        view.display(store.frame)
+    }
+}
+
+private final class PrinterCameraFrameView: UIView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isOpaque = true
+        backgroundColor = .black
+        layer.contentsGravity = .resizeAspectFill
+        layer.masksToBounds = true
+        layer.drawsAsynchronously = true
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        isOpaque = true
+        backgroundColor = .black
+        layer.contentsGravity = .resizeAspectFill
+        layer.masksToBounds = true
+        layer.drawsAsynchronously = true
+    }
+
+    func display(_ frame: CGImage?) {
+        layer.contents = frame
     }
 }
 
@@ -2479,21 +2494,28 @@ private struct PrinterActivityDot: View {
     let isSwitching: Bool
     let showsCompletion: Bool
 
+    @ViewBuilder
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.25)) { context in
-            let brightHalf = Int(context.date.timeIntervalSinceReferenceDate) % 2 == 0
-            let completionPhase = context.date.timeIntervalSinceReferenceDate
-                .truncatingRemainder(dividingBy: 4.0) / 4.0
-            let completionOpacity = 0.18 + 0.82 *
-                (0.5 - 0.5 * cos(completionPhase * .pi * 2.0))
-            Circle()
-                .fill(dotColor)
-                .frame(width: 9, height: 9)
-                .opacity(showsCompletion
-                    ? completionOpacity
-                    : shouldBlink ? (brightHalf ? 1 : 0.18) : 1)
-                .shadow(color: dotColor.opacity(shouldBlink && brightHalf ? 0.9 : 0), radius: 4)
+        if shouldBlink {
+            TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                let brightHalf = Int(context.date.timeIntervalSinceReferenceDate) % 2 == 0
+                let completionPhase = context.date.timeIntervalSinceReferenceDate
+                    .truncatingRemainder(dividingBy: 4.0) / 4.0
+                let completionOpacity = 0.18 + 0.82 *
+                    (0.5 - 0.5 * cos(completionPhase * .pi * 2.0))
+                dot(opacity: showsCompletion ? completionOpacity : (brightHalf ? 1 : 0.18), glows: brightHalf)
+            }
+        } else {
+            dot(opacity: 1, glows: false)
         }
+    }
+
+    private func dot(opacity: Double, glows: Bool) -> some View {
+        Circle()
+            .fill(dotColor)
+            .frame(width: 9, height: 9)
+            .opacity(opacity)
+            .shadow(color: dotColor.opacity(glows ? 0.9 : 0), radius: 4)
     }
 
     private var shouldBlink: Bool {

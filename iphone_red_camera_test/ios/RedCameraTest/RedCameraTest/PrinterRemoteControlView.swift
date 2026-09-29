@@ -607,17 +607,13 @@ struct PrinterRemoteControlView: View {
                     }
 
                     if let humidity {
-                        VStack(spacing: 3) {
-                            Image(systemName: "drop.fill")
-                                .font(.system(size: 13, weight: .semibold))
-                            Text("\(humidity)%")
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
-                                .monospacedDigit()
-                        }
-                        .foregroundStyle(humidity > 55 ? amber : cyan)
-                        .frame(width: 46)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .accessibilityLabel(localized("Độ ẩm AMS \(humidity) phần trăm"))
+                        Text("\(humidity)%")
+                            .font(.system(size: 17, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(humidity > 55 ? amber : cyan)
+                            .frame(width: 50)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .accessibilityLabel(localized("Độ ẩm AMS \(humidity) phần trăm"))
                     }
                 }
             }
@@ -633,7 +629,7 @@ struct PrinterRemoteControlView: View {
     private var utilityControls: some View {
         HStack(alignment: .top, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(localized("Tốc độ in"))
+                Text(localized("Tốc độ in %"))
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary)
 
@@ -641,7 +637,7 @@ struct PrinterRemoteControlView: View {
                     level: $printSpeed,
                     isEnabled: controlsReady,
                     tint: cyan,
-                    caption: localized("Tốc độ in"),
+                    caption: localized("Tốc độ in %"),
                     onCommit: { directControl.setPrintSpeed($0) }
                 )
                 .frame(

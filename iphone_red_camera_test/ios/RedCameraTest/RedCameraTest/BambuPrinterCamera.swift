@@ -3,9 +3,9 @@ import Combine
 import CoreImage
 import CryptoKit
 import Foundation
+import ImageIO
 import Network
 import Security
-import UIKit
 import VideoToolbox
 
 /// Direct LAN live view for Bambu printers. H2D/P2S use RTSPS/H.264 on
@@ -39,7 +39,7 @@ final class BambuPrinterCameraManager: ObservableObject {
     private var generation = 0
     private var firstFrameDeadline: DispatchWorkItem?
     private var lastFramePublishedAt = Date.distantPast
-    private let minimumFramePublishInterval: TimeInterval = 0.16
+    private let minimumFramePublishInterval: TimeInterval = 0.20
     private var streamingStatusPublished = false
 
     func start(profile: BambuPrinterProfile, accessCode: String) {
@@ -260,6 +260,7 @@ private final class BambuMJPEGCameraTransport: BambuCameraTransport {
     private var buffer = Data()
     private var stopped = false
     private var deliveredFrame = false
+    private var lastFrameTime: TimeInterval = 0
 
     init(
         host: String,
@@ -353,10 +354,13 @@ private final class BambuMJPEGCameraTransport: BambuCameraTransport {
             guard buffer.count >= frameSize else { return }
             let jpeg = buffer.subdata(in: 16..<frameSize)
             buffer.removeSubrange(0..<frameSize)
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now - lastFrameTime >= 0.20 else { continue }
             guard jpeg.count >= 4,
                   jpeg[jpeg.startIndex] == 0xFF,
                   jpeg[jpeg.index(after: jpeg.startIndex)] == 0xD8,
-                  let image = UIImage(data: jpeg)?.cgImage else { continue }
+                  let image = downsampledCameraJPEG(jpeg) else { continue }
+            lastFrameTime = now
             if !deliveredFrame {
                 deliveredFrame = true
                 onStatus("Đã xác thực camera A1 • đang nhận hình")
@@ -925,6 +929,8 @@ private final class H264FrameDecoder {
         )
         let attributes: [CFString: Any] = [
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey: 960,
+            kCVPixelBufferHeightKey: 540,
             kCVPixelBufferIOSurfacePropertiesKey: [:]
         ]
         var createdSession: VTDecompressionSession?
@@ -1012,15 +1018,27 @@ private final class H264FrameDecoder {
     }
 
     private func deliver(_ pixelBuffer: CVPixelBuffer) {
-        // Avoid driving SwiftUI faster than the display needs while keeping the
-        // live view fluid on an older iPhone SE.
+        // A printer monitor does not need video-rate redraws. Matching the
+        // decoder to the published preview rate avoids creating full CGImages
+        // that would immediately be discarded by the UI throttle.
         let now = ProcessInfo.processInfo.systemUptime
-        guard now - lastFrameTime >= 1.0 / 12.0 else { return }
+        guard now - lastFrameTime >= 0.20 else { return }
         lastFrameTime = now
         let image = CIImage(cvPixelBuffer: pixelBuffer)
         guard let output = ciContext.createCGImage(image, from: image.extent) else { return }
         onFrame(output)
     }
+}
+
+private func downsampledCameraJPEG(_ data: Data) -> CGImage? {
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+    let options: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: 960,
+        kCGImageSourceShouldCacheImmediately: true
+    ]
+    return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
 }
 
 private func parseQuotedParameters(_ text: String) -> [String: String] {
