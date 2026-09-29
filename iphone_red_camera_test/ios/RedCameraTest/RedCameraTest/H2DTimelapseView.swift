@@ -131,10 +131,10 @@ struct H2DTimelapseView: View {
             return bluetooth.h2dBridgeStatus
         }
         if selectedFleetStatus.hasActivePrintJob {
-            return "\(printerName) đang in • \(selectedFleetStatus.printPercent)%"
+            return "\(printerName) \(localizedStatus("đang in")) • \(selectedFleetStatus.printPercent)%"
         }
         if directSnapshot.isRecent, directSnapshot.hasActivePrintJob {
-            return "\(printerName) đang in • \(displayedPrintPercent)%"
+            return "\(printerName) \(localizedStatus("đang in")) • \(displayedPrintPercent)%"
         }
         return bluetooth.h2dBridgeStatus
     }
@@ -1069,12 +1069,8 @@ struct H2DTimelapseView: View {
                 endPoint: .bottomTrailing
             )
 
-            if printerCameraEnabled, let frame = printerCamera.frame {
-                Image(decorative: frame, scale: 1, orientation: .up)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
+            if printerCameraEnabled, printerCamera.isStreaming {
+                PrinterCameraFrameLayer(store: printerCamera.frameStore)
             } else {
                 VStack(spacing: 9) {
                     if printerCameraEnabled && printerCamera.isConnecting {
@@ -2454,6 +2450,26 @@ struct H2DTimelapseView: View {
         savedProfiles = BambuPrinterProfileStore.load()
         syncFleetWhenPossible()
         refreshPrinterCamera()
+    }
+}
+
+/// Isolates high-frequency live-view updates from H2DTimelapseView. Only this
+/// lightweight layer redraws when a new CGImage arrives.
+private struct PrinterCameraFrameLayer: View {
+    @ObservedObject var store: BambuPrinterCameraFrameStore
+
+    var body: some View {
+        Group {
+            if let frame = store.frame {
+                Image(decorative: frame, scale: 1, orientation: .up)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Color.clear
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
     }
 }
 

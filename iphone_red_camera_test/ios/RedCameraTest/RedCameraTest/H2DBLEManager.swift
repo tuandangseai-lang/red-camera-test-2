@@ -1095,8 +1095,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
             .map(String.init)
         guard fields.count >= 2, fields[0].uppercased() == "H2D" else { return }
         recognitionWorkItem?.cancel()
-        isH2DBridge = true
-        connectionText = "Đã kết nối ESP32 • cầu nối Bambu"
+        if !isH2DBridge { isH2DBridge = true }
+        let connectedBridgeText = "Đã kết nối ESP32 • cầu nối Bambu"
+        if connectionText != connectedBridgeText { connectionText = connectedBridgeText }
 
         switch fields[1].uppercased() {
         case "ESP32":
@@ -1206,28 +1207,29 @@ final class H2DBLEManager: NSObject, ObservableObject {
         case "MATERIAL":
             guard !isSwitchingPrinter else { return }
             guard fields.count >= 3 else { return }
-            filamentType = fields[2].trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            let value = fields[2].trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            if filamentType != value { filamentType = value }
         case "TELEMETRY":
             guard !isSwitchingPrinter, fields.count >= 10 else { return }
-            nozzleTemperature = Int(fields[2]) ?? nozzleTemperature
-            nozzleTargetTemperature = Int(fields[3]) ?? nozzleTargetTemperature
+            updateIfChanged(Int(fields[2]) ?? nozzleTemperature, \.nozzleTemperature)
+            updateIfChanged(Int(fields[3]) ?? nozzleTargetTemperature, \.nozzleTargetTemperature)
             if fields.count >= 11 {
                 // v1.8.4+: right nozzle, right target, left nozzle, left target,
                 // bed, bed target, then exactly Part/Aux/Exhaust.
-                leftNozzleTemperature = Int(fields[4]) ?? leftNozzleTemperature
-                leftNozzleTargetTemperature = Int(fields[5]) ?? leftNozzleTargetTemperature
-                bedTemperature = Int(fields[6]) ?? bedTemperature
-                bedTargetTemperature = Int(fields[7]) ?? bedTargetTemperature
-                partFanPercent = Int(fields[8]) ?? partFanPercent
-                auxiliaryFanPercent = Int(fields[9]) ?? auxiliaryFanPercent
-                exhaustFanPercent = Int(fields[10]) ?? exhaustFanPercent
+                updateIfChanged(Int(fields[4]) ?? leftNozzleTemperature, \.leftNozzleTemperature)
+                updateIfChanged(Int(fields[5]) ?? leftNozzleTargetTemperature, \.leftNozzleTargetTemperature)
+                updateIfChanged(Int(fields[6]) ?? bedTemperature, \.bedTemperature)
+                updateIfChanged(Int(fields[7]) ?? bedTargetTemperature, \.bedTargetTemperature)
+                updateIfChanged(Int(fields[8]) ?? partFanPercent, \.partFanPercent)
+                updateIfChanged(Int(fields[9]) ?? auxiliaryFanPercent, \.auxiliaryFanPercent)
+                updateIfChanged(Int(fields[10]) ?? exhaustFanPercent, \.exhaustFanPercent)
             } else {
                 // Compatibility with the currently installed v1.8.3 firmware.
-                bedTemperature = Int(fields[4]) ?? bedTemperature
-                bedTargetTemperature = Int(fields[5]) ?? bedTargetTemperature
-                partFanPercent = Int(fields[6]) ?? partFanPercent
-                auxiliaryFanPercent = Int(fields[7]) ?? auxiliaryFanPercent
-                exhaustFanPercent = Int(fields[8]) ?? exhaustFanPercent
+                updateIfChanged(Int(fields[4]) ?? bedTemperature, \.bedTemperature)
+                updateIfChanged(Int(fields[5]) ?? bedTargetTemperature, \.bedTargetTemperature)
+                updateIfChanged(Int(fields[6]) ?? partFanPercent, \.partFanPercent)
+                updateIfChanged(Int(fields[7]) ?? auxiliaryFanPercent, \.auxiliaryFanPercent)
+                updateIfChanged(Int(fields[8]) ?? exhaustFanPercent, \.exhaustFanPercent)
             }
         case "CFG_ACK":
             guard fields.count >= 3 else { return }
@@ -1538,6 +1540,14 @@ final class H2DBLEManager: NSObject, ObservableObject {
         default:
             break
         }
+    }
+
+    private func updateIfChanged<Value: Equatable>(
+        _ value: Value,
+        _ keyPath: ReferenceWritableKeyPath<H2DBLEManager, Value>
+    ) {
+        guard self[keyPath: keyPath] != value else { return }
+        self[keyPath: keyPath] = value
     }
 }
 

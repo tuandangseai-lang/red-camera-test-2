@@ -27,10 +27,7 @@ struct PrinterRemoteControlView: View {
     @State private var selectedExternalExtruderID = 1
     @State private var amsDryingHours = 8
     @State private var dryerPulse = false
-    @State private var showsLifetimeHoursEditor = false
-    @State private var lifetimeHoursDraft = ""
     @State private var lifetimePrintHours = 0.0
-    @State private var hasLifetimePrintHours = false
     @State private var lifetimeObservationAt: Date?
     @State private var lifetimeObservationWasPrinting = false
     @State private var lifetimePersistedAt: Date?
@@ -58,6 +55,13 @@ struct PrinterRemoteControlView: View {
 
     private var selectedExternalFilamentPresent: Bool? {
         let snapshot = directControl.snapshot
+        // A P2S cannot run a real print without filament at its only
+        // toolhead. Its top-level switch can briefly arrive as unknown/zero
+        // while the AMS route is changing, so the active job is the stronger
+        // signal during that short window.
+        if snapshot.hasActivePrintJob, profile.kind == .p2s {
+            return true
+        }
         if snapshot.hasActivePrintJob,
            snapshot.currentAMSTrayID == nil,
            (snapshot.externalSpoolExtruderID == externalSpoolExtruderID || profile.kind == .p2s) {
@@ -143,6 +147,7 @@ struct PrinterRemoteControlView: View {
         .onChange(of: alarmNeedsAttention) { _, _ in updateAlarmPulse() }
         .onChange(of: directControl.snapshot.amsDrying) { _, _ in updateDryerPulse() }
         .onChange(of: directControl.snapshot.receivedAt) { _, _ in updateLifetimePrintHours() }
+        .onDisappear { persistLifetimePrintHours(at: Date()) }
         .alert(
             localized(confirmation?.title(
                 usesLeftNozzlePath: usesLeftNozzlePath,
@@ -181,37 +186,6 @@ struct PrinterRemoteControlView: View {
                 languageCode: languageCode
             )))
         }
-        .sheet(isPresented: $showsLifetimeHoursEditor) {
-            VStack(alignment: .leading, spacing: 16) {
-                Text(localized("Tổng giờ đã in"))
-                    .font(.system(size: 18, weight: .semibold))
-                Text(localized("Nhập số giờ đang hiển thị trong thông tin thiết bị trên màn hình máy in. SE sẽ lưu riêng theo serial và cộng thời gian khi đang theo dõi máy."))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                TextField("259", text: $lifetimeHoursDraft)
-                    .keyboardType(.decimalPad)
-                    .font(.system(size: 22, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .padding(12)
-                    .background(subduedSurfaceColor, in: RoundedRectangle(cornerRadius: 12))
-                HStack(spacing: 10) {
-                    Button(localized("Hủy"), role: .cancel) {
-                        showsLifetimeHoursEditor = false
-                    }
-                    .buttonStyle(.bordered)
-                    .frame(maxWidth: .infinity)
-                    Button(localized("Lưu")) {
-                        saveLifetimePrintHours()
-                        showsLifetimeHoursEditor = false
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(cyan)
-                    .frame(maxWidth: .infinity)
-                }
-            }
-            .padding(20)
-            .presentationDetents([.height(260)])
-        }
     }
 
     private var controlHeader: some View {
@@ -229,29 +203,19 @@ struct PrinterRemoteControlView: View {
                 .minimumScaleFactor(0.78)
                 .layoutPriority(1)
 
-            Button {
-                lifetimeHoursDraft = hasLifetimePrintHours
-                    ? String(format: "%.1f", lifetimePrintHours)
-                    : ""
-                showsLifetimeHoursEditor = true
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "clock")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text(hasLifetimePrintHours
-                        ? String(format: "%.1f h", lifetimePrintHours)
-                        : localized("Nhập giờ"))
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .monospacedDigit()
-                }
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(subduedSurfaceColor, in: Capsule())
-                .accessibilityLabel(localized("Tổng giờ đã in của máy"))
-                .fixedSize(horizontal: true, vertical: false)
+            HStack(spacing: 4) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(String(format: "%.1f h", lifetimePrintHours))
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .monospacedDigit()
             }
-            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(subduedSurfaceColor, in: Capsule())
+            .accessibilityLabel(localized("Giờ in SE tự theo dõi"))
+            .fixedSize(horizontal: true, vertical: false)
 
             Spacer(minLength: compactLayout ? 2 : 6)
 
@@ -993,49 +957,91 @@ struct PrinterRemoteControlView: View {
         return "SE.Bambu.lifetimePrintHours.\(serial)"
     }
 
-    private func loadLifetimePrintHours() {
-        let defaults = UserDefaults.standard
-        hasLifetimePrintHours = defaults.object(forKey: lifetimeHoursStorageKey) != nil
-        lifetimePrintHours = hasLifetimePrintHours
-            ? max(0, defaults.double(forKey: lifetimeHoursStorageKey))
-            : 0
-        lifetimeObservationAt = directControl.snapshot.receivedAt
-        lifetimeObservationWasPrinting = directControl.snapshot.hasActivePrintJob
-        lifetimePersistedAt = Date()
+    private var lifetimeJobStorageKey: String {
+        lifetimeHoursStorageKey + ".activeJob"
     }
 
-    private func saveLifetimePrintHours() {
-        let normalized = lifetimeHoursDraft.replacingOccurrences(of: ",", with: ".")
-        guard let hours = Double(normalized), hours >= 0 else { return }
-        lifetimePrintHours = hours
-        hasLifetimePrintHours = true
-        UserDefaults.standard.set(hours, forKey: lifetimeHoursStorageKey)
-        lifetimeObservationAt = directControl.snapshot.receivedAt ?? Date()
-        lifetimeObservationWasPrinting = directControl.snapshot.hasActivePrintJob
+    private var lifetimeObservationStorageKey: String {
+        lifetimeHoursStorageKey + ".observedAt"
+    }
+
+    private func loadLifetimePrintHours() {
+        let defaults = UserDefaults.standard
+        lifetimePrintHours = max(0, defaults.double(forKey: lifetimeHoursStorageKey))
+        if defaults.object(forKey: lifetimeHoursStorageKey) == nil {
+            defaults.set(0.0, forKey: lifetimeHoursStorageKey)
+        }
+        // Start from printer telemetry. If a job is already running, the next
+        // snapshot backfills from gcode_start_time instead of asking the user
+        // to type a baseline.
+        lifetimeObservationAt = nil
+        lifetimeObservationWasPrinting = false
         lifetimePersistedAt = Date()
+        updateLifetimePrintHours()
+    }
+
+    private func lifetimeJobIdentity(_ snapshot: BambuDirectSnapshot) -> String {
+        let identifiers = [snapshot.jobID, snapshot.subtaskID]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0 != "0" }
+        let start = snapshot.printStartedAt.map { String(Int($0.timeIntervalSince1970)) } ?? ""
+        return (identifiers + [start]).filter { !$0.isEmpty }.joined(separator: "|")
     }
 
     private func updateLifetimePrintHours() {
         let snapshot = directControl.snapshot
         let now = snapshot.receivedAt ?? Date()
-        if hasLifetimePrintHours,
-           lifetimeObservationWasPrinting,
-           let previous = lifetimeObservationAt {
-            let seconds = now.timeIntervalSince(previous)
-            // MQTT freshness is at most 10 seconds in this manager. Capping the
-            // interval prevents background suspension or a network gap from
-            // being counted as printing time.
-            if seconds > 0, seconds <= 35 {
-                lifetimePrintHours += seconds / 3_600
-                if !snapshot.hasActivePrintJob ||
-                    now.timeIntervalSince(lifetimePersistedAt ?? .distantPast) >= 60 {
-                    UserDefaults.standard.set(lifetimePrintHours, forKey: lifetimeHoursStorageKey)
-                    lifetimePersistedAt = now
+        let defaults = UserDefaults.standard
+
+        if snapshot.hasActivePrintJob {
+            var baseline = lifetimeObservationAt
+            let identity = lifetimeJobIdentity(snapshot)
+
+            if !lifetimeObservationWasPrinting {
+                let storedIdentity = defaults.string(forKey: lifetimeJobStorageKey) ?? ""
+                let storedTimestamp = defaults.double(forKey: lifetimeObservationStorageKey)
+                if !identity.isEmpty, storedIdentity == identity, storedTimestamp > 0 {
+                    baseline = Date(timeIntervalSince1970: storedTimestamp)
+                } else if let printerStart = snapshot.printStartedAt {
+                    baseline = printerStart
+                } else {
+                    baseline = now
                 }
             }
+
+            if let baseline {
+                let seconds = now.timeIntervalSince(baseline)
+                // Reject broken epochs, but allow an app suspension to be
+                // recovered from the same printer-reported job.
+                if seconds > 0, seconds <= 31 * 24 * 3_600 {
+                    lifetimePrintHours += seconds / 3_600
+                }
+            }
+
+            if now.timeIntervalSince(lifetimePersistedAt ?? .distantPast) >= 30 {
+                persistLifetimePrintHours(at: now)
+            }
+        } else if lifetimeObservationWasPrinting,
+                  let previous = lifetimeObservationAt {
+            let seconds = now.timeIntervalSince(previous)
+            if seconds > 0, seconds <= 35 {
+                lifetimePrintHours += seconds / 3_600
+            }
+            persistLifetimePrintHours(at: now)
         }
+
         lifetimeObservationAt = now
         lifetimeObservationWasPrinting = snapshot.hasActivePrintJob
+    }
+
+    private func persistLifetimePrintHours(at date: Date) {
+        let defaults = UserDefaults.standard
+        defaults.set(max(0, lifetimePrintHours), forKey: lifetimeHoursStorageKey)
+        let snapshot = directControl.snapshot
+        let identity = snapshot.hasActivePrintJob ? lifetimeJobIdentity(snapshot) : ""
+        defaults.set(identity, forKey: lifetimeJobStorageKey)
+        defaults.set(date.timeIntervalSince1970, forKey: lifetimeObservationStorageKey)
+        lifetimePersistedAt = date
     }
 
     private var currentFilamentName: String {

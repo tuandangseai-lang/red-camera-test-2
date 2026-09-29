@@ -829,12 +829,16 @@ final class BambuPrinterControlManager: ObservableObject {
             // Single-nozzle printers expose the same sensor as a top-level
             // field. It remains authoritative on newer P2S packets even when
             // the packet also contains the nested device.extruder structure.
-            // 0 means empty, 1 means filament has reached the extruder.
+            // 0 means empty and 1 means filament has reached the extruder.
+            // Bambu Studio deliberately treats every other value (notably -1
+            // on some P2S full-status frames) as present/unknown rather than
+            // falsely reporting an empty toolhead.
+            let filamentPresent = switchState != 0
             next.extruderCount = 1
             next.currentExtruderID = 0
             next.externalSpoolExtruderID = 0
-            next.externalFilamentPresent = switchState == 1
-            next.filamentPresentByExtruder[0] = switchState == 1
+            next.externalFilamentPresent = filamentPresent
+            next.filamentPresentByExtruder[0] = filamentPresent
             changed = true
         }
 
@@ -844,7 +848,9 @@ final class BambuPrinterControlManager: ObservableObject {
             next.currentAMSTrayID = nil
         }
 
-        let virtualTrayValue = report["vt_tray"]
+        let virtualTrayValue = report["vir_slot"]
+            ?? report["vt_tray"]
+            ?? (report["ams"] as? [String: Any])?["vir_slot"]
             ?? (report["ams"] as? [String: Any])?["vt_tray"]
         let virtualTrays: [[String: Any]] = {
             if let tray = virtualTrayValue as? [String: Any] { return [tray] }

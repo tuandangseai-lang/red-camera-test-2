@@ -13,7 +13,11 @@ import VideoToolbox
 /// The ESP32 bridge remains dedicated to telemetry and control so camera
 /// traffic never competes with BLE status packets.
 final class BambuPrinterCameraManager: ObservableObject {
-    @Published private(set) var frame: CGImage?
+    /// Camera frames live in a separate observable object so every video frame
+    /// invalidates only the viewport, not the entire waiting-room hierarchy.
+    /// Rebuilding that large hierarchy at camera frame rate was the main cause
+    /// of scrolling and control lag while live view was enabled.
+    let frameStore = BambuPrinterCameraFrameStore()
     @Published private(set) var statusText = "Camera máy in đang tắt"
     @Published private(set) var transportText = "LAN"
     @Published private(set) var isConnecting = false
@@ -35,7 +39,7 @@ final class BambuPrinterCameraManager: ObservableObject {
     private var generation = 0
     private var firstFrameDeadline: DispatchWorkItem?
     private var lastFramePublishedAt = Date.distantPast
-    private let minimumFramePublishInterval: TimeInterval = 0.125
+    private let minimumFramePublishInterval: TimeInterval = 0.16
     private var streamingStatusPublished = false
 
     func start(profile: BambuPrinterProfile, accessCode: String) {
@@ -199,7 +203,8 @@ final class BambuPrinterCameraManager: ObservableObject {
             guard now.timeIntervalSince(lastFramePublishedAt) >= minimumFramePublishInterval else { return }
             lastFramePublishedAt = now
         }
-        DispatchQueue.main.async { [weak self] in self?.frame = image }
+        let store = frameStore
+        DispatchQueue.main.async { store.frame = image }
     }
 
     private func publishTransport(_ text: String) {
@@ -208,6 +213,10 @@ final class BambuPrinterCameraManager: ObservableObject {
             self.transportText = text
         }
     }
+}
+
+final class BambuPrinterCameraFrameStore: ObservableObject {
+    @Published fileprivate(set) var frame: CGImage?
 }
 
 private protocol BambuCameraTransport: AnyObject {
