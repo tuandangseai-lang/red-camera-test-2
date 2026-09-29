@@ -73,7 +73,7 @@ jobs:
           grep -q 'filamentMaterialByExtruder' "RedCameraTest/BambuPrinterControl.swift"
           grep -q 'filamentColorHexByExtruder' "RedCameraTest/BambuPrinterControl.swift"
           grep -q 'Đèn máy in' "RedCameraTest/PrinterRemoteControlView.swift"
-          grep -q "minimumFramePublishInterval: TimeInterval = 0.125" "RedCameraTest/BambuPrinterCamera.swift"
+          grep -q "minimumFramePublishInterval: TimeInterval = 0.16" "RedCameraTest/BambuPrinterCamera.swift"
           test "$(grep -c 'captureScreenBrightnessControl' "RedCameraTest/H2DTimelapseView.swift")" -eq 2
           ! grep -q "flashAndDisplayCard" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "of: useEnglish ? vietnamese : english" "RedCameraTest/SELanguage.swift"
