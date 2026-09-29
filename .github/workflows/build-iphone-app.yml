@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.93 build172 - tinh gon camera va bao bat dau in
+name: Tao IPA SE v9.94 build173 - tinh gon timelapse va thong tin nhua
 
 on:
   workflow_dispatch:
@@ -68,7 +68,11 @@ jobs:
           grep -q "scaledToFill()" "RedCameraTest/H2DTimelapseView.swift"
           grep -q "filamentTargetStepper" "RedCameraTest/PrinterRemoteControlView.swift"
           ! grep -q "printerCamera.transportText\|printerCameraStatusColor" "RedCameraTest/H2DTimelapseView.swift"
-          grep -q 'offset(x: -5)' "RedCameraTest/PrinterRemoteControlView.swift"
+          grep -q 'deadline: .now() + 1.0' "RedCameraTest/H2DTimelapseView.swift"
+          ! grep -q 'Camera iPhone đang ẩn để tiết kiệm pin' "RedCameraTest/H2DTimelapseView.swift"
+          grep -q 'filamentMaterialByExtruder' "RedCameraTest/BambuPrinterControl.swift"
+          grep -q 'filamentColorHexByExtruder' "RedCameraTest/BambuPrinterControl.swift"
+          grep -q 'Đèn máy in' "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q "minimumFramePublishInterval: TimeInterval = 0.125" "RedCameraTest/BambuPrinterCamera.swift"
           test "$(grep -c 'captureScreenBrightnessControl' "RedCameraTest/H2DTimelapseView.swift")" -eq 2
           ! grep -q "flashAndDisplayCard" "RedCameraTest/H2DTimelapseView.swift"
@@ -282,19 +286,19 @@ jobs:
           test -f "$APP_PATH/en.lproj/Localizable.strings"
           test -f "$APP_PATH/vi.lproj/Localizable.strings"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.93"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "172"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.94"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "173"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.93-build172-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.94-build173-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.93-build172-unsigned-ipa
-          path: SE-v9.93-build172-unsigned.ipa
+          name: SE-v9.94-build173-unsigned-ipa
+          path: SE-v9.94-build173-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 

@@ -42,6 +42,8 @@ struct BambuDirectSnapshot: Equatable {
     var externalSpoolExtruderID: Int?
     var externalFilamentPresent: Bool?
     var filamentPresentByExtruder: [Int: Bool] = [:]
+    var filamentMaterialByExtruder: [Int: String] = [:]
+    var filamentColorHexByExtruder: [Int: String] = [:]
     var currentAMSTrayID: String?
     var hasAMS = false
     var amsDryerUnitID: Int?
@@ -842,19 +844,39 @@ final class BambuPrinterControlManager: ObservableObject {
             next.currentAMSTrayID = nil
         }
 
+        let virtualTrayValue = report["vt_tray"]
+            ?? (report["ams"] as? [String: Any])?["vt_tray"]
         let virtualTrays: [[String: Any]] = {
-            if let tray = report["vt_tray"] as? [String: Any] { return [tray] }
-            return report["vt_tray"] as? [[String: Any]] ?? []
+            if let tray = virtualTrayValue as? [String: Any] { return [tray] }
+            return virtualTrayValue as? [[String: Any]] ?? []
         }()
         for tray in virtualTrays {
             guard let id = number(tray["id"]) else { continue }
+            let extruderID: Int?
             if id == 254 {
-                next.externalSpoolExtruderID = 0
-                changed = true
+                extruderID = 0
             } else if id == 253 {
-                next.externalSpoolExtruderID = 1
-                changed = true
+                extruderID = 1
+            } else {
+                extruderID = nil
             }
+            guard let extruderID else { continue }
+            next.externalSpoolExtruderID = extruderID
+            let material = ((tray["tray_type"] as? String)
+                ?? (tray["tray_sub_brands"] as? String)
+                ?? (tray["tray_info_idx"] as? String)
+                ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .uppercased()
+            let color = (tray["tray_color"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !material.isEmpty {
+                next.filamentMaterialByExtruder[extruderID] = material
+            }
+            if !color.isEmpty {
+                next.filamentColorHexByExtruder[extruderID] = color
+            }
+            changed = true
         }
 
         if let ams = report["ams"] as? [String: Any] {
@@ -989,6 +1011,8 @@ final class BambuPrinterControlManager: ObservableObject {
             next.printStage != previous.printStage ||
             next.currentAMSTrayID != previous.currentAMSTrayID ||
             next.externalFilamentPresent != previous.externalFilamentPresent ||
+            next.filamentMaterialByExtruder != previous.filamentMaterialByExtruder ||
+            next.filamentColorHexByExtruder != previous.filamentColorHexByExtruder ||
             next.chamberLightOn != previous.chamberLightOn ||
             next.amsDrying != previous.amsDrying ||
             next.amsHumidityPercentByUnit != previous.amsHumidityPercentByUnit ||

@@ -1533,13 +1533,13 @@ struct H2DTimelapseView: View {
     }
 
     private var activePhoneCameraCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(localizedStatus("Camera iPhone"))
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                     Text(localizedStatus("Timelapse tiết kiệm pin"))
-                        .font(.system(size: 11))
+                        .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -1548,7 +1548,7 @@ struct H2DTimelapseView: View {
                     timelapse.setLiveMonitorVisible(!timelapse.isLiveMonitorVisible)
                 } label: {
                     Image(systemName: timelapse.isLiveMonitorVisible ? "video.fill" : "video.slash.fill")
-                        .frame(width: 34, height: 34)
+                        .frame(width: 30, height: 30)
                 }
                 .buttonStyle(.bordered)
                 .tint(timelapse.isLiveMonitorVisible ? cinemaCyan : .gray)
@@ -1579,18 +1579,14 @@ struct H2DTimelapseView: View {
                     }
                     Spacer(minLength: 0)
                 }
-            } else {
+            } else if timelapse.isRendering {
                 HStack(spacing: 9) {
-                    Image(systemName: timelapse.isRendering ? "film.stack.fill" : "video.slash")
-                    Text(localizedStatus(
-                        timelapse.isRendering
-                            ? "Đang ghép video"
-                            : "Camera iPhone đang ẩn để tiết kiệm pin"
-                    ))
+                    Image(systemName: "film.stack.fill")
+                    Text(localizedStatus("Đang ghép video"))
                 }
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, minHeight: 70)
+                .frame(maxWidth: .infinity, minHeight: 44)
                 .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
             }
         }
@@ -1919,7 +1915,19 @@ struct H2DTimelapseView: View {
                     .monospacedDigit()
                     .foregroundStyle(cinemaAmber)
 
-                Slider(value: $captureScreenBrightness, in: 0...1, step: 0.01)
+                Slider(
+                    value: $captureScreenBrightness,
+                    in: 0...1,
+                    step: 0.01,
+                    onEditingChanged: { isEditing in
+                        if isEditing {
+                            captureBrightnessCollapseWorkItem?.cancel()
+                            captureBrightnessCollapseWorkItem = nil
+                        } else {
+                            scheduleCaptureBrightnessAutoCollapse()
+                        }
+                    }
+                )
                     .tint(cinemaAmber)
                     .frame(width: 164)
                     .rotationEffect(.degrees(-90))
@@ -2102,7 +2110,7 @@ struct H2DTimelapseView: View {
             captureBrightnessCollapseWorkItem = nil
         }
         captureBrightnessCollapseWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
     }
 
     private func activateProfile(_ profile: BambuPrinterProfile) {

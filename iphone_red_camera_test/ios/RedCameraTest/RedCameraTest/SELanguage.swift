@@ -133,6 +133,8 @@ enum SEStatusCopy {
         ("Bật sấy AMS", "Start AMS drying"),
         ("Tắt sấy AMS", "Stop AMS drying"),
         ("Sấy mặc định không xoay khay", "Drying defaults to no tray rotation"),
+        ("Tốc độ in", "Print speed"),
+        ("Đèn máy in", "Printer light"),
         ("Đèn buồng in", "Chamber light"),
         ("Hoàn tất", "Done"),
         ("Bỏ qua", "Ignore"),

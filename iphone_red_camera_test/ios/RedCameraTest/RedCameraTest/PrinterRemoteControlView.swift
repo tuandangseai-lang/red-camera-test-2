@@ -421,11 +421,22 @@ struct PrinterRemoteControlView: View {
                 .frame(width: compactLayout ? 30 : 34, height: compactLayout ? 30 : 34)
                 .background(amber.opacity(0.10), in: Circle())
 
-            Text(liveNozzleTemperatureText)
-                .font(.system(size: compactLayout ? 14 : 15, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(liveNozzleIsHeating ? Color.red : Color.primary)
-                .fixedSize(horizontal: true, vertical: false)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(liveNozzleTemperatureText)
+                    .font(.system(size: compactLayout ? 14 : 15, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(liveNozzleIsHeating ? Color.red : Color.primary)
+
+                if let material = selectedNozzleFilamentMaterial {
+                    Text(material)
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(selectedNozzleFilamentColor)
+                        .lineLimit(1)
+                        .shadow(color: Color.black.opacity(0.18), radius: 0.5)
+                        .accessibilityLabel(localized("Nhựa \(material)"))
+                }
+            }
+            .fixedSize(horizontal: true, vertical: false)
         }
         .layoutPriority(2)
     }
@@ -483,6 +494,9 @@ struct PrinterRemoteControlView: View {
         let trays = directControl.snapshot.amsTrays
             .filter(\.isPresent)
             .sorted { $0.amsID == $1.amsID ? $0.slotID < $1.slotID : $0.amsID < $1.amsID }
+        let humidity = directControl.snapshot.amsDryerUnitID
+            .flatMap { directControl.snapshot.amsHumidityPercentByUnit[$0] }
+            ?? trays.compactMap { directControl.snapshot.amsHumidityPercentByUnit[$0.amsID] }.first
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 controlTitle("AMS", icon: "square.grid.2x2.fill")
@@ -540,6 +554,7 @@ struct PrinterRemoteControlView: View {
                     }
                     .buttonStyle(.bordered)
                     .tint(directControl.snapshot.amsDrying ? amber : cyan)
+                    .frame(width: 46)
                     .shadow(
                         color: directControl.snapshot.amsDrying
                             ? amber.opacity(dryerPulse ? 0.46 : 0.12)
@@ -565,9 +580,10 @@ struct PrinterRemoteControlView: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
             } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(trays) { tray in
+                HStack(spacing: 8) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(trays) { tray in
                             let selected = directControl.snapshot.currentAMSTrayID == tray.id
                             let extruderID = tray.extruderID
                                 ?? directControl.snapshot.currentExtruderID
@@ -622,23 +638,22 @@ struct PrinterRemoteControlView: View {
                                 localized(selected ? "Rút nhựa AMS" : "Nạp nhựa AMS")
                                     + " \(tray.slotID + 1)"
                             )
-
-                            if tray.slotID == 3,
-                               let humidity = directControl.snapshot.amsHumidityPercentByUnit[tray.amsID] {
-                                VStack(spacing: 3) {
-                                    Image(systemName: "drop.fill")
-                                        .font(.system(size: 13, weight: .semibold))
-                                    Text("\(humidity)%")
-                                        .font(.system(size: 14, weight: .bold, design: .rounded))
-                                        .monospacedDigit()
-                                }
-                                .foregroundStyle(humidity > 55 ? amber : cyan)
-                                .frame(minWidth: 42)
-                                .offset(x: -5)
-                                .fixedSize()
-                                .accessibilityLabel(localized("Độ ẩm AMS \(humidity) phần trăm"))
                             }
                         }
+                    }
+
+                    if let humidity {
+                        VStack(spacing: 3) {
+                            Image(systemName: "drop.fill")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("\(humidity)%")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .monospacedDigit()
+                        }
+                        .foregroundStyle(humidity > 55 ? amber : cyan)
+                        .frame(width: 46)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .accessibilityLabel(localized("Độ ẩm AMS \(humidity) phần trăm"))
                     }
                 }
             }
@@ -652,8 +667,12 @@ struct PrinterRemoteControlView: View {
     }
 
     private var utilityControls: some View {
-        HStack(spacing: 0) {
-            VStack(spacing: 6) {
+        HStack(alignment: .top, spacing: 0) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(localized("Tốc độ in"))
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
                 PrinterSpeedDial(
                     level: $printSpeed,
                     isEnabled: controlsReady,
@@ -666,34 +685,43 @@ struct PrinterRemoteControlView: View {
                     height: compactLayout ? 92 : 104
                 )
             }
+            .padding(.leading, 8)
             .frame(maxWidth: .infinity)
 
             Divider().frame(height: compactLayout ? 72 : 82)
 
-            VStack(spacing: 12) {
-                Image(systemName: chamberLightEnabled ? "lightbulb.fill" : "lightbulb")
-                    .font(.system(size: compactLayout ? 24 : 28, weight: .medium))
-                    .foregroundStyle(chamberLightEnabled ? amber : Color.secondary)
-                    .symbolEffect(.bounce, value: chamberLightEnabled)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(localized("Đèn máy in"))
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
 
-                Toggle("", isOn: Binding(
-                    get: { chamberLightEnabled },
-                    set: { value in
-                        chamberLightEnabled = value
-                        directControl.setChamberLight(enabled: value)
-                    }
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .tint(amber)
-                .disabled(!controlsReady)
-                .accessibilityLabel(localized("Đèn buồng in"))
-                .accessibilityValue(
-                    languageCode == SEAppLanguage.english.rawValue
-                        ? (chamberLightEnabled ? "On" : "Off")
-                        : (chamberLightEnabled ? "Bật" : "Tắt")
-                )
+                VStack(spacing: 12) {
+                    Image(systemName: chamberLightEnabled ? "lightbulb.fill" : "lightbulb")
+                        .font(.system(size: compactLayout ? 24 : 28, weight: .medium))
+                        .foregroundStyle(chamberLightEnabled ? amber : Color.secondary)
+                        .symbolEffect(.bounce, value: chamberLightEnabled)
+
+                    Toggle("", isOn: Binding(
+                        get: { chamberLightEnabled },
+                        set: { value in
+                            chamberLightEnabled = value
+                            directControl.setChamberLight(enabled: value)
+                        }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(amber)
+                    .disabled(!controlsReady)
+                    .accessibilityLabel(localized("Đèn buồng in"))
+                    .accessibilityValue(
+                        languageCode == SEAppLanguage.english.rawValue
+                            ? (chamberLightEnabled ? "On" : "Off")
+                            : (chamberLightEnabled ? "Bật" : "Tắt")
+                    )
+                }
+                .frame(maxWidth: .infinity)
             }
+            .padding(.leading, 8)
             .frame(maxWidth: .infinity)
         }
         .padding(.vertical, 10)
@@ -826,6 +854,50 @@ struct PrinterRemoteControlView: View {
         let current = (snapshot.isRecent ? directCurrent : nil).flatMap { $0 >= 0 ? $0 : nil }
             ?? (bridgeCurrent >= 0 ? bridgeCurrent : nil)
         return "\(current.map { String($0) } ?? "—")°C"
+    }
+
+    private var selectedNozzleFilamentMaterial: String? {
+        let snapshot = directControl.snapshot
+        if let material = snapshot.filamentMaterialByExtruder[externalSpoolExtruderID]?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ),
+           !material.isEmpty {
+            return material.uppercased()
+        }
+
+        if let currentTrayID = snapshot.currentAMSTrayID,
+           let tray = snapshot.amsTrays.first(where: { $0.id == currentTrayID }),
+           (tray.extruderID == externalSpoolExtruderID ||
+               snapshot.currentExtruderID == externalSpoolExtruderID),
+           !tray.material.isEmpty {
+            return tray.material.uppercased()
+        }
+
+        let bridgeMaterial = bluetooth.filamentType
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !bridgeMaterial.isEmpty,
+              snapshot.extruderCount == 1 ||
+                snapshot.currentExtruderID == externalSpoolExtruderID ||
+                snapshot.externalSpoolExtruderID == externalSpoolExtruderID else {
+            return nil
+        }
+        return bridgeMaterial.uppercased()
+    }
+
+    private var selectedNozzleFilamentColor: Color {
+        let snapshot = directControl.snapshot
+        if let raw = snapshot.filamentColorHexByExtruder[externalSpoolExtruderID],
+           !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return amsColor(raw)
+        }
+        if let currentTrayID = snapshot.currentAMSTrayID,
+           let tray = snapshot.amsTrays.first(where: { $0.id == currentTrayID }),
+           (tray.extruderID == externalSpoolExtruderID ||
+               snapshot.currentExtruderID == externalSpoolExtruderID),
+           !tray.colorHex.isEmpty {
+            return amsColor(tray.colorHex)
+        }
+        return .secondary
     }
 
     private var liveNozzleIsHeating: Bool {
@@ -967,6 +1039,7 @@ struct PrinterRemoteControlView: View {
     }
 
     private var currentFilamentName: String {
+        if let selectedNozzleFilamentMaterial { return selectedNozzleFilamentMaterial }
         let value = bluetooth.filamentType.trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? localized("nhựa cuộn ngoài") : value.uppercased()
     }
