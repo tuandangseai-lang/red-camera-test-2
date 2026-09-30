@@ -3,6 +3,33 @@ import Foundation
 import Network
 import Security
 
+/// Physical H2D toolheads and virtual external-spool trays do not share the
+/// same numeric range. Bambu uses extruder 0 for the right/main toolhead and
+/// extruder 1 for the left/deputy toolhead, while their virtual trays are 255
+/// and 254 respectively.
+private enum BambuExternalSpoolRoute {
+    static let rightExtruderID = 0
+    static let leftExtruderID = 1
+    static let rightVirtualTrayID = 255
+    static let leftVirtualTrayID = 254
+
+    static func virtualTrayID(forExtruderID extruderID: Int) -> Int {
+        extruderID == leftExtruderID ? leftVirtualTrayID : rightVirtualTrayID
+    }
+
+    static func extruderID(forVirtualTrayID trayID: Int) -> Int? {
+        switch trayID {
+        case rightVirtualTrayID: return rightExtruderID
+        case leftVirtualTrayID: return leftExtruderID
+        default: return nil
+        }
+    }
+
+    static func isVirtualTrayID(_ trayID: Int) -> Bool {
+        trayID == rightVirtualTrayID || trayID == leftVirtualTrayID
+    }
+}
+
 struct BambuAMSTraySnapshot: Identifiable, Equatable {
     let amsID: Int
     let slotID: Int
@@ -487,9 +514,12 @@ final class BambuPrinterControlManager: ObservableObject {
         filamentOperationNumber &+= 1
         activeFilamentOperation = load ? .filamentLoad : .filamentUnload
         dismissedPromptID = nil
-        // Bambu's virtual tray 254 belongs to the main/right extruder; 253 is
-        // the deputy/left path on dual-tool printers.
-        let virtualAMSID = extruderID == 1 ? 253 : 254
+        // The command must pair the physical extruder with its matching
+        // virtual tray. A mismatched pair makes H2D heat one side and move
+        // filament through the other.
+        let virtualAMSID = BambuExternalSpoolRoute.virtualTrayID(
+            forExtruderID: extruderID
+        )
         send(
             section: "print",
             command: "ams_change_filament",
@@ -784,10 +814,11 @@ final class BambuPrinterControlManager: ObservableObject {
                 if let packedSlot = number(entry["snow"]), packedSlot >= 0 {
                     let amsID = (packedSlot >> 8) & 0xFF
                     let slotID = packedSlot & 0xFF
-                    if amsID == 253 || amsID == 254 {
+                    if BambuExternalSpoolRoute.isVirtualTrayID(amsID) {
                         detectedExternalExtruder = id
                         externalRouteInReport = true
-                    } else if amsID < 253, slotID < 255 {
+                    } else if amsID < BambuExternalSpoolRoute.leftVirtualTrayID,
+                              slotID < 255 {
                         detectedCurrentTray = "\(amsID)-\(slotID)"
                     }
                 }
@@ -858,16 +889,15 @@ final class BambuPrinterControlManager: ObservableObject {
         }()
         for tray in virtualTrays {
             guard let id = number(tray["id"]) else { continue }
-            let extruderID: Int?
-            if id == 254 {
-                extruderID = 0
-            } else if id == 253 {
-                extruderID = 1
-            } else {
-                extruderID = nil
+            guard let extruderID = BambuExternalSpoolRoute.extruderID(
+                forVirtualTrayID: id
+            ) else { continue }
+            // vir_slot is material metadata and H2D normally reports both
+            // virtual trays. It must not overwrite the active route from
+            // extruder.info[].snow merely because one entry appears last.
+            if !externalRouteInReport, virtualTrays.count == 1 {
+                next.externalSpoolExtruderID = extruderID
             }
-            guard let extruderID else { continue }
-            next.externalSpoolExtruderID = extruderID
             let material = ((tray["tray_type"] as? String)
                 ?? (tray["tray_sub_brands"] as? String)
                 ?? (tray["tray_info_idx"] as? String)
@@ -893,12 +923,14 @@ final class BambuPrinterControlManager: ObservableObject {
             next.hasAMS = hasReportedAMS
 
             if let trayNow = number(ams["tray_now"]) {
-                if trayNow >= 0, trayNow < 253, next.extruderCount == 1 {
+                if trayNow >= 0,
+                   trayNow < BambuExternalSpoolRoute.leftVirtualTrayID,
+                   next.extruderCount == 1 {
                     next.currentAMSTrayID = "\(trayNow >> 2)-\(trayNow & 0x3)"
-                } else if trayNow >= 253 {
-                    // 253/254 are virtual external spools; 255 means no AMS
-                    // tray is feeding the nozzle. Never leave a stale AMS
-                    // selection visible when the route has moved outside.
+                } else if trayNow >= BambuExternalSpoolRoute.leftVirtualTrayID {
+                    // 254/255 are the H2D virtual external spools; 255 also
+                    // serves as the legacy no-AMS sentinel. Either way, no
+                    // physical AMS tray should remain selected.
                     next.currentAMSTrayID = nil
                 }
             }

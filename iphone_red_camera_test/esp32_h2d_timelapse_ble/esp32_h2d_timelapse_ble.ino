@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.27.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.28.0
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -23,6 +23,10 @@ constexpr char EVENT_UUID[] = "7E57A001-8E3A-4D6A-9B2B-13B10A000001";
 constexpr char COMMAND_UUID[] = "7E57A002-8E3A-4D6A-9B2B-13B10A000001";
 
 constexpr uint16_t MQTT_PORT = 8883;
+// Official H2D mapping: extruder 0 is right/main and uses virtual tray 255;
+// extruder 1 is left/deputy and uses virtual tray 254.
+constexpr int VIRTUAL_TRAY_RIGHT_ID = 255;
+constexpr int VIRTUAL_TRAY_LEFT_ID = 254;
 // Bambu full-state packets can exceed 32 KB, especially when AMS data and HMS
 // warnings are present. PubSubClient silently drops packets larger than this
 // buffer, which used to hide printer alerts from the iPhone.
@@ -1158,7 +1162,8 @@ bool updatePackedH2DNozzleTelemetry(const uint8_t *payload, size_t length,
     const auto noteExternalRoute = [&](int packedSlot, bool isCurrentRoute) {
       if (id < 0 || id >= 2 || packedSlot < 0) return;
       const int amsID = (packedSlot >> 8) & 0xFF;
-      const bool external = amsID == 253 || amsID == 254;
+      const bool external = amsID == Config::VIRTUAL_TRAY_LEFT_ID ||
+                            amsID == Config::VIRTUAL_TRAY_RIGHT_ID;
       if (external) externalSpoolExtruderID = id;
       if (isCurrentRoute) {
         currentRouteReported = true;
@@ -1221,8 +1226,11 @@ void updatePrinterTelemetry(const uint8_t *payload, size_t length) {
     }
   }
   int trayNow = -1;
-  if (extractLastJsonInt(payload, length, "tray_now", trayNow)) {
-    externalSpoolRouteActive = trayNow == 253 || trayNow == 254;
+  if (!isH2D && extractLastJsonInt(payload, length, "tray_now", trayNow)) {
+    // On legacy single-nozzle printers 254 is the external spool and 255 is
+    // the idle sentinel. H2D route ownership comes from extruder.info[].snow,
+    // where 255 is instead the right/main virtual tray.
+    externalSpoolRouteActive = trayNow == Config::VIRTUAL_TRAY_LEFT_ID;
   }
   if (isActivePrintState(printState) && externalSpoolRouteActive &&
       externalFilamentSensorState != 1) {
@@ -3163,7 +3171,9 @@ void handlePhoneCommand(String command) {
     const int target = targetText.toInt();
     const int temperature = temperatureText.toInt();
     const int externalExtruderID = externalSpoolExtruderID;
-    const int expectedVirtualAmsID = externalExtruderID == 1 ? 253 : 254;
+    const int expectedVirtualAmsID =
+        externalExtruderID == 1 ? Config::VIRTUAL_TRAY_LEFT_ID
+                                : Config::VIRTUAL_TRAY_RIGHT_ID;
     const bool externalSpool = amsID == expectedVirtualAmsID && slotID == 0 &&
                                target == expectedVirtualAmsID;
     if (!externalSpool || temperature < 170 || temperature > 320) {
@@ -3188,7 +3198,9 @@ void handlePhoneCommand(String command) {
     }
     const int amsID = argument.toInt();
     const int externalExtruderID = externalSpoolExtruderID;
-    const int expectedVirtualAmsID = externalExtruderID == 1 ? 253 : 254;
+    const int expectedVirtualAmsID =
+        externalExtruderID == 1 ? Config::VIRTUAL_TRAY_LEFT_ID
+                                : Config::VIRTUAL_TRAY_RIGHT_ID;
     if (amsID != expectedVirtualAmsID) {
       queuePhoneEvent(
           "H2D,REMOTE_ERROR,UNLOAD_FILAMENT,Chỉ hỗ trợ cuộn nhựa ngoài");
@@ -3815,7 +3827,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.27.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.28.0");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

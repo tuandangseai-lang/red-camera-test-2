@@ -698,7 +698,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
 
     func loadFilament(amsID: Int, slotID: Int, target: Int, temperature: Int) {
         guard (0...255).contains(amsID), (0...254).contains(slotID),
-              (0...254).contains(target), (170...320).contains(temperature) else {
+              (0...255).contains(target), (170...320).contains(temperature) else {
             failPrinterControlLocally("Thông số nạp nhựa không hợp lệ")
             return
         }
