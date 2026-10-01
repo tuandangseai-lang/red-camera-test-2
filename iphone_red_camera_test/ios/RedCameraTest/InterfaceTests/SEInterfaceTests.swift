@@ -30,15 +30,23 @@ final class SEInterfaceTests: XCTestCase {
         scroll.swipeUp(velocity: .slow)
         XCTAssertTrue(app.buttons["se.nozzle.0"].waitForExistence(timeout: 5))
         app.buttons["se.nozzle.0"].tap()
+        XCTAssertTrue(app.buttons["se.nozzle.0"].isSelected)
         XCTAssertTrue(app.staticTexts["PETG"].firstMatch.exists)
         app.buttons["se.nozzle.1"].tap()
-        XCTAssertTrue(app.staticTexts["PLA"].firstMatch.exists)
-        XCTAssertTrue(app.staticTexts["39%"].exists)
+        XCTAssertTrue(app.buttons["se.nozzle.1"].isSelected)
+        let material = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "PLA"
+        )).firstMatch
+        let humidity = app.staticTexts["AMS humidity 39 percent"]
+        XCTAssertTrue(material.exists)
+        XCTAssertTrue(humidity.exists)
         saveScreenshot("printer-controls", app: app)
 
-        for title in ["Controls H2D", "39%", "PLA"] {
-            let element = app.staticTexts[title].firstMatch
-            XCTAssertTrue(element.exists, "Missing \(title)")
+        for element in [app.staticTexts["Controls H2D"], humidity, material] {
+            guard element.exists else {
+                XCTFail("Missing expected control text")
+                continue
+            }
             XCTAssertGreaterThanOrEqual(element.frame.minX, app.frame.minX)
             XCTAssertLessThanOrEqual(element.frame.maxX, app.frame.maxX)
         }
@@ -48,6 +56,7 @@ final class SEInterfaceTests: XCTestCase {
         let app = launch(timelapse: true)
         XCTAssertTrue(app.staticTexts["iPhone camera"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["Controls H2D"].exists)
+        XCTAssertTrue(app.buttons["Stop capture"].exists)
         saveScreenshot("timelapse", app: app)
     }
 }

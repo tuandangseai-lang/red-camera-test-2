@@ -62,6 +62,7 @@
 "Ghép %lld ảnh thành video" = "Render %lld photos into a video";
 "Bỏ toàn bộ ảnh" = "Delete all photos";
 "Tiếp tục chụp" = "Continue capturing";
+"Dừng chụp" = "Stop capture";
 "Dừng chụp không dừng máy in %@." = "Stopping capture does not stop %@.";
 
 /* Printer telemetry */

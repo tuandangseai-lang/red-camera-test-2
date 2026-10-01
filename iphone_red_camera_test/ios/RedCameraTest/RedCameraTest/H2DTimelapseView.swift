@@ -1035,6 +1035,7 @@ struct H2DTimelapseView: View {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "HH:mm"
+        formatter.timeZone = .autoupdatingCurrent
         return formatter
     }()
 
@@ -1448,7 +1449,7 @@ struct H2DTimelapseView: View {
                         Button(role: .destructive) {
                             requestStopCapture()
                         } label: {
-                            Label(localizedStatus("Dừng chụp"), systemImage: "stop.fill")
+                            Label("Dừng chụp", systemImage: "stop.fill")
                                 .font(.system(size: 14, weight: .semibold))
                                 .frame(maxWidth: .infinity, minHeight: 46)
                         }
