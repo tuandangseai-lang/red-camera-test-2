@@ -343,13 +343,14 @@ jobs:
               -resultBundlePath "$RUNNER_TEMP/interface-check/phone-$index.xcresult" \
               CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
               -parallel-testing-enabled NO \
-              > "$RUNNER_TEMP/interface-check/phone-$index.log" 2>&1 || {
-                tail -100 "$RUNNER_TEMP/interface-check/phone-$index.log"
-                exit 1
-              }
+              > "$RUNNER_TEMP/interface-check/phone-$index.log" 2>&1 && status=0 || status=$?
             xcrun xcresulttool export attachments \
               --path "$RUNNER_TEMP/interface-check/phone-$index.xcresult" \
               --output-path "$RUNNER_TEMP/interface-check/phone-$index-images"
+            if [ "$status" -ne 0 ]; then
+              tail -100 "$RUNNER_TEMP/interface-check/phone-$index.log"
+              exit "$status"
+            fi
           done < "$RUNNER_TEMP/interface-devices.txt"
 
       - name: Tai ket qua kiem tra giao dien

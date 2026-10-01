@@ -890,7 +890,6 @@ struct H2DTimelapseView: View {
             }
         }
         .cardStyle(dark: darkMode, compact: compact)
-        .accessibilityIdentifier("se.print-status")
     }
 
     @ViewBuilder
@@ -1059,7 +1058,6 @@ struct H2DTimelapseView: View {
             canEnable: selectedProfile != nil && !accessCode.isEmpty,
             languageCode: appLanguageCode
         )
-        .accessibilityIdentifier("se.printer-camera")
     }
 
     private var isFlashArtworkActive: Bool {

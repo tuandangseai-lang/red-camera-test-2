@@ -116,7 +116,6 @@ struct PrinterRemoteControlView: View {
                 .stroke(hairlineColor, lineWidth: 1)
         }
         .controlSize(compactLayout ? .small : .regular)
-        .accessibilityIdentifier("se.printer-controls")
         .onAppear {
             startDirectControl()
             updateAlarmPulse()
@@ -403,7 +402,7 @@ struct PrinterRemoteControlView: View {
                 lowPowerDarkMode ? Color.white.opacity(0.06) : Color.black.opacity(0.045),
                 in: Capsule()
             )
-            .accessibilityLabel(localized("Chọn đầu in cho cuộn ngoài"))
+            .accessibilityHint(localized("Chọn đầu in cho cuộn ngoài"))
         }
     }
 
