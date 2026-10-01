@@ -414,7 +414,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
         isH2DReady = true
         printerModelCode = "H2D"
         printerSerial = SEInterfaceCheck.profile.serial
-        h2dPrintState = "RUNNING"
+        h2dPrintState = SEInterfaceCheck.snapshot.printState
         h2dPrintPercent = 38
         h2dCurrentLayer = 91
         h2dTotalLayers = 242

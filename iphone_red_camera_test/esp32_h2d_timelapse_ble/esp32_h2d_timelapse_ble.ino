@@ -8,7 +8,7 @@
 #include <mbedtls/base64.h>
 #include <memory>
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.28.0
+// SE Bambu Timelapse Bridge for classic ESP32 v1.28.1
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -3744,9 +3744,12 @@ void updateLedStrip() {
     // Pressing the film button keeps the strip yellow and steady. Only the
     // iPhone torch follows the button's flash cadence.
     fillLedStrip(ledColor(255, 190, 0));
-  } else if (isPausedState() || isExplicitlyStoppedState() ||
-             printState == "FAILED") {
+  } else if (isPausedState() || isExplicitlyStoppedState()) {
     // A deliberate pause/stop is red but steady and never sounds the alarm.
+    // FAILED with print_error=0 is often just the previous cancelled job,
+    // including while an AMS dries. It must fall through to standby, not
+    // paint a false red fault forever. Real faults already win above through
+    // hasAnyFleetPhysicalCriticalError(), including FAILED with a real code.
     fillStatusLeds(ledColor(255, 0, 0));
     fillAnimatedLeds(scaledLedColor(255, 0, 0, breathingScale(now)));
   } else if (isActivePrintState(printState)) {
@@ -3827,7 +3830,7 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.28.0");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.28.1");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);

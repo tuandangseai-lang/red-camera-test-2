@@ -10,6 +10,12 @@ enum SEInterfaceCheck {
     static var isTimelapse: Bool {
         ProcessInfo.processInfo.arguments.contains("--se-interface-check-timelapse")
     }
+    static var isIdle: Bool {
+        ProcessInfo.processInfo.arguments.contains("--se-interface-check-idle")
+    }
+    static var isPaused: Bool {
+        ProcessInfo.processInfo.arguments.contains("--se-interface-check-paused")
+    }
     static let profile = BambuPrinterProfile(
         profileID: "interface-check-h2d", kind: .h2d,
         ip: "192.0.2.1", serial: "094-INTERFACE-CHECK"
@@ -31,7 +37,7 @@ enum SEInterfaceCheck {
 
     static var snapshot: BambuDirectSnapshot {
         var value = BambuDirectSnapshot()
-        value.printState = "RUNNING"
+        value.printState = isIdle ? "IDLE" : (isPaused ? "PAUSED" : "RUNNING")
         value.printPercent = 38
         value.currentLayer = 91
         value.totalLayers = 242

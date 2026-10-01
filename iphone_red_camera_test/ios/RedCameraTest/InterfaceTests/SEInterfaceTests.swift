@@ -1,10 +1,12 @@
 import XCTest
 
 final class SEInterfaceTests: XCTestCase {
-    private func launch(timelapse: Bool = false) -> XCUIApplication {
+    private func launch(timelapse: Bool = false, idle: Bool = false, paused: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--se-interface-check"]
         if timelapse { app.launchArguments.append("--se-interface-check-timelapse") }
+        if idle { app.launchArguments.append("--se-interface-check-idle") }
+        if paused { app.launchArguments.append("--se-interface-check-paused") }
         app.launch()
         XCTAssertTrue(app.staticTexts["38%"].waitForExistence(timeout: 12))
         return app
@@ -29,6 +31,8 @@ final class SEInterfaceTests: XCTestCase {
         let scroll = app.scrollViews.firstMatch
         scroll.swipeUp(velocity: .slow)
         XCTAssertTrue(app.buttons["se.nozzle.0"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["se.print.pause-resume"].isEnabled)
+        XCTAssertTrue(app.buttons["se.print.stop"].isEnabled)
         app.buttons["se.nozzle.0"].tap()
         XCTAssertTrue(app.buttons["se.nozzle.0"].isSelected)
         XCTAssertTrue(app.staticTexts["PETG"].firstMatch.exists)
@@ -37,9 +41,12 @@ final class SEInterfaceTests: XCTestCase {
         let material = app.staticTexts.matching(NSPredicate(
             format: "label CONTAINS[c] %@", "PLA"
         )).firstMatch
-        let humidity = app.staticTexts["AMS humidity 39 percent"]
+        let humidity = app.buttons["se.ams.humidity-drying"]
         XCTAssertTrue(material.exists)
         XCTAssertTrue(humidity.exists)
+        XCTAssertEqual(humidity.label, "AMS humidity 39 percent")
+        XCTAssertGreaterThanOrEqual(humidity.frame.width, 60)
+        XCTAssertGreaterThanOrEqual(humidity.frame.height, 64)
         saveScreenshot("printer-controls", app: app)
 
         for element in [app.staticTexts["Controls H2D"], humidity, material] {
@@ -50,6 +57,31 @@ final class SEInterfaceTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(element.frame.minX, app.frame.minX)
             XCTAssertLessThanOrEqual(element.frame.maxX, app.frame.maxX)
         }
+    }
+
+    func testIdleQuickActionsStayVisibleAndDisabled() {
+        let app = launch(idle: true)
+        app.scrollViews.firstMatch.swipeUp(velocity: .slow)
+        let pause = app.buttons["se.print.pause-resume"]
+        let stop = app.buttons["se.print.stop"]
+        XCTAssertTrue(pause.waitForExistence(timeout: 5))
+        XCTAssertTrue(stop.exists)
+        XCTAssertTrue(pause.frame.intersects(app.frame))
+        XCTAssertTrue(stop.frame.intersects(app.frame))
+        XCTAssertFalse(pause.isEnabled)
+        XCTAssertFalse(stop.isEnabled)
+        XCTAssertTrue(app.buttons["se.ams.humidity-drying"].isEnabled)
+        saveScreenshot("idle-controls", app: app)
+    }
+
+    func testPausedQuickActionsUseResume() {
+        let app = launch(paused: true)
+        app.scrollViews.firstMatch.swipeUp(velocity: .slow)
+        let resume = app.buttons["se.print.pause-resume"]
+        XCTAssertTrue(resume.waitForExistence(timeout: 5))
+        XCTAssertTrue(resume.isEnabled)
+        XCTAssertEqual(resume.label, "Resume")
+        XCTAssertTrue(app.buttons["se.print.stop"].isEnabled)
     }
 
     func testTimelapseLayout() {

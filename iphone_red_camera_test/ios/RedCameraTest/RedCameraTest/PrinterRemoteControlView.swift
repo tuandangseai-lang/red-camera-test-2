@@ -36,6 +36,17 @@ struct PrinterRemoteControlView: View {
         directControl.isReady && !directControl.isPending
     }
 
+    private var printActionsAvailable: Bool {
+        // Printer telemetry, not a stale BLE session, owns print actions.
+        // Drying an AMS is not a print job and cannot use pause/print-stop.
+        controlsReady && directControl.snapshot.isRecent &&
+            directControl.snapshot.hasActivePrintJob
+    }
+
+    private var printIsPaused: Bool {
+        ["PAUSE", "PAUSED"].contains(directControl.snapshot.printState)
+    }
+
     private var alarmNeedsAttention: Bool {
         alarmActive && !alarmAcknowledged
     }
@@ -153,7 +164,10 @@ struct PrinterRemoteControlView: View {
         ) { action in
             switch action {
             case .stop:
-                Button(localized("Dừng"), role: .destructive) { directControl.stopPrint() }
+                Button(localized("Dừng"), role: .destructive) {
+                    if printActionsAvailable { directControl.stopPrint() }
+                }
+                .disabled(!printActionsAvailable)
             case let .load(temperature):
                 Button(localized(usesLeftNozzlePath
                     ? "Nạp cuộn ngoài vào đầu trái"
@@ -234,27 +248,33 @@ struct PrinterRemoteControlView: View {
 
             HStack(spacing: 8) {
                 Button {
-                    if bluetooth.isPausedPrint {
+                    if printIsPaused {
                         directControl.resumePrint()
                     } else {
                         directControl.pausePrint()
                     }
                 } label: {
                     iconOnlyActionLabel(
-                        bluetooth.isPausedPrint ? "Tiếp tục" : "Tạm dừng",
-                        icon: bluetooth.isPausedPrint ? "play.fill" : "pause.fill"
+                        printIsPaused ? "Tiếp tục" : "Tạm dừng",
+                        icon: printIsPaused ? "play.fill" : "pause.fill"
                     )
                 }
-                .buttonStyle(RemoteActionButtonStyle(tint: cyan))
-                .disabled(!controlsReady)
+                .buttonStyle(RemoteActionButtonStyle(
+                    tint: printActionsAvailable ? cyan : Color.gray.opacity(0.72)
+                ))
+                .disabled(!printActionsAvailable)
+                .accessibilityIdentifier("se.print.pause-resume")
 
                 Button {
                     confirmation = .stop
                 } label: {
                     iconOnlyActionLabel("Dừng", icon: "stop.fill")
                 }
-                .buttonStyle(RemoteActionButtonStyle(tint: .red))
-                .disabled(!controlsReady)
+                .buttonStyle(RemoteActionButtonStyle(
+                    tint: printActionsAvailable ? .red : Color.gray.opacity(0.72)
+                ))
+                .disabled(!printActionsAvailable)
+                .accessibilityIdentifier("se.print.stop")
 
                 Button {
                     onSilenceAlarm()
@@ -449,7 +469,7 @@ struct PrinterRemoteControlView: View {
             HStack(spacing: 8) {
                 controlTitle("AMS", icon: "square.grid.2x2.fill")
                 Spacer(minLength: 4)
-                if let dryerID = directControl.snapshot.amsDryerUnitID {
+                if directControl.snapshot.amsDryerUnitID != nil {
                     HStack(spacing: 2) {
                         Button {
                             amsDryingHours = max(1, amsDryingHours - 1)
@@ -471,55 +491,6 @@ struct PrinterRemoteControlView: View {
                     .buttonStyle(.plain)
                     .background(subduedSurfaceColor, in: Capsule())
 
-                    Button {
-                        let isDrying = directControl.snapshot.amsDrying
-                        directControl.setAMSDrying(
-                            enabled: !isDrying,
-                            amsID: dryerID,
-                            durationHours: amsDryingHours,
-                            temperature: recommendedAMSDryingTemperature,
-                            filament: recommendedAMSDryingFilament
-                        )
-                    } label: {
-                        Image(systemName: directControl.snapshot.amsDrying
-                            ? "drop.fill" : "drop")
-                            .font(.system(size: 14, weight: .semibold))
-                            .frame(width: 31, height: 31)
-                            .scaleEffect(directControl.snapshot.amsDrying
-                                ? (dryerPulse ? 1.06 : 0.94)
-                                : 1)
-                            .opacity(directControl.snapshot.amsDrying
-                                ? (dryerPulse ? 1 : 0.58)
-                                : 1)
-                            .overlay {
-                                Circle()
-                                    .stroke(amber.opacity(0.72), lineWidth: 1.8)
-                                    .scaleEffect(dryerPulse ? 1.62 : 0.92)
-                                    .opacity(directControl.snapshot.amsDrying
-                                        ? (dryerPulse ? 0 : 0.78)
-                                        : 0)
-                            }
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(directControl.snapshot.amsDrying ? amber : cyan)
-                    .frame(width: 46)
-                    .shadow(
-                        color: directControl.snapshot.amsDrying
-                            ? amber.opacity(dryerPulse ? 0.46 : 0.12)
-                            : .clear,
-                        radius: dryerPulse ? 9 : 2
-                    )
-                    .animation(
-                        directControl.snapshot.amsDrying
-                            ? .easeInOut(duration: 1).repeatForever(autoreverses: true)
-                            : .easeOut(duration: 0.18),
-                        value: dryerPulse
-                    )
-                    .disabled(!controlsReady)
-                    .accessibilityLabel(localized(
-                        directControl.snapshot.amsDrying ? "Tắt sấy AMS" : "Bật sấy AMS"
-                    ))
-                    .accessibilityHint(localized("Sấy mặc định không xoay khay"))
                 }
             }
 
@@ -563,7 +534,7 @@ struct PrinterRemoteControlView: View {
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
                                 }
-                                .frame(width: 58, height: 70)
+                                .frame(width: compactLayout ? 52 : 58, height: 70)
                                 .saturation(selected ? 1 : 0.34)
                                 .opacity(selected ? 1 : 0.52)
                                 .background(
@@ -590,15 +561,16 @@ struct PrinterRemoteControlView: View {
                         }
                     }
 
-                    if let humidity {
-                        Text("\(humidity)%")
-                            .font(.system(size: 17, weight: .bold, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundStyle(humidity > 55 ? amber : cyan)
-                            .frame(width: 50)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .accessibilityLabel(localized("Độ ẩm AMS \(humidity) phần trăm"))
+                    if humidity != nil || directControl.snapshot.amsDryerUnitID != nil {
+                        amsHumidityDryingControl(humidity: humidity)
                     }
+                }
+            }
+            if trays.isEmpty,
+               humidity != nil || directControl.snapshot.amsDryerUnitID != nil {
+                HStack {
+                    Spacer(minLength: 0)
+                    amsHumidityDryingControl(humidity: humidity)
                 }
             }
         }
@@ -608,6 +580,69 @@ struct PrinterRemoteControlView: View {
             RoundedRectangle(cornerRadius: 15, style: .continuous)
                 .stroke(hairlineColor, lineWidth: 1)
         }
+    }
+
+    private func amsHumidityDryingControl(humidity: Int?) -> some View {
+        let drying = directControl.snapshot.amsDrying
+        let tint = drying || (humidity ?? 0) > 55 ? amber : cyan
+        let label = VStack(spacing: 5) {
+            Image(systemName: drying ? "drop.fill" : "drop")
+                .font(.system(size: 21, weight: .semibold))
+                .scaleEffect(drying ? (dryerPulse ? 1.06 : 0.94) : 1)
+            Text(humidity.map { "\($0)%" } ?? "—%")
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+        }
+        .foregroundStyle(tint)
+        .frame(width: 64, height: 70)
+        .background(tint.opacity(drying ? 0.13 : 0.08), in: RoundedRectangle(cornerRadius: 16))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(tint.opacity(0.20), lineWidth: 1)
+        }
+        .overlay {
+            if drying {
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(amber.opacity(0.65), lineWidth: 1.5)
+                    .scaleEffect(dryerPulse ? 1.18 : 0.96)
+                    .opacity(dryerPulse ? 0 : 0.78)
+                    .allowsHitTesting(false)
+            }
+        }
+        .opacity(drying ? (dryerPulse ? 1 : 0.62) : 1)
+        .animation(
+            drying ? .easeInOut(duration: 1).repeatForever(autoreverses: true) : .easeOut(duration: 0.18),
+            value: dryerPulse
+        )
+
+        return Group {
+            if let dryerID = directControl.snapshot.amsDryerUnitID {
+                Button {
+                    directControl.setAMSDrying(
+                        enabled: !drying,
+                        amsID: dryerID,
+                        durationHours: amsDryingHours,
+                        temperature: recommendedAMSDryingTemperature,
+                        filament: recommendedAMSDryingFilament
+                    )
+                } label: { label }
+                .buttonStyle(.plain)
+                .disabled(!controlsReady)
+                .accessibilityHint(localized(drying ? "Tắt sấy AMS" : "Bật sấy AMS"))
+                .accessibilityLabel(localized(humidity.map { "Độ ẩm AMS \($0) phần trăm" } ?? "Độ ẩm AMS"))
+                .accessibilityValue(localized(drying ? "Tắt sấy AMS" : "Bật sấy AMS"))
+                .accessibilityIdentifier("se.ams.humidity-drying")
+            } else {
+                // Old AMS units can report humidity but have no drying action.
+                label
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(localized(humidity.map { "Độ ẩm AMS \($0) phần trăm" } ?? "Độ ẩm AMS"))
+                    .accessibilityIdentifier("se.ams.humidity-drying")
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var utilityControls: some View {

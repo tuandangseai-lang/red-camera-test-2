@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.98 build177 - toi uu va giao dien iPhone
+name: Tao IPA SE v9.99 build178 - trang thai nut va do am AMS
 
 on:
   workflow_dispatch:
@@ -223,7 +223,9 @@ jobs:
           grep -q "amsHumidityPercentByUnit" "RedCameraTest/BambuPrinterControl.swift"
           grep -q '"drop.fill" : "drop"' "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q 'Text(localized("Tốc độ in %"))' "RedCameraTest/PrinterRemoteControlView.swift"
-          grep -q 'font(.system(size: 17, weight: .bold, design: .rounded))' "RedCameraTest/PrinterRemoteControlView.swift"
+          grep -q 'font(.system(size: 20, weight: .bold, design: .rounded))' "RedCameraTest/PrinterRemoteControlView.swift"
+          grep -q 'se.ams.humidity-drying' "RedCameraTest/PrinterRemoteControlView.swift"
+          grep -q 'disabled(!printActionsAvailable)' "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q "selectedExternalExtruderID" "RedCameraTest/PrinterRemoteControlView.swift"
           grep -q "DashboardTemperatureEditorSheet" "RedCameraTest/H2DTimelapseView.swift"
           grep -q 'speedPercents = \[50, 100, 124, 166\]' "RedCameraTest/PrinterRemoteControlView.swift"
@@ -306,19 +308,19 @@ jobs:
           test -f "$APP_PATH/en.lproj/Localizable.strings"
           test -f "$APP_PATH/vi.lproj/Localizable.strings"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.98"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "177"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.99"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "178"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.98-build177-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.99-build178-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.98-build177-unsigned-ipa
-          path: SE-v9.98-build177-unsigned.ipa
+          name: SE-v9.99-build178-unsigned-ipa
+          path: SE-v9.99-build178-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -357,7 +359,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.98-build177-interface-check
+          name: SE-v9.99-build178-interface-check
           path: ${{ runner.temp }}/interface-check/
           if-no-files-found: warn
           retention-days: 7
@@ -370,6 +372,9 @@ jobs:
     steps:
       - name: Lay ma nguon
         uses: actions/checkout@v6
+
+      - name: Kiem tra mau LED va uu tien canh bao
+        run: python3 iphone_red_camera_test/tests/LedPolicyRegression/check.py
 
       - name: Cai Arduino CLI
         uses: arduino/setup-arduino-cli@v2
@@ -432,7 +437,7 @@ jobs:
           grep -q 'resetsPrintStartBeep' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'requestBuzzerBeep(180)' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           ! grep -q 'requestBuzzerBeep(80)' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'v1.28.0' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'v1.28.1' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'VIRTUAL_TRAY_RIGHT_ID = 255' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'VIRTUAL_TRAY_LEFT_ID = 254' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           ! grep -q 'externalExtruderID == 1 ? 253 : 254' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
@@ -498,7 +503,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.28.0
+          name: SE-Bambu-ESP32-v1.28.1
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7
