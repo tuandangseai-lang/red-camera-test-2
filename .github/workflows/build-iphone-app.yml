@@ -2,6 +2,11 @@ name: Tao IPA SE v9.101 build180 - sua AMS cuon 4 va don vi say
 
 on:
   workflow_dispatch:
+    inputs:
+      firmware_only:
+        description: Build pinned ESP32 handover firmware only
+        type: boolean
+        default: false
   push:
     branches:
       - main
@@ -14,6 +19,7 @@ permissions:
 
 jobs:
   build-unsigned-ipa:
+    if: ${{ inputs.firmware_only != true }}
     name: Build SE iPhone App
     runs-on: macos-latest
     timeout-minutes: 30
@@ -405,10 +411,10 @@ jobs:
           set -euo pipefail
           arduino-cli config init
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32
-          arduino-cli lib install PubSubClient
+          arduino-cli core install esp32:esp32@3.3.10
+          arduino-cli lib install PubSubClient@2.8
           arduino-cli lib install NimBLE-Arduino@2.5.1
-          arduino-cli lib install "Adafruit NeoPixel"
+          arduino-cli lib install "Adafruit NeoPixel@1.15.5"
 
       - name: Tranh double-free khi TLS mat ket noi
         run: |
