@@ -1,12 +1,13 @@
 import XCTest
 
 final class SEInterfaceTests: XCTestCase {
-    private func launch(timelapse: Bool = false, idle: Bool = false, paused: Bool = false) -> XCUIApplication {
+    private func launch(timelapse: Bool = false, idle: Bool = false, paused: Bool = false, controlFailure: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--se-interface-check"]
         if timelapse { app.launchArguments.append("--se-interface-check-timelapse") }
         if idle { app.launchArguments.append("--se-interface-check-idle") }
         if paused { app.launchArguments.append("--se-interface-check-paused") }
+        if controlFailure { app.launchArguments.append("--se-interface-check-control-failure") }
         app.launch()
         XCTAssertTrue(app.staticTexts["38%"].waitForExistence(timeout: 12))
         return app
@@ -90,5 +91,16 @@ final class SEInterfaceTests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Controls H2D"].exists)
         XCTAssertTrue(app.buttons["Stop capture"].exists)
         saveScreenshot("timelapse", app: app)
+    }
+
+    func testCommandFailureIsVisibleAndLocalized() {
+        let app = launch(controlFailure: true)
+        app.scrollViews.firstMatch.swipeUp(velocity: .slow)
+        let feedback = app.staticTexts["se.control.feedback"]
+        XCTAssertTrue(feedback.waitForExistence(timeout: 5))
+        XCTAssertEqual(feedback.label, "Printer blocked the command • enable LAN Mode > Developer Mode")
+        XCTAssertGreaterThanOrEqual(feedback.frame.minX, app.frame.minX)
+        XCTAssertLessThanOrEqual(feedback.frame.maxX, app.frame.maxX)
+        saveScreenshot("command-feedback", app: app)
     }
 }

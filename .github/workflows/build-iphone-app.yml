@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.99 build178 - trang thai nut va do am AMS
+name: Tao IPA SE v9.100 build179 - sua lenh dung va tam dung
 
 on:
   workflow_dispatch:
@@ -37,6 +37,16 @@ jobs:
 
       - name: Cai XcodeGen
         run: brew install xcodegen
+
+      - name: Kiem tra lenh va phan hoi MQTT khong ket noi may in
+        run: |
+          set -euo pipefail
+          swiftc -O \
+            iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/BambuControlProtocol.swift \
+            iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/SELanguage.swift \
+            iphone_red_camera_test/tests/BambuControlRegression/main.swift \
+            -o "$RUNNER_TEMP/bambu-control-regression"
+          "$RUNNER_TEMP/bambu-control-regression"
 
       - name: Tao project Xcode
         working-directory: iphone_red_camera_test/ios/RedCameraTest
@@ -308,19 +318,19 @@ jobs:
           test -f "$APP_PATH/en.lproj/Localizable.strings"
           test -f "$APP_PATH/vi.lproj/Localizable.strings"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.99"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "178"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.100"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "179"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.99-build178-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.100-build179-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.99-build178-unsigned-ipa
-          path: SE-v9.99-build178-unsigned.ipa
+          name: SE-v9.100-build179-unsigned-ipa
+          path: SE-v9.100-build179-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
 
@@ -359,7 +369,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.99-build178-interface-check
+          name: SE-v9.100-build179-interface-check
           path: ${{ runner.temp }}/interface-check/
           if-no-files-found: warn
           retention-days: 7
@@ -437,12 +447,15 @@ jobs:
           grep -q 'resetsPrintStartBeep' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'requestBuzzerBeep(180)' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           ! grep -q 'requestBuzzerBeep(80)' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'v1.28.1' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'v1.28.2' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'VIRTUAL_TRAY_RIGHT_ID = 255' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'VIRTUAL_TRAY_LEFT_ID = 254' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           ! grep -q 'externalExtruderID == 1 ? 253 : 254' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'BLE_NOTIFY_GAP_MS = 12' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
-          grep -q 'FLEET_MQTT_BUFFER_BYTES = 24576' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'SEMQTTPayloadStream<Config::MQTT_BUFFER_BYTES>' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'mqtt.setStream(mqttPayload)' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          grep -q 'fleetMqtt.setStream(mqttPayload)' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
+          ! grep -q 'setBufferSize(Config::MQTT_BUFFER_BYTES)\|setBufferSize(22528)' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'H2D_FLEET_REFRESH' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'BUZZER_PIN = 33' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
           grep -q 'updateBuzzerAlarm' iphone_red_camera_test/esp32_h2d_timelapse_ble/esp32_h2d_timelapse_ble.ino
@@ -503,7 +516,7 @@ jobs:
       - name: Tai firmware ESP32
         uses: actions/upload-artifact@v7
         with:
-          name: SE-Bambu-ESP32-v1.28.1
+          name: SE-Bambu-ESP32-v1.28.2
           path: ${{ runner.temp }}/SE-Bambu-ESP32/*
           if-no-files-found: error
           retention-days: 7

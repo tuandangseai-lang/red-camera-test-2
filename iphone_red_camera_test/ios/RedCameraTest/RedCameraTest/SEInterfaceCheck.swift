@@ -16,6 +16,9 @@ enum SEInterfaceCheck {
     static var isPaused: Bool {
         ProcessInfo.processInfo.arguments.contains("--se-interface-check-paused")
     }
+    static var showsControlFailure: Bool {
+        ProcessInfo.processInfo.arguments.contains("--se-interface-check-control-failure")
+    }
     static let profile = BambuPrinterProfile(
         profileID: "interface-check-h2d", kind: .h2d,
         ip: "192.0.2.1", serial: "094-INTERFACE-CHECK"

@@ -7,8 +7,10 @@
 #include <WiFiClientSecure.h>
 #include <mbedtls/base64.h>
 #include <memory>
+#include "SEMQTTPayloadStream.h"
+#include "SEMQTTStreamSelfTest.h"
 
-// SE Bambu Timelapse Bridge for classic ESP32 v1.28.1
+// SE Bambu Timelapse Bridge for classic ESP32 v1.28.2
 //
 // Bambu printer --Wi-Fi/MQTT TLS--> ESP32 --Bluetooth LE--> iPhone SE app
 //
@@ -45,10 +47,9 @@ constexpr uint16_t MQTT_CONNECT_BUFFER_BYTES = 1024;
 // Use the proven full receive buffer for every printer. P2S/A1 reports can
 // grow when a fault carries extra HMS data; a compact buffer silently dropped
 // exactly those packets and made fault detection look insensitive.
+// Store the unchanged JSON body once in static DRAM. PubSubClient's own
+// per-client allocation stays at 1 KB for MQTT headers and outgoing requests.
 constexpr uint16_t MQTT_BUFFER_BYTES = 24576;
-constexpr uint16_t MQTT_FALLBACK_BUFFER_BYTES = 23552;
-constexpr uint16_t FLEET_MQTT_BUFFER_BYTES = 24576;
-constexpr uint16_t FLEET_MQTT_FALLBACK_BUFFER_BYTES = 23552;
 constexpr uint32_t WIFI_RETRY_MS = 12000;
 // A printer profile switch keeps the Wi-Fi association alive and only
 // rebuilds MQTT.  A short retry interval makes an idle/offline target fail
@@ -224,6 +225,7 @@ PubSubClient mqtt(tlsClient);
 WiFiClientSecure fleetTls;
 WiFiClient fleetProbeClient;
 PubSubClient fleetMqtt(fleetTls);
+SEMQTTPayloadStream<Config::MQTT_BUFFER_BYTES> mqttPayload;
 FleetProfile fleetProfiles[FLEET_PRINTER_COUNT];
 FleetRuntime fleetRuntimes[FLEET_PRINTER_COUNT];
 int8_t selectedFleetIndex = -1;
@@ -1840,6 +1842,13 @@ void handleRemoteControlReport(const uint8_t *payload, size_t length) {
 }
 
 void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
+  if (mqttPayload.overflowed()) {
+    Serial.println("[MQTT] oversized status body rejected; retrying full status");
+    statusRequestPending = true;
+    return;
+  }
+  payload = mqttPayload.data();
+  length = static_cast<unsigned int>(mqttPayload.size());
   handleRemoteControlReport(payload, length);
   const bool firstStatusPacket = !statusDataSeen;
   lastMqttMessageAt = millis();
@@ -2214,6 +2223,12 @@ void processFleetMqttMessageForProfile(int8_t profileIndex, uint8_t *payload,
 }
 
 void onFleetMqtt(char *, uint8_t *payload, unsigned int length) {
+  if (mqttPayload.overflowed()) {
+    Serial.println("[FLEET] oversized status body rejected");
+    return;
+  }
+  payload = mqttPayload.data();
+  length = static_cast<unsigned int>(mqttPayload.size());
   processFleetMqttMessageForProfile(activeFleetProfileIndex, payload, length);
 }
 
@@ -2359,21 +2374,9 @@ bool startFleetMonitor(uint8_t slot) {
   activeFleetMonitorSlot = slot;
   activeFleetProfileIndex = profileIndex;
   activeFleetMonitorSince = millis();
-  // Subscribe and publish while the buffer is still small so TLS has enough
-  // contiguous heap for outgoing records. No incoming packet is processed
-  // until client.loop(), after the receive buffer is expanded below.
+  // The shared stream receives the full body, leaving TLS enough heap for
+  // outgoing records without growing either client's MQTT header buffer.
   publishFleetStatusRequest(slot);
-  if (!client.setBufferSize(Config::FLEET_MQTT_BUFFER_BYTES) &&
-      !client.setBufferSize(Config::FLEET_MQTT_FALLBACK_BUFFER_BYTES) &&
-      !client.setBufferSize(22528)) {
-    Serial.printf("[FLEET] %s cannot allocate full status buffer\n",
-                  profile.kind.c_str());
-    client.disconnect();
-    client.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
-    activeFleetMonitorSlot = -1;
-    activeFleetProfileIndex = -1;
-    return false;
-  }
   return true;
 }
 
@@ -2497,6 +2500,7 @@ void maintainFleetMonitors() {
 
   if (activeFleetMonitorSlot >= 0) {
     PubSubClient &client = fleetMqtt;
+    mqttPayload.reset();
     const bool sessionAlive = client.connected() && client.loop();
     if (sessionAlive && !fleetSampleReceived &&
         now - activeFleetMonitorSince < Config::FLEET_MONITOR_DWELL_MS) {
@@ -2560,21 +2564,6 @@ void maintainFleetMonitors() {
   }
 }
 
-bool expandSelectedMqttReceiveBuffer() {
-  if (mqtt.setBufferSize(Config::MQTT_BUFFER_BYTES)) return true;
-  if (mqtt.setBufferSize(Config::MQTT_FALLBACK_BUFFER_BYTES)) {
-    Serial.printf("[MQTT] using %u-byte fallback receive buffer\n",
-                  Config::MQTT_FALLBACK_BUFFER_BYTES);
-    return true;
-  }
-  if (mqtt.setBufferSize(22528)) {
-    Serial.println("[MQTT] using 22528-byte emergency receive buffer");
-    return true;
-  }
-  Serial.println("[MQTT] cannot allocate a safe selected-printer buffer");
-  return false;
-}
-
 void publishStatusRequest() {
   if (!mqttWasConnected) return;
   lastStatusRequestAt = millis();
@@ -2583,21 +2572,9 @@ void publishStatusRequest() {
                          ++sequenceId +
                          "\",\"command\":\"pushall\",\"version\":1,"
                          "\"push_target\":1}}";
-  // PubSubClient uses the same allocation for TX and RX. H2D needs a large RX
-  // packet, while mbedTLS needs free heap to encrypt TX. Send the tiny request
-  // with a tiny MQTT buffer, then grow it again before mqtt.loop() reads the
-  // printer response. Keeping the large buffer during write starved TLS and
-  // produced an endless CONNECTED -> CONNECTION_LOST cycle.
-  mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+  // RX is streamed into fixed storage. Keep the small MQTT header/TX buffer
+  // unchanged so a TLS write cannot strand the next receive behind realloc.
   const bool published = mqtt.publish(topic.c_str(), pushAll.c_str());
-  const bool receiveBufferReady = expandSelectedMqttReceiveBuffer();
-  if (!receiveBufferReady) {
-    reportStatus("BUFFER_ERROR");
-    mqtt.disconnect();
-    mqttWasConnected = false;
-    consecutiveStatusPublishFailures = 0;
-    return;
-  }
   if (!published) {
     ++consecutiveStatusPublishFailures;
     // A Bambu broker can accept SUBSCRIBE and need a short settling interval
@@ -2689,20 +2666,8 @@ void processRemoteControlQueue() {
   lastRemoteControlPublishAt = now;
 
   const String topic = "device/" + settings.printerSerial + "/request";
-  // Free the oversized RX allocation while mbedTLS encrypts the small QoS-1
-  // packet, then restore it before mqtt.loop() reads the printer response.
-  mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
+  // The fixed streaming RX body is independent of this small QoS-1 write.
   const bool published = publishSelectedPrinterQos1(topic, request.payload);
-  const bool receiveBufferReady = expandSelectedMqttReceiveBuffer();
-  if (!receiveBufferReady) {
-    popRemoteControl();
-    queuePhoneEvent(String("H2D,REMOTE_ERROR,") + request.action +
-                    ",ESP32 thiếu bộ nhớ nhận dữ liệu máy in");
-    reportStatus("BUFFER_ERROR");
-    mqtt.disconnect();
-    mqttWasConnected = false;
-    return;
-  }
 
   if (published) {
     popRemoteControl();
@@ -2910,7 +2875,7 @@ void maintainMqtt() {
 }
 
 void sendCurrentStatus() {
-  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.25.0");
+  queuePhoneEvent("H2D,ESP32,SE_BAMBU_ESP32_BRIDGE,1.28.2");
   reportHardwareControls();
   reportPrinterIdentity();
   syncSelectedFleetRuntime(true);
@@ -3830,7 +3795,11 @@ void setup() {
   fillLedStrip(ledColor(255, 190, 0));
   ledStrip.show();
   delay(250);
-  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.28.1");
+  Serial.println("\nSE Bambu Timelapse Bridge ESP32 v1.28.2");
+  Serial.printf("[MQTT] fixed streaming body: %u bytes; header: %u bytes\n",
+                Config::MQTT_BUFFER_BYTES, Config::MQTT_CONNECT_BUFFER_BYTES);
+  Serial.printf("[MQTT] streaming payload self-test: %s\n",
+                verifyMQTTPayloadStream(mqttPayload) ? "PASS" : "FAIL");
   pinMode(Config::HOLD_BUTTON_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TIMELAPSE_PIN, INPUT_PULLUP);
   pinMode(Config::MODE_TORCH_PIN, INPUT_PULLUP);
@@ -3853,10 +3822,12 @@ void setup() {
   fleetTls.setHandshakeTimeout(Config::FLEET_TLS_HANDSHAKE_TIMEOUT_SECONDS);
   mqtt.setServer(settings.printerIp.c_str(), Config::MQTT_PORT);
   mqtt.setCallback(onMqttMessage);
+  mqtt.setStream(mqttPayload);
   mqtt.setKeepAlive(Config::MQTT_KEEPALIVE_SECONDS);
   mqtt.setSocketTimeout(2);
   mqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
   fleetMqtt.setCallback(onFleetMqtt);
+  fleetMqtt.setStream(mqttPayload);
   fleetMqtt.setKeepAlive(60);
   fleetMqtt.setSocketTimeout(2);
   fleetMqtt.setBufferSize(Config::MQTT_CONNECT_BUFFER_BYTES);
@@ -3883,6 +3854,7 @@ void loop() {
   maintainMqtt();
   if (mqttWasConnected && !fleetPrimaryPaused && !fleetRefreshInProgress &&
       activeFleetMonitorSlot < 0) {
+    mqttPayload.reset();
     const bool mqttLoopOk = mqtt.loop();
     // PubSubClient changes its state to MQTT_CONNECTION_LOST when available()
     // detects a remote close. Use state(), not another TLS connected() probe;

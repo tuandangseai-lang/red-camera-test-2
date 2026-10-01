@@ -111,6 +111,9 @@ struct PrinterRemoteControlView: View {
                 printerPromptCard(prompt)
             }
             quickActions
+            if directControl.isPending || directControl.lastSucceeded != nil {
+                controlFeedback
+            }
             filamentControls
             if directControl.snapshot.hasAMS {
                 amsControls
@@ -192,6 +195,21 @@ struct PrinterRemoteControlView: View {
                 languageCode: languageCode
             )))
         }
+    }
+
+    private var controlFeedback: some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: directControl.isPending ? "clock" :
+                (directControl.lastSucceeded == true ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"))
+                .foregroundStyle(directControl.lastSucceeded == true ? green : amber)
+            Text(localized(directControl.statusText))
+                .font(.system(size: compactLayout ? 11 : 12))
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("se.control.feedback")
+            Spacer(minLength: 0)
+        }
+        .padding(9)
+        .background(subduedSurfaceColor, in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var controlHeader: some View {

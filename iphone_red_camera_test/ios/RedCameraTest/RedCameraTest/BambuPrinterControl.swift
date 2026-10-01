@@ -147,14 +147,23 @@ final class BambuPrinterControlManager: ObservableObject {
 
     private struct PendingCommand {
         let sequence: String
+        let section: String
         let mqttCommand: String
         let actionName: String
+        let packetID: UInt16
+        let expectsPrintState: Bool
+        let initialPrintState: String
+        let jobID: String
+        let subtaskID: String
+        var accepted = false
         let onSuccess: (() -> Void)?
     }
 
     private let queue = DispatchQueue(label: "vn.se.bambu-printer-control", qos: .userInitiated)
     private var configuration: Configuration?
     private var connection: NWConnection?
+    private var mqttReady = false
+    private var subscriptionPacketID: UInt16?
     private var receiveBuffer = Data()
     private var generation = 0
     private var packetID: UInt16 = 10
@@ -175,6 +184,10 @@ final class BambuPrinterControlManager: ObservableObject {
         if SEInterfaceCheck.isEnabled {
             snapshot = SEInterfaceCheck.snapshot
             isReady = true
+            if SEInterfaceCheck.showsControlFailure {
+                lastSucceeded = false
+                statusText = "Máy in chặn lệnh • bật LAN Mode > Developer Mode"
+            }
             return
         }
 #endif
@@ -186,7 +199,10 @@ final class BambuPrinterControlManager: ObservableObject {
             isDualNozzle: profile.kind == .h2d
         )
         guard !next.host.isEmpty, !next.serial.isEmpty, !next.accessCode.isEmpty else {
-            publishFailure("Thiếu IP, serial hoặc Access Code của máy in")
+            queue.async { [weak self] in
+                self?.close(clearConfiguration: true)
+                self?.publishFailure("Thiếu IP, serial hoặc Access Code của máy in")
+            }
             return
         }
         queue.async { [weak self] in
@@ -617,7 +633,7 @@ final class BambuPrinterControlManager: ObservableObject {
         connection.start(queue: queue)
 
         queue.asyncAfter(deadline: .now() + 10) { [weak self] in
-            guard let self, self.generation == activeGeneration, !self.isReady else { return }
+            guard let self, self.generation == activeGeneration, !self.mqttReady else { return }
             self.failConnection("MQTT LAN không phản hồi • kiểm tra Developer Mode")
         }
     }
@@ -630,6 +646,8 @@ final class BambuPrinterControlManager: ObservableObject {
         connection?.cancel()
         connection = nil
         receiveBuffer.removeAll(keepingCapacity: false)
+        mqttReady = false
+        subscriptionPacketID = nil
         pending = nil
         if clearConfiguration { configuration = nil }
         publishReady(false, text: clearConfiguration ? "Điều khiển máy in đã đóng" : "Đang kết nối lại…")
@@ -695,8 +713,16 @@ final class BambuPrinterControlManager: ObservableObject {
         case 3: // PUBLISH
             handlePublish(header: header, body: body)
         case 4: // PUBACK
-            publishWaitingForPrinter()
+            if body.count == 2, body.uint16BE(at: 0) == pending?.packetID {
+                publishWaitingForPrinter()
+            }
         case 9: // SUBACK
+            guard body.count == 3, body.uint16BE(at: 0) == subscriptionPacketID,
+                  body[body.index(body.startIndex, offsetBy: 2)] <= 2 else {
+                failConnection("Máy in từ chối đăng ký kênh phản hồi MQTT")
+                return
+            }
+            mqttReady = true
             publishReady(true, text: "Đã kết nối trực tiếp • sẵn sàng gửi lệnh")
             startPingTimer()
             requestPushAll()
@@ -710,6 +736,10 @@ final class BambuPrinterControlManager: ObservableObject {
         let topicLength = Int(body.uint16BE(at: 0))
         var payloadOffset = 2 + topicLength
         guard payloadOffset <= body.count else { return }
+        let topicStart = body.index(body.startIndex, offsetBy: 2)
+        let topicEnd = body.index(topicStart, offsetBy: topicLength)
+        guard let configuration,
+              String(data: body[topicStart..<topicEnd], encoding: .utf8) == "device/\(configuration.serial)/report" else { return }
         let qos = (header >> 1) & 0x03
         if qos > 0 {
             guard payloadOffset + 2 <= body.count else { return }
@@ -724,11 +754,12 @@ final class BambuPrinterControlManager: ObservableObject {
 
     private func handleReport(_ root: [String: Any]) {
         if let print = root["print"] as? [String: Any] {
-            confirmPendingIfMatched(section: print)
+            confirmPendingIfMatched(section: print, sectionName: "print")
             updateSnapshot(from: print)
+            confirmPendingPrintState(from: print)
         }
         if let system = root["system"] as? [String: Any] {
-            confirmPendingIfMatched(section: system)
+            confirmPendingIfMatched(section: system, sectionName: "system")
         }
     }
 
@@ -1204,27 +1235,27 @@ final class BambuPrinterControlManager: ObservableObject {
         return fields
     }
 
-    private func confirmPendingIfMatched(section: [String: Any]) {
-        guard let pending else { return }
-        let sequence = String(describing: section["sequence_id"] ?? "")
-        let command = (section["command"] as? String) ?? ""
-        guard sequence == pending.sequence, command == pending.mqttCommand else { return }
-        if let result = section["result"] as? String {
-            let normalized = result.lowercased()
-            if normalized == "success" || normalized == "ok" {
-                completePending(success: true, detail: "Máy in đã xác nhận: \(pending.actionName)")
-            } else {
-                let reason = (section["reason"] as? String) ?? result
-                completePending(success: false, detail: humanReadablePrinterError(reason))
-            }
-        } else if let result = section["result"] as? NSNumber {
-            completePending(
-                success: result.intValue == 0,
-                detail: result.intValue == 0
-                    ? "Máy in đã xác nhận: \(pending.actionName)"
-                    : "Máy in từ chối lệnh (mã \(result.intValue))"
-            )
+    private func confirmPendingIfMatched(section: [String: Any], sectionName: String) {
+        guard let pending, pending.section == sectionName,
+              let reply = BambuControlProtocol.reply(section, sequence: pending.sequence, command: pending.mqttCommand) else { return }
+        if !reply.succeeded {
+            completePending(success: false, detail: humanReadablePrinterError(reply.reason ?? "unknown"))
+        } else if pending.expectsPrintState {
+            self.pending?.accepted = true
+            publishPending("Máy in đã nhận lệnh • chờ đổi trạng thái…")
+            requestPushAll()
+        } else {
+            completePending(success: true, detail: "Máy in đã xác nhận: \(pending.actionName)")
         }
+    }
+
+    private func confirmPendingPrintState(from report: [String: Any]) {
+        guard let pending, pending.expectsPrintState,
+              BambuControlProtocol.confirmsPrintState(
+                command: pending.mqttCommand, initialState: pending.initialPrintState,
+                report: report, jobID: pending.jobID, subtaskID: pending.subtaskID
+              ) else { return }
+        completePending(success: true, detail: "Máy in đã đổi trạng thái: \(pending.actionName)")
     }
 
     private func send(
@@ -1235,17 +1266,23 @@ final class BambuPrinterControlManager: ObservableObject {
         onSuccess: (() -> Void)? = nil
     ) {
         queue.async { [weak self] in
-            guard let self, let configuration = self.configuration, self.connection != nil else {
+            guard let self, let configuration = self.configuration, self.connection != nil, self.mqttReady else {
                 self?.publishFailure("Chưa kết nối được kênh điều khiển trực tiếp")
                 return
             }
             guard self.pending == nil else {
-                self.publishFailure("Hãy chờ lệnh trước được máy in xác nhận")
+                self.publishPending("Hãy chờ lệnh trước được máy in xác nhận")
+                return
+            }
+            let taskControl = section == "print" && ["pause", "resume", "stop"].contains(command) && fields["err"] == nil
+            if taskControl, !(self.snapshotStorage.isRecent && self.snapshotStorage.hasActivePrintJob) {
+                self.publishFailure("Không có bản in đang hoạt động hoặc trạng thái máy đã cũ")
+                self.requestPushAll()
                 return
             }
             self.sequenceNumber &+= 1
             let sequence = String(self.sequenceNumber)
-            var commandBody = fields
+            var commandBody = BambuControlProtocol.commandFields(section: section, command: command, fields: fields)
             commandBody["sequence_id"] = sequence
             commandBody["command"] = command
             let root: [String: Any] = [section: commandBody]
@@ -1254,25 +1291,36 @@ final class BambuPrinterControlManager: ObservableObject {
                 self.publishFailure("Không tạo được gói lệnh MQTT")
                 return
             }
+            let packet = self.publishPacket(
+                topic: "device/\(configuration.serial)/request", payload: json, qos1: true
+            )
             self.pending = PendingCommand(
                 sequence: sequence,
+                section: section,
                 mqttCommand: command,
                 actionName: actionName,
+                packetID: self.packetID,
+                expectsPrintState: taskControl,
+                initialPrintState: self.snapshotStorage.printState,
+                jobID: self.snapshotStorage.jobID,
+                subtaskID: self.snapshotStorage.subtaskID,
                 onSuccess: onSuccess
             )
             self.publishPending("Đang gửi trực tiếp: \(actionName)…")
-            self.sendPacket(self.publishPacket(
-                topic: "device/\(configuration.serial)/request",
-                payload: json,
-                qos1: true
-            ))
+            self.sendPacket(packet)
             let activeGeneration = self.generation
+            self.queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, self.generation == activeGeneration,
+                      self.pending?.sequence == sequence else { return }
+                self.requestPushAll() // Refresh telemetry; never replay a control command.
+            }
             self.queue.asyncAfter(deadline: .now() + 12) { [weak self] in
                 guard let self, self.generation == activeGeneration,
                       self.pending?.sequence == sequence else { return }
-                self.pending = nil
-                self.publishFailure(
-                    "Máy in không xác nhận lệnh • bật LAN Mode và Developer Mode"
+                let accepted = self.pending?.accepted == true
+                self.completePending(success: false, detail: accepted
+                    ? "Máy in đã nhận lệnh nhưng chưa đổi trạng thái • kiểm tra trên máy in"
+                    : "Máy in không xác nhận lệnh • kiểm tra kết nối và LAN Developer Mode"
                 )
             }
         }
@@ -1322,9 +1370,11 @@ final class BambuPrinterControlManager: ObservableObject {
     }
 
     private func sendPacket(_ data: Data) {
+        let activeGeneration = generation
         connection?.send(content: data, completion: .contentProcessed { [weak self] error in
+            guard let self, self.generation == activeGeneration else { return }
             if let error {
-                self?.failConnection("Không gửi được MQTT (\(error.localizedDescription))")
+                self.failConnection("Không gửi được MQTT (\(error.localizedDescription))")
             }
         })
     }
@@ -1349,6 +1399,7 @@ final class BambuPrinterControlManager: ObservableObject {
 
     private func subscribePacket(topic: String) -> Data {
         let id = nextPacketID()
+        subscriptionPacketID = id
         var body = Data([UInt8(id >> 8), UInt8(id & 0xFF)])
         body.appendMQTTString(topic)
         body.append(0x00)
@@ -1392,8 +1443,13 @@ final class BambuPrinterControlManager: ObservableObject {
     }
 
     private func failConnection(_ text: String) {
+        generation &+= 1 // Invalidate old receive/send callbacks and pending timeouts.
+        connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
+        mqttReady = false
+        subscriptionPacketID = nil
+        receiveBuffer.removeAll(keepingCapacity: false)
         pingTimer?.cancel()
         pingTimer = nil
         pending = nil
@@ -1418,6 +1474,7 @@ final class BambuPrinterControlManager: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.isReady = ready
             self?.isPending = false
+            if ready { self?.lastSucceeded = nil }
             self?.statusText = text
         }
     }
@@ -1438,9 +1495,10 @@ final class BambuPrinterControlManager: ObservableObject {
     }
 
     private func publishFailure(_ text: String) {
+        let ready = mqttReady
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.isReady = self.connection != nil
+            self.isReady = ready
             self.isPending = false
             self.lastSucceeded = false
             self.statusText = text

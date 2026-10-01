@@ -43,6 +43,12 @@ enum SEStatusCopy {
         // Embedded printer-control panel. These values are assembled at
         // runtime, so Localizable.strings cannot translate them by itself.
         ("Đang chuẩn bị điều khiển trực tiếp", "Preparing direct controls"),
+        ("Máy in đã nhận lệnh nhưng chưa đổi trạng thái • kiểm tra trên máy in", "Printer accepted the command but has not changed state • check the printer"),
+        ("Máy in không xác nhận lệnh • kiểm tra kết nối và LAN Developer Mode", "Printer did not confirm the command • check the connection and LAN Developer Mode"),
+        ("Máy in đã nhận lệnh • chờ đổi trạng thái", "Printer accepted the command • waiting for a state change"),
+        ("Máy in đã đổi trạng thái:", "Printer changed state:"),
+        ("Không có bản in đang hoạt động hoặc trạng thái máy đã cũ", "No active print or printer status is stale"),
+        ("Máy in từ chối đăng ký kênh phản hồi MQTT", "Printer rejected the MQTT response subscription"),
         ("Đang kết nối MQTT trực tiếp tới máy in", "Connecting directly to printer MQTT"),
         ("Đã kết nối trực tiếp • sẵn sàng gửi lệnh", "Direct connection ready • commands available"),
         ("Kết nối lại điều khiển máy in", "Reconnect printer controls"),
