@@ -1248,7 +1248,7 @@ struct H2DTimelapseView: View {
                     SecureField("Nhập mật khẩu Wi-Fi", text: $wifiPassword)
 
                     configurationLabel("IP của \(printerName)")
-                    TextField("Ví dụ: 192.168.100.210", text: $printerIP)
+                    TextField("Ví dụ: 192.0.2.1", text: $printerIP)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.numbersAndPunctuation)

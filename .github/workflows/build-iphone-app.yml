@@ -7,6 +7,14 @@ on:
         description: Build pinned ESP32 handover firmware only
         type: boolean
         default: false
+      app_only:
+        description: Build app only, reuse the pinned firmware artifact
+        type: boolean
+        default: false
+      skip_interface_checks:
+        description: Skip repeated UI tests for documentation-only string cleanup
+        type: boolean
+        default: false
   push:
     branches:
       - main
@@ -352,6 +360,7 @@ jobs:
           retention-days: 7
 
       - name: Kiem tra va chup giao dien iPhone Simulator
+        if: ${{ inputs.skip_interface_checks != true }}
         working-directory: iphone_red_camera_test/ios/RedCameraTest
         run: |
           set -euo pipefail
@@ -392,6 +401,7 @@ jobs:
           retention-days: 7
 
   build-h2d-esp32:
+    if: ${{ inputs.app_only != true }}
     name: Build ESP32 Bambu Bridge
     runs-on: ubuntu-latest
     timeout-minutes: 20
