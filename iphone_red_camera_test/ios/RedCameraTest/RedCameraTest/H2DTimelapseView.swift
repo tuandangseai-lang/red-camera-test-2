@@ -6,7 +6,8 @@ struct H2DTimelapseView: View {
     @ObservedObject var bluetooth: H2DBLEManager
     @ObservedObject var timelapse: H2DTimelapseManager
     @StateObject private var printerAlarm = PrinterAlarmPlayer()
-    @StateObject private var printerCamera = BambuPrinterCameraManager()
+    // The camera card owns observation; status changes do not redraw all controls.
+    @State private var printerCamera = BambuPrinterCameraManager()
     @StateObject private var directControl = BambuPrinterControlManager()
     @Environment(\.scenePhase) private var scenePhase
 
@@ -431,6 +432,14 @@ struct H2DTimelapseView: View {
             timelapse.didStoreFrame = { layer, success in
                 bluetooth.acknowledgeH2DFrame(layer: layer, success: success)
             }
+#if targetEnvironment(simulator)
+            if SEInterfaceCheck.isEnabled {
+                bluetooth.applyInterfaceCheck()
+                startDirectPrinterTelemetry()
+                timelapse.applyInterfaceCheck()
+                return
+            }
+#endif
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 timelapse.stopPreview()
                 refreshPrinterCamera()
@@ -585,6 +594,7 @@ struct H2DTimelapseView: View {
     /// Keep the screen edge quiet during normal use. It is reserved for a
     /// confirmed printer fault. Keep the red edge steady: rapid opacity
     /// animation looked like the whole iPhone screen was juddering.
+    @ViewBuilder
     private var screenEdgeLEDStrip: some View {
         // The full-screen edge is reserved for a confirmed printer fault.
         // Transient MQTT/bridge retries remain visible in the compact Island,
@@ -592,19 +602,20 @@ struct H2DTimelapseView: View {
         let shouldShowEdge = bluetooth.hasSelectedCriticalPrinterAlert ||
             directCriticalAlert || hasManualFilamentAction
 
-        return ScreenEdgeLEDStrip(
-            color: .red,
-            progress: nil,
-            remainingSeconds: nil,
-            blinks: false,
-            breathingPeriod: nil,
-            minimumOpacity: 1.0,
-            maximumOpacity: 1.0,
-            preservesProgressWhenHidden: false
-        )
-        .opacity(shouldShowEdge ? 1 : 0)
-        .padding(.horizontal, 4)
-        .padding(.vertical, 6)
+        if shouldShowEdge {
+            ScreenEdgeLEDStrip(
+                color: .red,
+                progress: nil,
+                remainingSeconds: nil,
+                blinks: false,
+                breathingPeriod: nil,
+                minimumOpacity: 1.0,
+                maximumOpacity: 1.0,
+                preservesProgressWhenHidden: false
+            )
+            .padding(.horizontal, 4)
+            .padding(.vertical, 6)
+        }
     }
 
     private var printerProgress: Double {
@@ -706,7 +717,10 @@ struct H2DTimelapseView: View {
                     .padding(.horizontal, 24)
                     .padding(.top, 6)
                     .padding(.bottom, 10)
-                    .background(.ultraThinMaterial)
+                    .background(Color(red: 0.955, green: 0.958, blue: 0.962).opacity(0.98))
+                    .overlay(alignment: .bottom) {
+                        Rectangle().fill(Color.primary.opacity(0.045)).frame(height: 0.5)
+                    }
                     .zIndex(1)
 
                 ScrollView {
@@ -810,7 +824,7 @@ struct H2DTimelapseView: View {
 
     private func printerDashboardSummary(darkMode: Bool = false, compact: Bool = false) -> some View {
         let scale: CGFloat = compact ? 0.80 : 1
-        return VStack(spacing: 22 * scale) {
+        return VStack(spacing: 18 * scale) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(localizedStatus("Trạng thái bản in"))
@@ -836,6 +850,7 @@ struct H2DTimelapseView: View {
 
             ZStack {
                 LivePrintProgressRing(progress: printerProgress, darkMode: darkMode)
+                    .equatable()
 
                 VStack(spacing: 5) {
                     Text("\(displayedPrintPercent)%")
@@ -850,6 +865,11 @@ struct H2DTimelapseView: View {
             .frame(width: 230 * scale, height: 230 * scale)
 
             dashboardMetrics(compact: compact)
+                .padding(.vertical, 10 * scale)
+                .background(
+                    darkMode ? Color.white.opacity(0.035) : Color(red: 0.955, green: 0.969, blue: 0.966),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                )
 
             if bluetooth.hasSelectedCriticalPrinterAlert && !bluetooth.printerAlertText.isEmpty {
                 Label(localizedStatus(bluetooth.printerAlertText), systemImage: "exclamationmark.triangle.fill")
@@ -870,6 +890,7 @@ struct H2DTimelapseView: View {
             }
         }
         .cardStyle(dark: darkMode, compact: compact)
+        .accessibilityIdentifier("se.print-status")
     }
 
     @ViewBuilder
@@ -1008,11 +1029,15 @@ struct H2DTimelapseView: View {
             return nil
         }()
         guard let minutes else { return "—" }
+        return Self.finishTimeFormatter.string(from: Date().addingTimeInterval(TimeInterval(minutes * 60)))
+    }
+
+    private static let finishTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "HH:mm"
-        return formatter.string(from: Date().addingTimeInterval(TimeInterval(minutes * 60)))
-    }
+        return formatter
+    }()
 
     private func applyDashboardTemperature(_ value: Int, to target: DashboardTemperatureTarget) {
         switch target {
@@ -1028,92 +1053,13 @@ struct H2DTimelapseView: View {
     }
 
     private var printerCameraCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Text(localizedStatus("Camera máy in"))
-                    .font(.system(size: 16, weight: .semibold))
-                Spacer()
-                Button {
-                    printerCameraEnabled.toggle()
-                } label: {
-                    Image(systemName: printerCameraEnabled ? "video.slash.fill" : "video.fill")
-                        .frame(width: 30, height: 30)
-                }
-                .buttonStyle(CinemaIconButtonStyle(
-                    tint: printerCameraEnabled ? .white.opacity(0.68) : cinemaCyan
-                ))
-                .disabled(selectedProfile == nil || accessCode.isEmpty)
-            }
-
-            printerCameraViewport
-                .frame(maxWidth: .infinity)
-                .aspectRatio(2.05, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
-                }
-
-        }
-        .cardStyle()
-    }
-
-    private var printerCameraViewport: some View {
-        ZStack {
-            LinearGradient(
-                colors: [.black, Color(red: 0.025, green: 0.075, blue: 0.09)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            if printerCameraEnabled, printerCamera.isStreaming {
-                PrinterCameraFrameLayer(store: printerCamera.frameStore)
-            } else {
-                VStack(spacing: 9) {
-                    if printerCameraEnabled && printerCamera.isConnecting {
-                        ProgressView()
-                            .tint(cinemaAmber)
-                    } else {
-                        Image(systemName: printerCameraEnabled ? "video.fill" : "video.slash")
-                            .font(.system(size: 24, weight: .semibold))
-                            .foregroundStyle(printerCameraEnabled ? cinemaAmber : .white.opacity(0.28))
-                    }
-                    Text(localizedStatus(
-                        printerCameraEnabled
-                            ? printerCamera.statusText
-                            : "Chạm nút camera để xem máy in trực tiếp"
-                    ))
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.60))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 18)
-
-                    if printerCameraEnabled && !printerCamera.isConnecting && !printerCamera.isStreaming {
-                        Button("Thử lại") {
-                            printerCamera.retryNow()
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(cinemaCyan)
-                    }
-                }
-            }
-
-            if printerCamera.isStreaming {
-                VStack {
-                    HStack {
-                        Spacer()
-                        Text(localizedStatus("Trực tiếp"))
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 8)
-                            .frame(height: 24)
-                            .background(.red.opacity(0.86), in: Capsule())
-                    }
-                    Spacer()
-                }
-                .padding(10)
-            }
-        }
+        PrinterCameraCardView(
+            camera: printerCamera,
+            enabled: $printerCameraEnabled,
+            canEnable: selectedProfile != nil && !accessCode.isEmpty,
+            languageCode: appLanguageCode
+        )
+        .accessibilityIdentifier("se.printer-camera")
     }
 
     private var isFlashArtworkActive: Bool {
@@ -2450,6 +2396,109 @@ struct H2DTimelapseView: View {
     }
 }
 
+/// Camera state is observed here; frames are observed one level lower.
+private struct PrinterCameraCardView: View {
+    @ObservedObject var camera: BambuPrinterCameraManager
+    @Binding var enabled: Bool
+    let canEnable: Bool
+    let languageCode: String
+    private let cinemaCyan = Color(red: 0.12, green: 0.48, blue: 0.46)
+    private let cinemaAmber = Color(red: 0.91, green: 0.48, blue: 0.14)
+
+    private func localizedStatus(_ source: String) -> String {
+        SEStatusCopy.render(source, languageCode: languageCode)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Text(localizedStatus("Camera máy in"))
+                    .font(.system(size: 16, weight: .semibold))
+                Spacer()
+                Button {
+                    enabled.toggle()
+                } label: {
+                    Image(systemName: enabled ? "video.slash.fill" : "video.fill")
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(CinemaIconButtonStyle(
+                    tint: cinemaCyan
+                ))
+                .disabled(!canEnable)
+            }
+
+            viewport
+                .frame(maxWidth: .infinity)
+                .aspectRatio(2.05, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                }
+
+        }
+        .cardStyle()
+    }
+
+    private var viewport: some View {
+        ZStack {
+            LinearGradient(
+                colors: [.black, Color(red: 0.025, green: 0.075, blue: 0.09)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            if enabled, camera.isStreaming {
+                PrinterCameraFrameLayer(store: camera.frameStore)
+            } else {
+                VStack(spacing: 9) {
+                    if enabled && camera.isConnecting {
+                        ProgressView()
+                            .tint(cinemaAmber)
+                    } else {
+                        Image(systemName: enabled ? "video.fill" : "video.slash")
+                            .font(.system(size: 24, weight: .semibold))
+                            .foregroundStyle(enabled ? cinemaAmber : .white.opacity(0.28))
+                    }
+                    Text(localizedStatus(
+                        enabled
+                            ? camera.statusText
+                            : "Chạm nút camera để xem máy in trực tiếp"
+                    ))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.60))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 18)
+
+                    if enabled && !camera.isConnecting && !camera.isStreaming {
+                        Button(localizedStatus("Thử lại")) {
+                            camera.retryNow()
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(cinemaCyan)
+                    }
+                }
+            }
+
+            if camera.isStreaming {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Text(localizedStatus("Trực tiếp"))
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .frame(height: 24)
+                            .background(.red.opacity(0.86), in: Capsule())
+                    }
+                    Spacer()
+                }
+                .padding(10)
+            }
+        }
+    }
+}
+
 /// Isolates high-frequency live-view updates from H2DTimelapseView. A CALayer
 /// swaps camera frames without rebuilding SwiftUI's image/layout hierarchy.
 private struct PrinterCameraFrameLayer: UIViewRepresentable {
@@ -2484,7 +2533,10 @@ private final class PrinterCameraFrameView: UIView {
     }
 
     func display(_ frame: CGImage?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         layer.contents = frame
+        CATransaction.commit()
     }
 }
 
@@ -2538,7 +2590,7 @@ private struct PrinterActivityDot: View {
 private extension View {
     func cardStyle(dark: Bool = false, compact: Bool = false) -> some View {
         let padding: CGFloat = compact ? 13 : 16
-        let radius: CGFloat = compact ? 14 : 16
+        let radius: CGFloat = compact ? 18 : 20
         return self
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2549,13 +2601,13 @@ private extension View {
             .overlay {
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .stroke(
-                        dark ? Color.white.opacity(0.10) : Color.black.opacity(0.07),
+                        dark ? Color.white.opacity(0.10) : Color(red: 0.02, green: 0.43, blue: 0.40).opacity(0.09),
                         lineWidth: 1
                     )
             }
             .shadow(
-                color: dark ? .clear : Color.black.opacity(0.045),
-                radius: dark ? 0 : 8,
+                color: dark ? .clear : Color.black.opacity(0.035),
+                radius: dark ? 0 : 4,
                 x: 0,
                 y: dark ? 0 : 3
             )
@@ -2954,7 +3006,7 @@ private struct DashboardTemperatureEditorSheet: View {
     }
 }
 
-private struct LivePrintProgressRing: View {
+private struct LivePrintProgressRing: View, Equatable {
     let progress: Double
     var darkMode = false
 
@@ -2967,40 +3019,37 @@ private struct LivePrintProgressRing: View {
     private let green = Color(red: 0.16, green: 0.93, blue: 0.40)
 
     var body: some View {
-        GeometryReader { _ in
-            ZStack {
-                Circle()
-                    .stroke(
-                        darkMode ? Color.white.opacity(0.10) : Color.black.opacity(0.07),
-                        style: StrokeStyle(lineWidth: 9, lineCap: .round, lineJoin: .round)
-                    )
+        ZStack {
+            Circle()
+                .stroke(
+                    darkMode ? Color.white.opacity(0.10) : Color.black.opacity(0.07),
+                    style: StrokeStyle(lineWidth: 9, lineCap: .round, lineJoin: .round)
+                )
 
-                if clampedProgress > 0 {
-                    Circle()
-                        .trim(from: 0, to: clampedProgress)
-                        .stroke(
-                            AngularGradient(
-                                gradient: Gradient(stops: [
-                                    .init(color: cyan, location: 0.00),
-                                    .init(color: green, location: 0.055),
-                                    .init(color: green, location: 0.24),
-                                    .init(color: cyan, location: 0.58),
-                                    .init(color: blue, location: 0.90),
-                                    .init(color: cyan, location: 1.00)
-                                ]),
-                                center: .center,
-                                startAngle: .degrees(0),
-                                endAngle: .degrees(360)
-                            ),
-                            style: StrokeStyle(lineWidth: 11, lineCap: .round, lineJoin: .round)
-                        )
-                        .rotationEffect(.degrees(-90))
-                }
+            if clampedProgress > 0 {
+                Circle()
+                    .trim(from: 0, to: clampedProgress)
+                    .stroke(
+                        AngularGradient(
+                            gradient: Gradient(stops: [
+                                .init(color: cyan, location: 0.00),
+                                .init(color: green, location: 0.055),
+                                .init(color: green, location: 0.24),
+                                .init(color: cyan, location: 0.58),
+                                .init(color: blue, location: 0.90),
+                                .init(color: cyan, location: 1.00)
+                            ]),
+                            center: .center,
+                            startAngle: .degrees(0),
+                            endAngle: .degrees(360)
+                        ),
+                        style: StrokeStyle(lineWidth: 11, lineCap: .round, lineJoin: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
             }
-            .padding(8)
-            .drawingGroup(opaque: false, colorMode: .linear)
-            .animation(.easeInOut(duration: 0.55), value: clampedProgress)
         }
+        .padding(8)
+        .animation(.easeInOut(duration: 0.55), value: clampedProgress)
         .accessibilityHidden(true)
     }
 }

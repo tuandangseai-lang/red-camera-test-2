@@ -156,9 +156,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
         // Once the switch is complete, a fleet packet can refresh the compact
         // selected-printer card while its detailed telemetry is arriving.
         if status.hasActivePrintJob {
-            h2dPrintState = status.printState
-            h2dPrintPercent = min(100, max(0, status.printPercent))
-            h2dBridgeStatus = "\(kind.rawValue) đang in • \(h2dPrintPercent)%"
+            updateIfChanged(status.printState, \.h2dPrintState)
+            updateIfChanged(min(100, max(0, status.printPercent)), \.h2dPrintPercent)
+            updateIfChanged("\(kind.rawValue) đang in • \(h2dPrintPercent)%", \.h2dBridgeStatus)
         }
     }
 
@@ -401,8 +401,35 @@ final class H2DBLEManager: NSObject, ObservableObject {
 
     override init() {
         super.init()
+#if targetEnvironment(simulator)
+        if SEInterfaceCheck.isEnabled { return }
+#endif
         central = CBCentralManager(delegate: self, queue: .main)
     }
+
+#if targetEnvironment(simulator)
+    func applyInterfaceCheck() {
+        isConnected = true
+        isH2DBridge = true
+        isH2DReady = true
+        printerModelCode = "H2D"
+        printerSerial = SEInterfaceCheck.profile.serial
+        h2dPrintState = "RUNNING"
+        h2dPrintPercent = 38
+        h2dCurrentLayer = 91
+        h2dTotalLayers = 242
+        h2dStageCode = 0
+        h2dRemainingMinutes = 72
+        h2dBridgeStatus = "H2D đang in • 38%"
+        nozzleTemperature = 250
+        nozzleTargetTemperature = 250
+        leftNozzleTemperature = 215
+        leftNozzleTargetTemperature = 220
+        bedTemperature = 58
+        bedTargetTemperature = 60
+        filamentType = "PETG"
+    }
+#endif
 
     func configureH2DBridge(
         wifiSSID: String,
@@ -806,6 +833,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
     }
 
     func suspendForBackground() {
+#if targetEnvironment(simulator)
+        if SEInterfaceCheck.isEnabled { return }
+#endif
         lifecycleActive = false
         reconnectWorkItem?.cancel()
         cancelStatusRefreshes()
@@ -815,6 +845,9 @@ final class H2DBLEManager: NSObject, ObservableObject {
     }
 
     func resumeFromForeground() {
+#if targetEnvironment(simulator)
+        if SEInterfaceCheck.isEnabled { return }
+#endif
         lifecycleActive = true
         if bridgePeripheral?.state != .connected { startScanning() }
     }
@@ -957,7 +990,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
     private func confirmH2DReady() {
         mqttLossWorkItem?.cancel()
         mqttLossWorkItem = nil
-        isH2DReady = true
+        updateIfChanged(true, \.isH2DReady)
     }
 
     private func cancelPrinterSwitchTimeout() {
@@ -1169,7 +1202,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 printPercent: min(100, max(0, Int(fields[8]) ?? 0)),
                 printErrorCode: fields.count >= 10 ? (UInt32(fields[9]) ?? 0) : 0
             )
-            fleetStatuses[kind] = status
+            if fleetStatuses[kind] != status { fleetStatuses[kind] = status }
             applyCachedFleetStatus(status, for: kind)
         case "FLEET_SLOT":
             guard fields.count >= 12,
@@ -1190,19 +1223,19 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 printPercent: min(100, max(0, Int(fields[9]) ?? 0)),
                 printErrorCode: UInt32(fields[10]) ?? 0
             )
-            profileFleetStatuses[profile.id] = status
+            if profileFleetStatuses[profile.id] != status { profileFleetStatuses[profile.id] = status }
             // Retain the old per-model summary for compatibility with the
             // compact telemetry code, but never let another printer of the
             // same model overwrite the selected profile's primary state.
             if normalizeSerial(profile.serial) == normalizeSerial(printerSerial) ||
                 fleetStatuses[kind] == nil {
-                fleetStatuses[kind] = status
+                if fleetStatuses[kind] != status { fleetStatuses[kind] = status }
             }
             if normalizeSerial(profile.serial) == normalizeSerial(printerSerial),
                status.hasActivePrintJob, !isSwitchingPrinter {
-                h2dPrintState = status.printState
-                h2dPrintPercent = status.printPercent
-                h2dBridgeStatus = "\(profile.displayName) đang in • \(status.printPercent)%"
+                updateIfChanged(status.printState, \.h2dPrintState)
+                updateIfChanged(status.printPercent, \.h2dPrintPercent)
+                updateIfChanged("\(profile.displayName) đang in • \(status.printPercent)%", \.h2dBridgeStatus)
             }
         case "MATERIAL":
             guard !isSwitchingPrinter else { return }
@@ -1344,7 +1377,7 @@ final class H2DBLEManager: NSObject, ObservableObject {
                 beginMqttLossGrace()
                 return
             }
-            h2dStatusCode = status
+            updateIfChanged(status, \.h2dStatusCode)
             let known: [String: String] = [
                 "BOOTING": "ESP32 đang khởi động",
                 "CONFIG_REQUIRED": "Chưa có cấu hình máy in",
@@ -1375,11 +1408,12 @@ final class H2DBLEManager: NSObject, ObservableObject {
             default:
                 break
             }
-            hasBridgeError = status == "BUFFER_ERROR" || status == "MQTT_AUTH_FAILED"
+            updateIfChanged(status == "BUFFER_ERROR" || status == "MQTT_AUTH_FAILED", \.hasBridgeError)
             if !hasSelectedCriticalPrinterAlert {
-                h2dBridgeStatus = status == "BUFFER_ERROR"
+                let message = status == "BUFFER_ERROR"
                     ? "ESP32 thiếu bộ nhớ nhận gói \(printerDisplayName) • hãy khởi động lại"
                     : known[status] ?? fields.dropFirst(2).joined(separator: " • ")
+                updateIfChanged(message, \.h2dBridgeStatus)
             }
         case "PRINT":
             if isSwitchingPrinter {
@@ -1396,37 +1430,39 @@ final class H2DBLEManager: NSObject, ObservableObject {
             }
             guard fields.count >= 6 else { return }
             confirmH2DReady()
-            h2dPrintState = fields[2].uppercased()
-            h2dCurrentLayer = max(0, Int(fields[3]) ?? h2dCurrentLayer)
-            h2dTotalLayers = max(0, Int(fields[4]) ?? h2dTotalLayers)
-            h2dPrintPercent = min(100, max(0, Int(fields[5]) ?? h2dPrintPercent))
+            // Repeated telemetry is still processed for readiness and events,
+            // but unchanged values must not invalidate the entire dashboard.
+            updateIfChanged(fields[2].uppercased(), \.h2dPrintState)
+            updateIfChanged(max(0, Int(fields[3]) ?? h2dCurrentLayer), \.h2dCurrentLayer)
+            updateIfChanged(max(0, Int(fields[4]) ?? h2dTotalLayers), \.h2dTotalLayers)
+            updateIfChanged(min(100, max(0, Int(fields[5]) ?? h2dPrintPercent)), \.h2dPrintPercent)
             if fields.count >= 7 {
-                h2dStageCode = Int(fields[6]) ?? h2dStageCode
+                updateIfChanged(Int(fields[6]) ?? h2dStageCode, \.h2dStageCode)
             }
             if fields.count >= 8 {
-                h2dRemainingMinutes = Int(fields[7]) ?? h2dRemainingMinutes
+                updateIfChanged(Int(fields[7]) ?? h2dRemainingMinutes, \.h2dRemainingMinutes)
             }
             if fields.count >= 10, let epoch = TimeInterval(fields[9]), epoch > 1_500_000_000 {
-                h2dPrintStartEpoch = epoch
+                updateIfChanged(Optional(epoch), \.h2dPrintStartEpoch)
             }
-            hasBridgeError = false
+            updateIfChanged(false, \.hasBridgeError)
             if !isPrintSessionActive {
-                hasPrinterAlert = false
-                hasCriticalPrinterAlert = false
-                printerAlertText = ""
+                updateIfChanged(false, \.hasPrinterAlert)
+                updateIfChanged(false, \.hasCriticalPrinterAlert)
+                updateIfChanged("", \.printerAlertText)
             }
             if !hasSelectedCriticalPrinterAlert {
                 if isStoppingPrint {
-                    h2dBridgeStatus = "\(printerDisplayName) đang dừng bản in"
+                    updateIfChanged("\(printerDisplayName) đang dừng bản in", \.h2dBridgeStatus)
                 } else if isPausedPrint {
-                    h2dBridgeStatus = "\(printerDisplayName) đang tạm dừng"
+                    updateIfChanged("\(printerDisplayName) đang tạm dừng", \.h2dBridgeStatus)
                 } else if isActuallyPrinting {
-                    h2dBridgeStatus = "\(printerDisplayName) đang in lớp \(h2dCurrentLayer)/\(max(1, h2dTotalLayers))"
+                    updateIfChanged("\(printerDisplayName) đang in lớp \(h2dCurrentLayer)/\(max(1, h2dTotalLayers))", \.h2dBridgeStatus)
                 } else if h2dPrintState == "RUNNING" ||
                             (h2dStageCode > 0 && h2dStageCode != 255) {
-                    h2dBridgeStatus = h2dStageText
+                    updateIfChanged(h2dStageText, \.h2dBridgeStatus)
                 } else {
-                    h2dBridgeStatus = "Trạng thái \(printerDisplayName): \(h2dPrintState)"
+                    updateIfChanged("Trạng thái \(printerDisplayName): \(h2dPrintState)", \.h2dBridgeStatus)
                 }
             }
         case "SNAP":

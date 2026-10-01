@@ -142,7 +142,7 @@ final class BambuPrinterCameraManager: ObservableObject {
         transport?.start()
 
         let deadline = DispatchWorkItem { [weak self] in
-            guard let self, self.generation == connectionGeneration, !self.isStreaming else { return }
+            guard let self, self.generation == connectionGeneration, !self.streamingStatusPublished else { return }
             self.handleFailure(
                 usesMJPEG
                     ? "Camera không gửi hình • kiểm tra IP và Access Code LAN"
@@ -203,8 +203,7 @@ final class BambuPrinterCameraManager: ObservableObject {
             guard now.timeIntervalSince(lastFramePublishedAt) >= minimumFramePublishInterval else { return }
             lastFramePublishedAt = now
         }
-        let store = frameStore
-        DispatchQueue.main.async { store.frame = image }
+        frameStore.enqueue(image)
     }
 
     private func publishTransport(_ text: String) {
@@ -217,6 +216,34 @@ final class BambuPrinterCameraManager: ObservableObject {
 
 final class BambuPrinterCameraFrameStore: ObservableObject {
     @Published fileprivate(set) var frame: CGImage?
+
+    private let deliveryLock = NSLock()
+    private var pendingFrame: CGImage?
+    private var deliveryScheduled = false
+
+    /// Keep only the newest frame if the main thread is busy scrolling. A
+    /// backlog of old frames would otherwise prolong stutter after a gesture.
+    /// Nil is also delivered, so stopping/reconnecting still clears the view.
+    fileprivate func enqueue(_ image: CGImage?) {
+        deliveryLock.lock()
+        pendingFrame = image
+        if deliveryScheduled {
+            deliveryLock.unlock()
+            return
+        }
+        deliveryScheduled = true
+        deliveryLock.unlock()
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.deliveryLock.lock()
+            let newestFrame = self.pendingFrame
+            self.pendingFrame = nil
+            self.deliveryScheduled = false
+            self.deliveryLock.unlock()
+            self.frame = newestFrame
+        }
+    }
 }
 
 private protocol BambuCameraTransport: AnyObject {
@@ -404,7 +431,15 @@ private final class BambuRTSPCameraTransport: BambuCameraTransport {
     private let onFrame: (CGImage) -> Void
     private let onFailure: (String) -> Void
     private let baseURI: String
-    private let decoder: H264FrameDecoder
+    private lazy var decoder = H264FrameDecoder { [weak self] image in
+        guard let self else { return }
+        // VideoToolbox calls from a decoder thread. Connection state and
+        // generation checks belong to the serial transport queue instead.
+        self.queue.async { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.onFrame(image)
+        }
+    }
 
     private var connection: NWConnection?
     private var buffer = Data()
@@ -439,7 +474,6 @@ private final class BambuRTSPCameraTransport: BambuCameraTransport {
         self.onFrame = onFrame
         self.onFailure = onFailure
         self.baseURI = "rtsps://\(host):322/streaming/live/1"
-        self.decoder = H264FrameDecoder(onFrame: onFrame)
     }
 
     func start() {
@@ -886,6 +920,7 @@ private final class H264FrameDecoder {
     private var formatDescription: CMVideoFormatDescription?
     private var session: VTDecompressionSession?
     private var lastFrameTime: TimeInterval = 0
+    private let outputLock = NSLock()
 
     init(onFrame: @escaping (CGImage) -> Void) {
         self.onFrame = onFrame
@@ -1021,6 +1056,8 @@ private final class H264FrameDecoder {
         // A printer monitor does not need video-rate redraws. Matching the
         // decoder to the published preview rate avoids creating full CGImages
         // that would immediately be discarded by the UI throttle.
+        outputLock.lock()
+        defer { outputLock.unlock() }
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastFrameTime >= 0.20 else { return }
         lastFrameTime = now

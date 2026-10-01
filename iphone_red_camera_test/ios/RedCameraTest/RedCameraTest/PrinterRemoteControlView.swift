@@ -27,10 +27,6 @@ struct PrinterRemoteControlView: View {
     @State private var selectedExternalExtruderID = 1
     @State private var amsDryingHours = 8
     @State private var dryerPulse = false
-    @State private var lifetimePrintHours = 0.0
-    @State private var lifetimeObservationAt: Date?
-    @State private var lifetimeObservationWasPrinting = false
-    @State private var lifetimePersistedAt: Date?
 
     private let cyan = Color(red: 0.02, green: 0.43, blue: 0.40)
     private let amber = Color(red: 0.91, green: 0.48, blue: 0.14)
@@ -113,22 +109,21 @@ struct PrinterRemoteControlView: View {
         .padding(compactLayout ? 12 : 16)
         .background(
             surfaceColor,
-            in: RoundedRectangle(cornerRadius: compactLayout ? 14 : 16, style: .continuous)
+            in: RoundedRectangle(cornerRadius: compactLayout ? 18 : 20, style: .continuous)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: compactLayout ? 14 : 16, style: .continuous)
+            RoundedRectangle(cornerRadius: compactLayout ? 18 : 20, style: .continuous)
                 .stroke(hairlineColor, lineWidth: 1)
         }
         .controlSize(compactLayout ? .small : .regular)
+        .accessibilityIdentifier("se.printer-controls")
         .onAppear {
             startDirectControl()
             updateAlarmPulse()
             updateDryerPulse()
-            loadLifetimePrintHours()
         }
         .onChange(of: profile.id) { _, _ in
             selectedExternalExtruderID = profile.kind == .h2d ? 1 : 0
-            loadLifetimePrintHours()
             startDirectControl()
         }
         .onChange(of: accessCode) { _, _ in startDirectControl() }
@@ -146,8 +141,6 @@ struct PrinterRemoteControlView: View {
         }
         .onChange(of: alarmNeedsAttention) { _, _ in updateAlarmPulse() }
         .onChange(of: directControl.snapshot.amsDrying) { _, _ in updateDryerPulse() }
-        .onChange(of: directControl.snapshot.receivedAt) { _, _ in updateLifetimePrintHours() }
-        .onDisappear { persistLifetimePrintHours(at: Date()) }
         .alert(
             localized(confirmation?.title(
                 usesLeftNozzlePath: usesLeftNozzlePath,
@@ -203,19 +196,12 @@ struct PrinterRemoteControlView: View {
                 .minimumScaleFactor(0.78)
                 .layoutPriority(1)
 
-            HStack(spacing: 4) {
-                Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 10, weight: .semibold))
-                Text(String(format: "%.1f h", lifetimePrintHours))
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .monospacedDigit()
-            }
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(subduedSurfaceColor, in: Capsule())
-            .accessibilityLabel(localized("Giờ in SE tự theo dõi"))
-            .fixedSize(horizontal: true, vertical: false)
+            PrinterLifetimeHoursBadge(
+                directControl: directControl,
+                profile: profile,
+                languageCode: languageCode,
+                darkMode: lowPowerDarkMode
+            )
 
             Spacer(minLength: compactLayout ? 2 : 6)
 
@@ -457,7 +443,6 @@ struct PrinterRemoteControlView: View {
     private var amsControls: some View {
         let trays = directControl.snapshot.amsTrays
             .filter(\.isPresent)
-            .sorted { $0.amsID == $1.amsID ? $0.slotID < $1.slotID : $0.amsID < $1.amsID }
         let humidity = directControl.snapshot.amsDryerUnitID
             .flatMap { directControl.snapshot.amsHumidityPercentByUnit[$0] }
             ?? trays.compactMap { directControl.snapshot.amsHumidityPercentByUnit[$0.amsID] }.first
@@ -912,6 +897,7 @@ struct PrinterRemoteControlView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(localized(extruderID == 1 ? "Đầu trái" : "Đầu phải"))
+        .accessibilityIdentifier("se.nozzle.\(extruderID)")
         .accessibilityAddTraits(selectedExternalExtruderID == extruderID ? .isSelected : [])
     }
 
@@ -946,99 +932,6 @@ struct PrinterRemoteControlView: View {
         DispatchQueue.main.async { dryerPulse = true }
     }
 
-    private var lifetimeHoursStorageKey: String {
-        let serial = profile.serial
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .uppercased()
-        return "SE.Bambu.lifetimePrintHours.\(serial)"
-    }
-
-    private var lifetimeJobStorageKey: String {
-        lifetimeHoursStorageKey + ".activeJob"
-    }
-
-    private var lifetimeObservationStorageKey: String {
-        lifetimeHoursStorageKey + ".observedAt"
-    }
-
-    private func loadLifetimePrintHours() {
-        let defaults = UserDefaults.standard
-        lifetimePrintHours = max(0, defaults.double(forKey: lifetimeHoursStorageKey))
-        if defaults.object(forKey: lifetimeHoursStorageKey) == nil {
-            defaults.set(0.0, forKey: lifetimeHoursStorageKey)
-        }
-        // Start from printer telemetry. If a job is already running, the next
-        // snapshot backfills from gcode_start_time instead of asking the user
-        // to type a baseline.
-        lifetimeObservationAt = nil
-        lifetimeObservationWasPrinting = false
-        lifetimePersistedAt = Date()
-        updateLifetimePrintHours()
-    }
-
-    private func lifetimeJobIdentity(_ snapshot: BambuDirectSnapshot) -> String {
-        let identifiers = [snapshot.jobID, snapshot.subtaskID]
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && $0 != "0" }
-        let start = snapshot.printStartedAt.map { String(Int($0.timeIntervalSince1970)) } ?? ""
-        return (identifiers + [start]).filter { !$0.isEmpty }.joined(separator: "|")
-    }
-
-    private func updateLifetimePrintHours() {
-        let snapshot = directControl.snapshot
-        let now = snapshot.receivedAt ?? Date()
-        let defaults = UserDefaults.standard
-
-        if snapshot.hasActivePrintJob {
-            var baseline = lifetimeObservationAt
-            let identity = lifetimeJobIdentity(snapshot)
-
-            if !lifetimeObservationWasPrinting {
-                let storedIdentity = defaults.string(forKey: lifetimeJobStorageKey) ?? ""
-                let storedTimestamp = defaults.double(forKey: lifetimeObservationStorageKey)
-                if !identity.isEmpty, storedIdentity == identity, storedTimestamp > 0 {
-                    baseline = Date(timeIntervalSince1970: storedTimestamp)
-                } else if let printerStart = snapshot.printStartedAt {
-                    baseline = printerStart
-                } else {
-                    baseline = now
-                }
-            }
-
-            if let baseline {
-                let seconds = now.timeIntervalSince(baseline)
-                // Reject broken epochs, but allow an app suspension to be
-                // recovered from the same printer-reported job.
-                if seconds > 0, seconds <= 31 * 24 * 3_600 {
-                    lifetimePrintHours += seconds / 3_600
-                }
-            }
-
-            if now.timeIntervalSince(lifetimePersistedAt ?? .distantPast) >= 30 {
-                persistLifetimePrintHours(at: now)
-            }
-        } else if lifetimeObservationWasPrinting,
-                  let previous = lifetimeObservationAt {
-            let seconds = now.timeIntervalSince(previous)
-            if seconds > 0, seconds <= 35 {
-                lifetimePrintHours += seconds / 3_600
-            }
-            persistLifetimePrintHours(at: now)
-        }
-
-        lifetimeObservationAt = now
-        lifetimeObservationWasPrinting = snapshot.hasActivePrintJob
-    }
-
-    private func persistLifetimePrintHours(at date: Date) {
-        let defaults = UserDefaults.standard
-        defaults.set(max(0, lifetimePrintHours), forKey: lifetimeHoursStorageKey)
-        let snapshot = directControl.snapshot
-        let identity = snapshot.hasActivePrintJob ? lifetimeJobIdentity(snapshot) : ""
-        defaults.set(identity, forKey: lifetimeJobStorageKey)
-        defaults.set(date.timeIntervalSince1970, forKey: lifetimeObservationStorageKey)
-        lifetimePersistedAt = date
-    }
 
     private var currentFilamentName: String {
         if let selectedNozzleFilamentMaterial { return selectedNozzleFilamentMaterial }
@@ -1133,36 +1026,8 @@ private struct PrinterSpeedDial: View {
             let center = CGPoint(x: proxy.size.width / 2, y: proxy.size.height - 8)
             let radius = min(proxy.size.width * 0.46, proxy.size.height - 13)
             ZStack {
-                    gaugeArc(center: center, radius: radius)
-                        .stroke(Color.primary.opacity(0.13), style: StrokeStyle(lineWidth: 2, lineCap: .round))
-
-                    ForEach(0..<31, id: \.self) { index in
-                    let fraction = Double(index) / 30
-                    let angle = startAngle + (endAngle - startAngle) * fraction
-                    let isMajor = index % 10 == 0
-                    let isMedium = index % 5 == 0
-                    Path { path in
-                        path.move(to: point(
-                            center: center,
-                            radius: radius - (isMajor ? 15 : (isMedium ? 11 : 7)),
-                            angle: angle
-                        ))
-                        path.addLine(to: point(center: center, radius: radius - 2, angle: angle))
-                    }
-                    .stroke(
-                        isMajor ? Color.primary.opacity(0.78) : Color.primary.opacity(isMedium ? 0.48 : 0.25),
-                        style: StrokeStyle(lineWidth: isMajor ? 3.4 : (isMedium ? 2 : 1.15), lineCap: .round)
-                    )
-                    }
-
-                    ForEach(0..<4, id: \.self) { index in
-                        let angle = startAngle + (endAngle - startAngle) * (Double(index) / 3)
-                        Text("\(speedPercents[index])")
-                            .font(.system(size: 9, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                            .position(point(center: center, radius: radius - 26, angle: angle))
-                    }
+                PrinterSpeedDialFace(center: center, radius: radius)
+                    .equatable()
 
                     Path { path in
                         path.move(to: center)
@@ -1232,18 +1097,68 @@ private struct PrinterSpeedDial: View {
         return min(4, max(1, Int((fraction * 3).rounded()) + 1))
     }
 
-    private func gaugeArc(center: CGPoint, radius: CGFloat) -> Path {
+
+    private func point(center: CGPoint, radius: CGFloat, angle: Double) -> CGPoint {
+        let radians = angle * .pi / 180
+        return CGPoint(
+            x: center.x + radius * CGFloat(cos(radians)),
+            y: center.y + radius * CGFloat(sin(radians))
+        )
+    }
+}
+
+private struct PrinterSpeedDialFace: View, Equatable {
+    let center: CGPoint
+    let radius: CGFloat
+    private let startAngle = 195.0
+    private let endAngle = 345.0
+    private let speedPercents = [50, 100, 124, 166]
+
+    var body: some View {
+        ZStack {
+            gaugeArc
+                .stroke(Color.primary.opacity(0.13), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            // Batch 31 individual tick views into three native paths.
+            ForEach(0..<3, id: \.self) { weight in
+                Path { path in
+                    for index in 0..<31 {
+                        let category = index % 10 == 0 ? 2 : (index % 5 == 0 ? 1 : 0)
+                        guard category == weight else { continue }
+                        let angle = startAngle + (endAngle - startAngle) * Double(index) / 30
+                        let length: CGFloat = weight == 2 ? 15 : (weight == 1 ? 11 : 7)
+                        path.move(to: point(radius: radius - length, angle: angle))
+                        path.addLine(to: point(radius: radius - 2, angle: angle))
+                    }
+                }
+                .stroke(
+                    Color.primary.opacity(weight == 2 ? 0.78 : (weight == 1 ? 0.48 : 0.25)),
+                    style: StrokeStyle(lineWidth: weight == 2 ? 3.4 : (weight == 1 ? 2 : 1.15), lineCap: .round)
+                )
+            }
+            ForEach(0..<4, id: \.self) { index in
+                Text("\(speedPercents[index])")
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .position(point(
+                        radius: radius - 26,
+                        angle: startAngle + (endAngle - startAngle) * Double(index) / 3
+                    ))
+            }
+        }
+    }
+
+    private var gaugeArc: Path {
         var path = Path()
         for step in 0...60 {
-            let fraction = Double(step) / 60
-            let angle = startAngle + (endAngle - startAngle) * fraction
-            let next = point(center: center, radius: radius, angle: angle)
+            let angle = startAngle + (endAngle - startAngle) * Double(step) / 60
+            let next = point(radius: radius, angle: angle)
             if step == 0 { path.move(to: next) } else { path.addLine(to: next) }
         }
         return path
     }
 
-    private func point(center: CGPoint, radius: CGFloat, angle: Double) -> CGPoint {
+    private func point(radius: CGFloat, angle: Double) -> CGPoint {
         let radians = angle * .pi / 180
         return CGPoint(
             x: center.x + radius * CGFloat(cos(radians)),
@@ -1340,6 +1255,140 @@ private enum RemoteConfirmation: Identifiable {
     }
 }
 
+/// Lifetime bookkeeping is independent of the controls' layout and gestures.
+private struct PrinterLifetimeHoursBadge: View {
+    @ObservedObject var directControl: BambuPrinterControlManager
+    let profile: BambuPrinterProfile
+    let languageCode: String
+    let darkMode: Bool
+    @State private var lifetimePrintHours = 0.0
+    @State private var lifetimeObservationAt: Date?
+    @State private var lifetimeObservationWasPrinting = false
+    @State private var lifetimePersistedAt: Date?
+
+    private var subduedSurfaceColor: Color {
+        darkMode ? Color.white.opacity(0.045) : Color.black.opacity(0.025)
+    }
+
+    private func localized(_ source: String) -> String {
+        SEStatusCopy.render(source, languageCode: languageCode)
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 10, weight: .semibold))
+            Text(String(format: "%.1f h", lifetimePrintHours))
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .monospacedDigit()
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(subduedSurfaceColor, in: Capsule())
+        .accessibilityLabel(localized("Giờ in SE tự theo dõi"))
+        .fixedSize(horizontal: true, vertical: false)
+        .onAppear { loadLifetimePrintHours() }
+        .onChange(of: profile.id) { _, _ in loadLifetimePrintHours() }
+        .onChange(of: directControl.snapshot.receivedAt) { _, _ in updateLifetimePrintHours() }
+        .onDisappear { persistLifetimePrintHours(at: Date()) }
+    }
+
+    private var lifetimeHoursStorageKey: String {
+        let serial = profile.serial
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+        return "SE.Bambu.lifetimePrintHours.\(serial)"
+    }
+
+    private var lifetimeJobStorageKey: String {
+        lifetimeHoursStorageKey + ".activeJob"
+    }
+
+    private var lifetimeObservationStorageKey: String {
+        lifetimeHoursStorageKey + ".observedAt"
+    }
+
+    private func loadLifetimePrintHours() {
+        let defaults = UserDefaults.standard
+        lifetimePrintHours = max(0, defaults.double(forKey: lifetimeHoursStorageKey))
+        if defaults.object(forKey: lifetimeHoursStorageKey) == nil {
+            defaults.set(0.0, forKey: lifetimeHoursStorageKey)
+        }
+        // Start from printer telemetry. If a job is already running, the next
+        // snapshot backfills from gcode_start_time instead of asking the user
+        // to type a baseline.
+        lifetimeObservationAt = nil
+        lifetimeObservationWasPrinting = false
+        lifetimePersistedAt = Date()
+        updateLifetimePrintHours()
+    }
+
+    private func lifetimeJobIdentity(_ snapshot: BambuDirectSnapshot) -> String {
+        let identifiers = [snapshot.jobID, snapshot.subtaskID]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0 != "0" }
+        let start = snapshot.printStartedAt.map { String(Int($0.timeIntervalSince1970)) } ?? ""
+        return (identifiers + [start]).filter { !$0.isEmpty }.joined(separator: "|")
+    }
+
+    private func updateLifetimePrintHours() {
+        let snapshot = directControl.snapshot
+        let now = snapshot.receivedAt ?? Date()
+        let defaults = UserDefaults.standard
+
+        if snapshot.hasActivePrintJob {
+            var baseline = lifetimeObservationAt
+            let identity = lifetimeJobIdentity(snapshot)
+
+            if !lifetimeObservationWasPrinting {
+                let storedIdentity = defaults.string(forKey: lifetimeJobStorageKey) ?? ""
+                let storedTimestamp = defaults.double(forKey: lifetimeObservationStorageKey)
+                if !identity.isEmpty, storedIdentity == identity, storedTimestamp > 0 {
+                    baseline = Date(timeIntervalSince1970: storedTimestamp)
+                } else if let printerStart = snapshot.printStartedAt {
+                    baseline = printerStart
+                } else {
+                    baseline = now
+                }
+            }
+
+            if let baseline {
+                let seconds = now.timeIntervalSince(baseline)
+                // Reject broken epochs, but allow an app suspension to be
+                // recovered from the same printer-reported job.
+                if seconds > 0, seconds <= 31 * 24 * 3_600 {
+                    lifetimePrintHours += seconds / 3_600
+                }
+            }
+
+            if now.timeIntervalSince(lifetimePersistedAt ?? .distantPast) >= 30 {
+                persistLifetimePrintHours(at: now)
+            }
+        } else if lifetimeObservationWasPrinting,
+                  let previous = lifetimeObservationAt {
+            let seconds = now.timeIntervalSince(previous)
+            if seconds > 0, seconds <= 35 {
+                lifetimePrintHours += seconds / 3_600
+            }
+            persistLifetimePrintHours(at: now)
+        }
+
+        lifetimeObservationAt = now
+        lifetimeObservationWasPrinting = snapshot.hasActivePrintJob
+    }
+
+    private func persistLifetimePrintHours(at date: Date) {
+        let defaults = UserDefaults.standard
+        defaults.set(max(0, lifetimePrintHours), forKey: lifetimeHoursStorageKey)
+        let snapshot = directControl.snapshot
+        let identity = snapshot.hasActivePrintJob ? lifetimeJobIdentity(snapshot) : ""
+        defaults.set(identity, forKey: lifetimeJobStorageKey)
+        defaults.set(date.timeIntervalSince1970, forKey: lifetimeObservationStorageKey)
+        lifetimePersistedAt = date
+    }
+}
+
 private struct RemoteActionButtonStyle: ButtonStyle {
     let tint: Color
 
@@ -1349,12 +1398,13 @@ private struct RemoteActionButtonStyle: ButtonStyle {
             .padding(.horizontal, 8)
             .frame(maxWidth: .infinity, minHeight: 44)
             .foregroundStyle(tint)
-            .background(tint.opacity(configuration.isPressed ? 0.16 : 0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(tint.opacity(configuration.isPressed ? 0.17 : 0.09))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .stroke(tint.opacity(0.18), lineWidth: 1)
             }
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }

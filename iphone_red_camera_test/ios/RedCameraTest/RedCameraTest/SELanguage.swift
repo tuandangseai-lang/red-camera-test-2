@@ -14,14 +14,20 @@ enum SEAppLanguage: String, CaseIterable, Identifiable {
 /// these replacements cover values that cannot be localized by SwiftUI after
 /// they have already been assembled into a String.
 enum SEStatusCopy {
+    private static let englishReplacements = replacements.sorted { $0.0.count > $1.0.count }
+    private static let vietnameseReplacements = replacements.sorted { $0.1.count > $1.1.count }
+    private static let renderedCopy: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 512
+        return cache
+    }()
+
     static func render(_ source: String, languageCode: String) -> String {
         let useEnglish = languageCode == SEAppLanguage.english.rawValue
+        let key = "\(useEnglish ? "en" : "vi"):\(source)" as NSString
+        if let cached = renderedCopy.object(forKey: key) { return cached as String }
         var result = source
-        let ordered = replacements.sorted { lhs, rhs in
-            let lhsSource = useEnglish ? lhs.0 : lhs.1
-            let rhsSource = useEnglish ? rhs.0 : rhs.1
-            return lhsSource.count > rhsSource.count
-        }
+        let ordered = useEnglish ? englishReplacements : vietnameseReplacements
         for (vietnamese, english) in ordered where vietnamese != english {
             result = result.replacingOccurrences(
                 of: useEnglish ? vietnamese : english,
@@ -29,6 +35,7 @@ enum SEStatusCopy {
                 options: [.caseInsensitive]
             )
         }
+        renderedCopy.setObject(result as NSString, forKey: key)
         return result
     }
 

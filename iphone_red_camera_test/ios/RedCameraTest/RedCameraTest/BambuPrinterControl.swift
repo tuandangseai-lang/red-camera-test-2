@@ -171,6 +171,13 @@ final class BambuPrinterControlManager: ObservableObject {
     private var pendingSnapshotPublication: DispatchWorkItem?
 
     func start(profile: BambuPrinterProfile, accessCode: String) {
+#if targetEnvironment(simulator)
+        if SEInterfaceCheck.isEnabled {
+            snapshot = SEInterfaceCheck.snapshot
+            isReady = true
+            return
+        }
+#endif
         let next = Configuration(
             profileID: profile.id,
             host: profile.ip.trimmingCharacters(in: .whitespacesAndNewlines),

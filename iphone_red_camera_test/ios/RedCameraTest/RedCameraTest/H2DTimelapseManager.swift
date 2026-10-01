@@ -1850,8 +1850,21 @@ final class H2DTimelapseManager: NSObject, ObservableObject {
     }
 
     private func publishStatus(_ text: String) {
-        publishOnMain { self.statusText = text }
+        publishOnMain {
+            if self.statusText != text { self.statusText = text }
+        }
     }
+
+#if targetEnvironment(simulator)
+    func applyInterfaceCheck() {
+        guard SEInterfaceCheck.isTimelapse else { return }
+        isArmed = true
+        isCameraReady = true
+        capturedFrameCount = 34
+        lastCapturedLayer = 91
+        statusText = "Chế độ chụp đang hoạt động"
+    }
+#endif
 
     private func publishOnMain(_ update: @escaping () -> Void) {
         DispatchQueue.main.async(execute: update)

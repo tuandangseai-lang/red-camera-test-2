@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "9.97"
-    CURRENT_PROJECT_VERSION: "176"
+    MARKETING_VERSION: "9.98"
+    CURRENT_PROJECT_VERSION: "177"
 targets:
   RedCameraTest:
     type: application
@@ -25,6 +25,7 @@ targets:
       - path: RedCameraTest/BambuPrinterProfile.swift
       - path: RedCameraTest/BambuCredentialStore.swift
       - path: RedCameraTest/BambuPrinterCamera.swift
+      - path: RedCameraTest/SEInterfaceCheck.swift
       - path: RedCameraTest/Assets.xcassets
       - path: RedCameraTest/fire-alarm-sound.mp3
       - path: RedCameraTest/iphone-screenshot-shutter.mp3
@@ -50,8 +51,27 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: vn.rockettracker.RedCameraTest
-        MARKETING_VERSION: "9.97"
-        CURRENT_PROJECT_VERSION: "176"
+        MARKETING_VERSION: "9.98"
+        CURRENT_PROJECT_VERSION: "177"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"
+  SEInterfaceTests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: InterfaceTests
+    dependencies:
+      - target: RedCameraTest
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: RedCameraTest
+schemes:
+  RedCameraTest:
+    build:
+      targets:
+        RedCameraTest: all
+    test:
+      targets:
+        - SEInterfaceTests

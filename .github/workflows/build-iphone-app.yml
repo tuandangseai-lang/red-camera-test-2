@@ -1,4 +1,4 @@
-name: Tao IPA SE v9.97 build176 - sua dung L R va cam bien nhua H2D
+name: Tao IPA SE v9.98 build177 - toi uu va giao dien iPhone
 
 on:
   workflow_dispatch:
@@ -16,11 +16,24 @@ jobs:
   build-unsigned-ipa:
     name: Build SE iPhone App
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Lay ma nguon
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Kiem tra ngon ngu va cache so voi moc 101
+        run: |
+          set -euo pipefail
+          git show 101:iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/SELanguage.swift |
+            sed -e 's/SEStatusCopy/SEBaselineStatusCopy/g' -e 's/SEAppLanguage/SEBaselineAppLanguage/g' > "$RUNNER_TEMP/BaselineLanguage.swift"
+          swiftc -O "$RUNNER_TEMP/BaselineLanguage.swift" \
+            iphone_red_camera_test/ios/RedCameraTest/RedCameraTest/SELanguage.swift \
+            iphone_red_camera_test/tests/LanguageRegression/main.swift \
+            -o "$RUNNER_TEMP/language-regression"
+          "$RUNNER_TEMP/language-regression"
 
       - name: Cai XcodeGen
         run: brew install xcodegen
@@ -293,20 +306,59 @@ jobs:
           test -f "$APP_PATH/en.lproj/Localizable.strings"
           test -f "$APP_PATH/vi.lproj/Localizable.strings"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/Info.plist")" = "SE"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.97"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "176"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "9.98"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "177"
           rm -rf "$RUNNER_TEMP/Payload"
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.97-build176-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/SE-v9.98-build177-unsigned.ipa"
 
       - name: Tai IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SE-v9.97-build176-unsigned-ipa
-          path: SE-v9.97-build176-unsigned.ipa
+          name: SE-v9.98-build177-unsigned-ipa
+          path: SE-v9.98-build177-unsigned.ipa
           if-no-files-found: error
+          retention-days: 7
+
+      - name: Kiem tra va chup giao dien iPhone Simulator
+        working-directory: iphone_red_camera_test/ios/RedCameraTest
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/interface-check"
+          xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          phones = [d for group in json.load(sys.stdin)["devices"].values() for d in group if "iPhone" in d["name"]]
+          for choices in [("iPhone SE (3rd generation)", "iPhone 16e", "iPhone 17"), ("iPhone 17 Pro Max", "iPhone 16 Pro Max", "iPhone 17 Pro")]:
+              device = next((d for name in choices for d in phones if d["name"] == name), phones[0])
+              print(device["udid"])
+          ' > "$RUNNER_TEMP/interface-devices.txt"
+          index=0
+          while IFS= read -r device; do
+            index=$((index + 1))
+            xcodebuild test -project RedCameraTest.xcodeproj -scheme RedCameraTest \
+              -configuration Debug -destination "platform=iOS Simulator,id=$device" \
+              -derivedDataPath "$RUNNER_TEMP/SimulatorBuild" \
+              -resultBundlePath "$RUNNER_TEMP/interface-check/phone-$index.xcresult" \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+              -parallel-testing-enabled NO \
+              > "$RUNNER_TEMP/interface-check/phone-$index.log" 2>&1 || {
+                tail -100 "$RUNNER_TEMP/interface-check/phone-$index.log"
+                exit 1
+              }
+            xcrun xcresulttool export attachments \
+              --path "$RUNNER_TEMP/interface-check/phone-$index.xcresult" \
+              --output-path "$RUNNER_TEMP/interface-check/phone-$index-images"
+          done < "$RUNNER_TEMP/interface-devices.txt"
+
+      - name: Tai ket qua kiem tra giao dien
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: SE-v9.98-build177-interface-check
+          path: ${{ runner.temp }}/interface-check/
+          if-no-files-found: warn
           retention-days: 7
 
   build-h2d-esp32:
