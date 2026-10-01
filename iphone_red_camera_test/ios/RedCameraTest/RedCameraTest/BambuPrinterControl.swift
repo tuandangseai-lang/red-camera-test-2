@@ -171,6 +171,7 @@ final class BambuPrinterControlManager: ObservableObject {
     private var pending: PendingCommand?
     private var pingTimer: DispatchSourceTimer?
     private var snapshotStorage = BambuDirectSnapshot()
+    private var filamentRoutes = BambuFilamentRoutes()
     private var activePromptStorage: BambuRemotePrompt?
     private var activeFilamentOperation: BambuRemotePromptKind?
     private var filamentOperationNumber = 0
@@ -209,6 +210,7 @@ final class BambuPrinterControlManager: ObservableObject {
             guard let self else { return }
             if self.configuration == next, self.connection != nil { return }
             self.snapshotStorage = BambuDirectSnapshot()
+            self.filamentRoutes = BambuFilamentRoutes()
             self.pendingSnapshotPublication?.cancel()
             self.pendingSnapshotPublication = nil
             self.lastSnapshotPublishedAt = .distantPast
@@ -294,25 +296,17 @@ final class BambuPrinterControlManager: ObservableObject {
         temperature: Int,
         filament: String
     ) {
-        guard amsID >= 0, (1...48).contains(durationHours), (45...90).contains(temperature) else {
+        guard let fields = BambuAMSDryingProtocol.fields(
+            enabled: enabled, amsID: amsID, durationHours: durationHours,
+            temperature: temperature, filament: filament
+        ) else {
             publishFailure("Thông số sấy AMS không hợp lệ")
             return
         }
         send(
             section: "print",
             command: "ams_filament_drying",
-            fields: [
-                "ams_id": amsID,
-                "cooling_temp": enabled ? 45 : 40,
-                // The printer protocol expects minutes, not hours.
-                "duration": enabled ? durationHours * 60 : 0,
-                "humidity": enabled ? 20 : 0,
-                "mode": enabled ? 1 : 0,
-                "rotate_tray": false,
-                "temp": enabled ? temperature : 0,
-                "filament": enabled ? filament : "",
-                "close_power_conflict": false
-            ],
+            fields: fields,
             actionName: enabled ? "Bật sấy AMS" : "Tắt sấy AMS"
         )
     }
@@ -766,7 +760,7 @@ final class BambuPrinterControlManager: ObservableObject {
     private func updateSnapshot(from report: [String: Any]) {
         var next = snapshotStorage
         var changed = false
-        var externalRouteInReport = false
+        var reportedExternalExtruder = false
         func number(_ value: Any?) -> Int? {
             if let value = value as? NSNumber { return value.intValue }
             if let value = value as? String { return Int(value) }
@@ -826,22 +820,21 @@ final class BambuPrinterControlManager: ObservableObject {
         let extruderReport = (report["extruder"] as? [String: Any]) ??
             (device?["extruder"] as? [String: Any])
 
+        if filamentRoutes.update(
+            extruder: extruderReport,
+            legacyTray: (report["ams"] as? [String: Any])?["tray_now"],
+            dualNozzle: configuration?.isDualNozzle == true
+        ) {
+            next.extruderCount = filamentRoutes.extruderCount
+            next.currentExtruderID = filamentRoutes.currentExtruderID
+            next.currentAMSTrayID = filamentRoutes.currentSource?.trayID
+            changed = true
+        }
+
         if let extruder = extruderReport,
            let entries = extruder["info"] as? [[String: Any]] {
-            if let packedState = number(extruder["state"]) {
-                let count = max(1, packedState & 0xF)
-                let current = (packedState >> 4) & 0xF
-                next.extruderCount = count
-                next.currentExtruderID = current < count ? current : nil
-                changed = true
-            } else if !entries.isEmpty {
-                next.extruderCount = max(1, entries.count)
-                changed = true
-            }
-
             var filamentByExtruder: [Int: Bool] = [:]
             var detectedExternalExtruder: Int?
-            var detectedCurrentTray: String?
             for (index, entry) in entries.enumerated() {
                 let id = number(entry["id"]) ?? index
                 if let info = number(entry["info"]) {
@@ -849,15 +842,11 @@ final class BambuPrinterControlManager: ObservableObject {
                     // toolhead filament sensor (bit 2 is the buffer sensor).
                     filamentByExtruder[id] = ((info >> 1) & 1) != 0
                 }
-                if let packedSlot = number(entry["snow"]), packedSlot >= 0 {
-                    let amsID = (packedSlot >> 8) & 0xFF
-                    let slotID = packedSlot & 0xFF
-                    if BambuExternalSpoolRoute.isVirtualTrayID(amsID) {
+                if let packedSlot = number(entry["snow"]),
+                   BambuFilamentRoutes.decode(packedSlot) == .external {
+                    reportedExternalExtruder = true
+                    if detectedExternalExtruder == nil || id == next.currentExtruderID {
                         detectedExternalExtruder = id
-                        externalRouteInReport = true
-                    } else if amsID < BambuExternalSpoolRoute.leftVirtualTrayID,
-                              slotID < 255 {
-                        detectedCurrentTray = "\(amsID)-\(slotID)"
                     }
                 }
 
@@ -876,7 +865,6 @@ final class BambuPrinterControlManager: ObservableObject {
             if let detectedExternalExtruder {
                 next.externalSpoolExtruderID = detectedExternalExtruder
                 next.externalFilamentPresent = filamentByExtruder[detectedExternalExtruder]
-                if externalRouteInReport { next.currentAMSTrayID = nil }
                 changed = true
             } else if let configured = next.externalSpoolExtruderID,
                       let present = filamentByExtruder[configured] {
@@ -884,17 +872,13 @@ final class BambuPrinterControlManager: ObservableObject {
                 changed = true
             }
             if !filamentByExtruder.isEmpty {
-                next.filamentPresentByExtruder = filamentByExtruder
-                changed = true
-            }
-            if let detectedCurrentTray {
-                next.currentAMSTrayID = detectedCurrentTray
+                next.filamentPresentByExtruder.merge(filamentByExtruder) { _, new in new }
                 changed = true
             }
         }
 
         if let switchState = number(report["hw_switch_state"]),
-           extruderReport == nil || next.extruderCount == 1 {
+           configuration?.isDualNozzle != true, next.extruderCount == 1 {
             // Single-nozzle printers expose the same sensor as a top-level
             // field. It remains authoritative on newer P2S packets even when
             // the packet also contains the nested device.extruder structure.
@@ -909,12 +893,6 @@ final class BambuPrinterControlManager: ObservableObject {
             next.externalFilamentPresent = filamentPresent
             next.filamentPresentByExtruder[0] = filamentPresent
             changed = true
-        }
-
-        if externalRouteInReport {
-            // extruder.info[].snow is the authoritative H2D route and can be
-            // newer than the legacy ams.tray_now value in the same packet.
-            next.currentAMSTrayID = nil
         }
 
         let virtualTrayValue = report["vir_slot"]
@@ -933,7 +911,7 @@ final class BambuPrinterControlManager: ObservableObject {
             // vir_slot is material metadata and H2D normally reports both
             // virtual trays. It must not overwrite the active route from
             // extruder.info[].snow merely because one entry appears last.
-            if !externalRouteInReport, virtualTrays.count == 1 {
+            if !reportedExternalExtruder, virtualTrays.count == 1 {
                 next.externalSpoolExtruderID = extruderID
             }
             let material = ((tray["tray_type"] as? String)
@@ -959,19 +937,6 @@ final class BambuPrinterControlManager: ObservableObject {
             let trayExistenceBits = hexadecimal(ams["tray_exist_bits"])
             let hasReportedAMS = (existenceBits ?? 0) != 0 || !units.isEmpty
             next.hasAMS = hasReportedAMS
-
-            if let trayNow = number(ams["tray_now"]) {
-                if trayNow >= 0,
-                   trayNow < BambuExternalSpoolRoute.leftVirtualTrayID,
-                   next.extruderCount == 1 {
-                    next.currentAMSTrayID = "\(trayNow >> 2)-\(trayNow & 0x3)"
-                } else if trayNow >= BambuExternalSpoolRoute.leftVirtualTrayID {
-                    // 254/255 are the H2D virtual external spools; 255 also
-                    // serves as the legacy no-AMS sentinel. Either way, no
-                    // physical AMS tray should remain selected.
-                    next.currentAMSTrayID = nil
-                }
-            }
 
             var trays: [BambuAMSTraySnapshot] = []
             for unit in units {

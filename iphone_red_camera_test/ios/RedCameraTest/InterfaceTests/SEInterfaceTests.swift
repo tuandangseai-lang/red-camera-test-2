@@ -1,13 +1,14 @@
 import XCTest
 
 final class SEInterfaceTests: XCTestCase {
-    private func launch(timelapse: Bool = false, idle: Bool = false, paused: Bool = false, controlFailure: Bool = false) -> XCUIApplication {
+    private func launch(timelapse: Bool = false, idle: Bool = false, paused: Bool = false, controlFailure: Bool = false, fourthTray: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--se-interface-check"]
         if timelapse { app.launchArguments.append("--se-interface-check-timelapse") }
         if idle { app.launchArguments.append("--se-interface-check-idle") }
         if paused { app.launchArguments.append("--se-interface-check-paused") }
         if controlFailure { app.launchArguments.append("--se-interface-check-control-failure") }
+        if fourthTray { app.launchArguments.append("--se-interface-check-ams-fourth") }
         app.launch()
         XCTAssertTrue(app.staticTexts["38%"].waitForExistence(timeout: 12))
         return app
@@ -102,5 +103,20 @@ final class SEInterfaceTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(feedback.frame.minX, app.frame.minX)
         XCTAssertLessThanOrEqual(feedback.frame.maxX, app.frame.maxX)
         saveScreenshot("command-feedback", app: app)
+    }
+
+    func testFourthAMSTrayKeepsItsColorAndSelection() {
+        let app = launch(fourthTray: true)
+        app.scrollViews.firstMatch.swipeUp(velocity: .slow)
+        let fourth = app.buttons["se.ams.tray.0-3"]
+        XCTAssertTrue(fourth.waitForExistence(timeout: 5))
+        XCTAssertTrue(fourth.isSelected)
+        XCTAssertEqual(fourth.label, "Unload filament AMS 4")
+        for index in 0..<3 {
+            XCTAssertFalse(app.buttons["se.ams.tray.0-\(index)"].isSelected)
+        }
+        XCTAssertGreaterThanOrEqual(fourth.frame.minX, app.frame.minX)
+        XCTAssertLessThanOrEqual(fourth.frame.maxX, app.frame.maxX)
+        saveScreenshot("ams-fourth-tray", app: app)
     }
 }

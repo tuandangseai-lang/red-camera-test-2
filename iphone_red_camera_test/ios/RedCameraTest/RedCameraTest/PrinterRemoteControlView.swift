@@ -571,6 +571,8 @@ struct PrinterRemoteControlView: View {
                             }
                             .buttonStyle(.plain)
                             .disabled(!controlsReady)
+                            .accessibilityIdentifier("se.ams.tray.\(tray.id)")
+                            .accessibilityAddTraits(selected ? .isSelected : [])
                             .accessibilityLabel(
                                 localized(selected ? "Rút nhựa AMS" : "Nạp nhựa AMS")
                                     + " \(tray.slotID + 1)"

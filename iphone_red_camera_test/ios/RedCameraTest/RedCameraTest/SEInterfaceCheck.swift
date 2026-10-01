@@ -19,6 +19,9 @@ enum SEInterfaceCheck {
     static var showsControlFailure: Bool {
         ProcessInfo.processInfo.arguments.contains("--se-interface-check-control-failure")
     }
+    static var usesFourthAMSTray: Bool {
+        ProcessInfo.processInfo.arguments.contains("--se-interface-check-ams-fourth")
+    }
     static let profile = BambuPrinterProfile(
         profileID: "interface-check-h2d", kind: .h2d,
         ip: "192.0.2.1", serial: "094-INTERFACE-CHECK"
@@ -66,7 +69,7 @@ enum SEInterfaceCheck {
         value.amsDrying = true
         value.amsDryingRemainingMinutes = 420
         value.amsHumidityPercentByUnit = [0: 39]
-        value.currentAMSTrayID = "0-1"
+        value.currentAMSTrayID = usesFourthAMSTray ? "0-3" : "0-1"
         let colors = ["FAFAFA", "087D55", "FD8A33", "F23142"]
         value.amsTrays = colors.enumerated().map { index, color in
             BambuAMSTraySnapshot(
